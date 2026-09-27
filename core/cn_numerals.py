@@ -4,17 +4,25 @@ CN_NUM = {
     '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
     '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
     '百': 100, '千': 1000, '万': 10000, '萬': 10000, '兩': 2,
-    '億': 10**8, '亿': 10**8, '兆': 10**12
+    '億': 10**8, '亿': 10**8, '兆': 10**12,
+    # 大寫數字（「第壹章」）
+    '壹': 1, '貳': 2, '贰': 2, '參': 3, '叁': 3, '肆': 4, '伍': 5, '陸': 6, '陆': 6,
+    '柒': 7, '捌': 8, '玖': 9, '拾': 10, '佰': 100, '仟': 1000,
 }
 
 CN_DIGIT_TRANS = str.maketrans("０１２３４５６７８９點点", "0123456789..")
+# 章號、卷號不會這麼大；更大的是正文裡一長串數字，當成沒有號碼（幾百位的數字轉 float 還會溢位）
+MAX_NUMBER = 10 ** 9
 
 
 def chinese_to_arabic(cn_str: str) -> float:
     if not cn_str: return 0.0
     cn_str = cn_str.translate(CN_DIGIT_TRANS).replace("．", ".")
-    try: return float(cn_str)
-    except ValueError: pass
+    try:
+        value = float(cn_str)
+        return value if value <= MAX_NUMBER else 0.0
+    except ValueError:
+        pass
     if "." in cn_str:
         parts = cn_str.split(".")
         int_part, dec_part = parts[0], parts[1]
@@ -36,7 +44,10 @@ def chinese_to_arabic(cn_str: str) -> float:
             else:
                 pending = pending * 10 + number
         return result + pending
-    val = float(parse_integer(int_part))
+    integer = parse_integer(int_part)
+    if integer > MAX_NUMBER:
+        return 0.0
+    val = float(integer)
     if dec_part:
         # 「三點五」的小數部分仍是中文數字，需逐字轉成阿拉伯數字。
         digits = "".join(

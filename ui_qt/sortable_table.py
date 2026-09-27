@@ -1,4 +1,4 @@
-"""可以點標題列排序的表格（掃描廣告、引號檢查、本文可疑章節共用）。
+"""可以點標題列排序的表格（掃描無關連內容、標點校對、本文可疑章節共用）。
 
 「自訂章節規則」的規則清單刻意不用：那張表的順序就是規則的套用優先順序。
 
@@ -14,7 +14,10 @@
 就會被重新排序一次，逐列填資料會亂掉；而且它只有遞增／遞減兩種狀態。
 """
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from collections import Counter
+
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import QHeaderView, QTableWidget, QTableWidgetItem
 
 INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 100
@@ -23,6 +26,56 @@ _STATE = "_sortState"   # 表格上的 dynamic property：(欄位, 遞增?) 或 
 
 # 信心欄位要照「高 → 中 → 低」排，不是照字碼。
 CONFIDENCE_ORDER = {"高": 0, "中": 1, "低": 2}
+
+# 掃描結果一次最多列出幾筆：十幾萬筆重複段落逐格建表會拖住
+# 介面。超過時只列出前面這些，勾選、全選、刪除／修正都只作用在列出來的項目，
+# 不會動到看不到的；處理完重新掃描就會列出其餘的。
+TABLE_ROW_LIMIT = 2000
+
+
+def carry_over(old_items, new_items, key, old_values: dict) -> dict:
+    """重新掃描後，把舊清單上的勾選（或選取）對到新清單：{舊的索引: 值} → {新的索引: 值}。
+
+    照內容（key）對，一模一樣的內容照「第幾筆」對。同樣內容的筆數變了（有一處被改掉或新增），
+    就分不出誰是誰，那種內容一律不對，交給呼叫端照預設：寧可少勾，也不能勾到使用者沒勾過的地方。"""
+    def occurrences(items):
+        seen = Counter()
+        keys = []
+        for item in items:
+            value = key(item)
+            keys.append((value, seen[value]))
+            seen[value] += 1
+        return keys, seen
+
+    old_keys, old_counts = occurrences(old_items)
+    new_keys, new_counts = occurrences(new_items)
+    by_key = {old_keys[index]: value for index, value in old_values.items()}
+    return {index: by_key[item_key] for index, item_key in enumerate(new_keys)
+            if item_key in by_key and old_counts[item_key[0]] == new_counts[item_key[0]]}
+
+
+def limit_rows(indices, priority=None):
+    """回傳（要列出的索引清單（原本順序）, 全部筆數）。超過 TABLE_ROW_LIMIT 時
+    依 priority(index) 由小到大挑（同分照原本順序）。"""
+    indices = list(indices)
+    total = len(indices)
+    if total <= TABLE_ROW_LIMIT:
+        return indices, total
+    if priority is None:
+        return indices[:TABLE_ROW_LIMIT], total
+    order = {index: position for position, index in enumerate(indices)}
+    chosen = sorted(indices, key=lambda index: (priority(index), order[index]))[:TABLE_ROW_LIMIT]
+    return sorted(chosen, key=order.__getitem__), total
+
+
+class PreviewTable(QTableWidget):
+    """結果表格：點一列時只捲上下、不捲左右。預覽欄很寬時，Qt 預設會把整格捲進畫面，
+    橫向捲軸跟著跳到右邊；使用者自己拉的橫向位置要留著。"""
+
+    def scrollTo(self, index, hint=QTableWidget.ScrollHint.EnsureVisible):
+        x = self.horizontalScrollBar().value()
+        super().scrollTo(index, hint)
+        self.horizontalScrollBar().setValue(x)
 
 
 class SortableItem(QTableWidgetItem):
@@ -82,17 +135,96 @@ class _InitialColumnWidths(QObject):
 
 
 def setup_columns(table: QTableWidget, widths: dict):
-    """每一欄都可以拖拉調整寬度、畫出格線，最後一欄吃掉剩下的空間。
+    """每一欄都可以拖拉調整寬度、畫出格線；最後一欄（通常是內容預覽）至少撐滿表格，
+    內容比表格寬時照內容寬度，下面出現橫向捲軸。
 
-    原本各欄是「照內容」或「平均撐滿」，使用者完全拉不動；長內容的欄位看不完
-    也沒辦法。widths 是各欄的初始寬度（最後一欄不用給）。"""
+    widths 是各欄的初始寬度（最後一欄不用給）。"""
     header = table.horizontalHeader()
     header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    header.setStretchLastSection(True)
+    header.setStretchLastSection(False)
     header.setMinimumSectionSize(MIN_COLUMN_WIDTH)
     table.setShowGrid(True)
     table.setWordWrap(False)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
     table.installEventFilter(_InitialColumnWidths(table, widths))
+    _FitLastColumn(table)
+
+
+class _FitLastColumn(QObject):
+    """最後一欄的寬度＝max(表格剩下的寬度, 內容最長那一格的寬度)。
+    表格內容、表格大小、其他欄寬變了都重算（合併成一次，填表時不會每格算一遍）。"""
+
+    _PADDING = 28          # 儲存格左右 padding＋一點餘裕（改動的字是粗體，會寬一些）
+
+    def __init__(self, table):
+        super().__init__(table)
+        self._table = table
+        self._content_width = 0
+        self._content_dirty = True
+        self._user_width = None          # 使用者自己拉過最後一欄：之後照他拉的寬度（至少撐滿）
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(0)
+        self._timer.timeout.connect(self._apply)
+        model = table.model()
+        for signal in (model.dataChanged, model.rowsInserted, model.rowsRemoved, model.modelReset):
+            signal.connect(self._content_changed)
+        table.horizontalHeader().sectionResized.connect(self._section_resized)
+        table.viewport().installEventFilter(self)
+
+    def _content_changed(self, *_args):
+        self._content_dirty = True
+        self._timer.start()
+
+    def _section_resized(self, column, _old, new):
+        if column == self._table.columnCount() - 1:
+            self._user_width = new
+        else:
+            self._timer.start()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize:
+            self._timer.start()
+        return False
+
+    def _measure(self) -> int:
+        table = self._table
+        column = table.columnCount() - 1
+        font = QFont(table.font())
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        widest = 0
+        for row in range(table.rowCount()):
+            item = table.item(row, column)
+            if item is not None and item.text():
+                widest = max(widest, metrics.horizontalAdvance(item.text()))
+        return widest + self._PADDING if widest else 0
+
+    def _apply(self):
+        table = self._table
+        column = table.columnCount() - 1
+        if column < 0:
+            return
+        if self._content_dirty:
+            self._content_width = self._measure()
+            self._content_dirty = False
+        others = sum(table.columnWidth(index) for index in range(column) if not table.isColumnHidden(index))
+        fill = table.viewport().width() - others
+        wanted = self._user_width if self._user_width is not None else self._content_width
+        width = max(fill, wanted, MIN_COLUMN_WIDTH)
+        # 欄比表格寬時，欄位名稱靠左（置中會跑到要捲動才看得到的地方）
+        header_item = table.horizontalHeaderItem(column)
+        if header_item is not None:
+            header_item.setTextAlignment(
+                (Qt.AlignmentFlag.AlignLeft if width > fill + 1 else Qt.AlignmentFlag.AlignHCenter)
+                | Qt.AlignmentFlag.AlignVCenter)
+        if table.columnWidth(column) != width:
+            table.horizontalHeader().blockSignals(True)
+            table.setColumnWidth(column, width)
+            table.horizontalHeader().blockSignals(False)
+            table.viewport().update()
+            table.horizontalHeader().viewport().update()
 
 
 def enable_sorting(table: QTableWidget, on_sorted=None):
@@ -116,15 +248,6 @@ def enable_sorting(table: QTableWidget, on_sorted=None):
             on_sorted()
 
     header.sectionClicked.connect(on_clicked)
-
-
-def is_sorted(table: QTableWidget) -> bool:
-    return table.property(_STATE) is not None
-
-
-def reset_sort(table: QTableWidget):
-    table.setProperty(_STATE, None)
-    resort(table)
 
 
 def resort(table: QTableWidget):

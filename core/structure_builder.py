@@ -16,7 +16,7 @@ result.tree 畫進真正的目錄元件——這些都牽涉具體的 UI／文�
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .simple_tree import SimpleTree
 from .format_options import FormatOptions
@@ -28,12 +28,13 @@ from .text_format import (
 from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 from .chapter_parse import (
     CN_NUM_FLOAT_PATTERN, INLINE_SPACE_REGEX,
-    parse_lv1, parse_lv2, parse_special, parse_mixed_volume_chapter_header,
+    CN_NUM_PATTERN, parse_lv1, parse_lv2, parse_special, parse_mixed_volume_chapter_header,
     is_weak_numbered_title, is_valid_auto_title, strip_title_body,
-    preserve_title_separator, original_number_text,
+    preserve_title_separator, original_number_text, resolve_chapter_number, heading_word, heading_words, title_length_limit, too_long_for_title,
+    word_key, not_a_heading,
 )
 from .collection import analyze_collection_structure
-from .reflow import collapse_inline_spaces
+from .reflow import collapse_inline_spaces, reflow_lines
 from .user_rules import match_user_chapter_rule
 
 
@@ -119,7 +120,7 @@ def find_merge_subtitle(raw_lines, start_index, total, invalid_tail_regex):
         return "", None
 
     candidate, candidate_marker = strip_persistent_title_marker(raw_candidate.strip())
-    if candidate_marker == "exclude":
+    if candidate_marker:              # [::X] 不是標題；[::]、[::w]、[::t] 是使用者指定的標題，不能被併掉
         return "", None
     cleaned, has_number_prefix = clean_merged_subtitle(candidate)
     if not has_number_prefix and (parse_lv2(candidate) or parse_lv1(candidate) or parse_special(candidate)):
@@ -153,6 +154,21 @@ class BuildContext:
     force_lv2_chapters: set = field(default_factory=set)
     ignored_chapters: set = field(default_factory=set)
     invalid_tail_regex: object = None
+    # 自動補齊卷號（本文沒寫卷標題、從卷結尾行／章號重新起算推出來的卷）。介面上是
+    # 「章節管理」的開關，預設關閉；核心保留預設開啟，方便單獨測試。
+    infer_volumes: bool = True
+    # 自動補齊卷名：補出來的卷如果找得到卷名（例如卷結尾行「第一卷 山路 完」）就一起寫上。
+    infer_volume_names: bool = False
+    # 自動合併下行標題（預覽）：不排版時，只有章號的標題把下一行的章名接上來顯示在目錄上，
+    # 本文不動；記在 StructureResult.merged_titles，按「套用到本文」才寫進去。
+    merge_titles: bool = False
+    # 自動辨識不認的字（「辨識章節」關掉的章節單位、特殊標題），見 chapter_parse.CHAPTER_WORDS 等
+    disabled_words: frozenset = frozenset()
+    # 特殊標題（序章、番外、外傳…）改當成卷（1）或章（2）：只記跟預設不同的，見 chapter_parse.SPECIAL_LEVELS
+    special_levels: dict = field(default_factory=dict)
+    # 自動合併重複標題（預覽）：同一章的標題重複出現、中間不到 DUPLICATE_CONTENT_LIMIT 字（多半是作者的話）
+    # 時，後面那個不算新的一章；記在 StructureResult.absorbed_titles，按「套用到本文」才刪掉那一行。
+    skip_duplicate_titles: bool = False
     tree: SimpleTree = field(default_factory=SimpleTree)
     chapter_raw_map: dict = field(default_factory=dict)
     chapter_index_map: dict = field(default_factory=dict)
@@ -160,7 +176,7 @@ class BuildContext:
     dialogue_depth: int = 0
 
     def match_custom_title(self, text):
-        return match_user_chapter_rule(text, self.user_chapter_rules)
+        return match_user_chapter_rule(text, self.user_chapter_rules, self.invalid_tail_regex)
 
     def format_custom_title(self, extra_prefix, prefix_tag, num_val, unit_tag, body_title,
                              apply_format, number_text=None):
@@ -173,7 +189,15 @@ class BuildContext:
         return result
 
     def find_merge_subtitle(self, start_index, total):
-        return find_merge_subtitle(self.raw_lines, start_index, total, self.invalid_tail_regex)
+        title, row = find_merge_subtitle(self.raw_lines, start_index, total, self.invalid_tail_regex)
+        if row is not None and self._protected_title(row):
+            return "", None
+        return title, row
+
+    def _protected_title(self, row) -> bool:
+        """使用者指定的標題（強制層級、自訂規則）：預覽合併不能把它吃掉。"""
+        return (row in self.force_lv1_chapters or row in self.force_lv2_chapters
+                or self.match_custom_title(strip_persistent_title_marker(self.raw_lines[row].strip())[0]) is not None)
 
 
 @dataclass
@@ -189,6 +213,9 @@ class RenderState:
     collection_active: bool = False
     invalid_tail_regex: object = None
     volume_nodes: dict = field(default_factory=dict)
+    # 從「卷一 卷名 第N章」拆出來的卷：本文還沒有這一行卷標題（套用前只是預覽）
+    split_volumes: set = field(default_factory=set)
+    latest_volume_node: str = None     # 最近一個（最上層的）卷節點：同名卷只跟它合併
     work_nodes: dict = field(default_factory=dict)
     work_volume_nodes: dict = field(default_factory=dict)
     collection_info: dict = field(default_factory=dict)
@@ -202,6 +229,10 @@ class RenderState:
     real_volume_numbers: dict = field(default_factory=dict)
     volume_end_marks: list = field(default_factory=list)
     arabic_volume_numbers: bool = False
+    # 合併下行標題的預覽：標題行號 → (章名所在行號, 接上去的章名)
+    merged_titles: dict = field(default_factory=dict)
+    # 重複標題的預覽：重複那一行的行號 → 保留的標題行號
+    absorbed_titles: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -217,6 +248,104 @@ class StructureResult:
     # 只存在目錄樹裡（不在 chapter_raw_map），值為 {"title", "number", "row"}，
     # row 是卷內第一個項目的原始行號——要寫回本文時卷標題就插在那一行前面。
     virtual_volumes: dict = field(default_factory=dict)
+    # 從每章標題前面拆出來、本文還沒有卷標題的卷（跟推定卷一樣是預覽）
+    split_volumes: set = field(default_factory=set)
+    # 合併下行標題的預覽（只在不排版、開著 merge_titles 時有）：標題行號 → (章名所在行號, 章名)
+    merged_titles: dict = field(default_factory=dict)
+    # 重複標題的預覽：重複那一行的行號 → 保留的標題行號
+    absorbed_titles: dict = field(default_factory=dict)
+
+
+DUPLICATE_CONTENT_LIMIT = 100
+
+
+def _same_title_body(first: str, second: str) -> bool:
+    """章名一樣（不看空白、標點），或其中一個只有章號，才算同一章重複；
+    「乙（上）」「乙（下）」這種分上下的不算。"""
+    first, second = (re.sub(r"[\s\W_]+", "", body or "") for body in (first, second))
+    return not first or not second or first == second
+
+
+def _find_duplicate_heading(ctx: BuildContext, start: int, identity, body: str):
+    """從 start 往下找：同一章的標題又出現一次、中間的正文不到 DUPLICATE_CONTENT_LIMIT 字，回傳那一行。
+    中間遇到別的標題、或正文夠多了，就不是重複。"""
+    from .word_count import char_count
+    content = 0
+    for row in range(start, min(len(ctx.raw_lines), start + 40)):
+        text, marker = strip_persistent_title_marker(ctx.raw_lines[row].strip())
+        if not text:
+            continue
+        if marker == 'exclude':
+            content += char_count(text)
+            continue
+        if marker or ctx._protected_title(row) or parse_lv1(text) or parse_special(text):
+            return None               # 中間隔著卷、特殊標題或使用者指定的標題：不是同一段
+        parsed = parse_lv2(text)
+        if parsed and not is_weak_numbered_title(text):
+            return row if _same_chapter_identity(parsed, *identity) and _same_title_body(parsed[5], body) else None
+        content += char_count(text)
+        if content >= DUPLICATE_CONTENT_LIMIT:
+            return None
+    return None
+
+
+_PERIOD_TAIL = re.compile(r"[。.．]\s*$")
+_SENTENCE_MARK = re.compile(r"[。！？!?；;]")
+_FIRST_HEAD = re.compile(r"^\s*第\s*[1１一]\s*[章回節节][ 　:：\-—·、]")
+
+
+def _period_title_fits(state, line_str: str) -> bool:
+    """句號結尾的「第N章 章名。」：句號結尾一般會擋（正文句子），但章號剛好接上一章（或是第 1 章，
+    每卷重新數）、章名很短、中間沒有別的句子標點時，是作者習慣在章名後面加句號，照樣算一章。"""
+    # 每一行都會問：先用最便宜的看（開頭附近有「第」、最後是句號），正文行在這裡就結束
+    if "第" not in line_str[:4] or not _PERIOD_TAIL.search(line_str[-4:])             or too_long_for_title(line_str, title_length_limit(state.invalid_tail_regex)):
+        return False
+    parsed = parse_lv2(line_str)
+    if not parsed or parsed[2] != "第" or not parsed[3] or is_weak_numbered_title(line_str):
+        return False
+    title = parsed[5].rstrip(" 　。.．")
+    if len(title) > 20 or _SENTENCE_MARK.search(title):
+        return False
+    number, last = parsed[3], state.last_chapter_number
+    if last is not None and number == last + 1:
+        return True
+    # 每卷重新數的第 1 章沒有上一章可以對：再嚴一點，章號後面要有分隔、章名裡沒有逗號
+    return number == 1 and bool(_FIRST_HEAD.match(line_str)) and not re.search(r"[，,]", title)
+
+
+_END_NOTE = re.compile(r"[（(【\[]?\s*本?[部卷篇集章回節节折幕]\s*完本?\s*[）)】\]]?\s*$")
+
+
+def _chapter_with_end_note(line_str: str) -> bool:
+    """「第12章 過河（本卷完）」：章名後面註明這一卷完了，還是一章（不是單獨的卷尾那一行）。"""
+    parsed = parse_lv2(line_str)
+    if not parsed or parsed[2] != "第":
+        return False
+    title = _END_NOTE.sub("", parsed[5]).strip(" 　:：-—·")
+    return len(title) >= 2 and title not in ("完結", "完结", "結束", "结束")
+
+
+def _repeats_previous_heading(ctx: BuildContext, idx: int, line_str: str, title_check) -> bool:
+    """超過標題長度、靠「長的正式章名」才算標題的行，開頭就是上一行的標題（「第5章 出發」下一行又是
+    「第5章 出發“……”」）：是標題重複一次再接正文，不是另一章。"""
+    if not too_long_for_title(line_str, title_length_limit(title_check)):
+        return False
+    previous = idx - 1
+    while previous >= 0 and not ctx.raw_lines[previous].strip():
+        previous -= 1
+    if previous < 0:
+        return False
+    heading = re.sub(r"\s+", "", ctx.raw_lines[previous])
+    return heading.startswith("第") and re.sub(r"\s+", "", line_str).startswith(heading)
+
+
+def _mixed_header_allowed(ctx: BuildContext, mixed: dict, title_check) -> bool:
+    """卷章同一行是自動辨識：卷、章的單位都沒被關掉，卷名、章名也各自不超過標題長度。"""
+    if ctx.disabled_words and {word_key(mixed["volume_unit"]), word_key(mixed["chapter_unit"])} & ctx.disabled_words:
+        return False
+    limit = title_length_limit(title_check)
+    return (not too_long_for_title(mixed.get("volume_body", ""), limit)
+            and not too_long_for_title(mixed.get("chapter_body", ""), limit))
 
 
 def build_chapter_records(ctx: BuildContext, collection_info):
@@ -227,7 +356,7 @@ def build_chapter_records(ctx: BuildContext, collection_info):
         stored = ctx.auto_titles.get(row)
         combined = collection_info["combined"].get(row)
         source = combined["remainder"] if combined else text
-        mixed = parse_mixed_volume_chapter_header(source)
+        mixed = parse_mixed_volume_chapter_header(source, _split_short_volumes(ctx))
         custom = ctx.match_custom_title(source)
         chapter = parse_lv2(source)
         volume = parse_lv1(source)
@@ -246,7 +375,7 @@ def build_chapter_records(ctx: BuildContext, collection_info):
             kind = "volume"
         else:
             kind = "chapter"
-        number, prefix = 0, ""
+        number, prefix, number_text, unit = 0, "", None, ""
         if kind == "chapter":
             if custom:
                 number = custom["number"]
@@ -254,15 +383,31 @@ def build_chapter_records(ctx: BuildContext, collection_info):
             elif mixed:
                 number, prefix = mixed["chapter_number"], "第"
             elif chapter:
-                number, prefix = chapter[3], chapter[2]
+                number, prefix, unit = chapter[3], chapter[2], chapter[4]
+                number_text = original_number_text(source, chapter[4])
             elif stored:
                 number, prefix = stored.get("number", 0), stored.get("prefix", "")
             if chapter and chapter[2] == "番外":
                 prefix = "番外"
         source_kind = ("manual" if marker == "include" or row in ctx.force_lv1_chapters
                        or row in ctx.force_lv2_chapters else "rule" if custom else "auto")
-        ctx.chapter_records[node] = {"title": title, "kind": kind,
-                                      "number": number, "prefix": prefix, "source": source_kind}
+        ctx.chapter_records[node] = {"title": title, "kind": kind, "number": number, "prefix": prefix,
+                                      "source": source_kind, "number_text": number_text, "unit": unit}
+    _resolve_record_numbers(ctx)
+
+
+def _resolve_record_numbers(ctx: BuildContext):
+    """章號有兩種讀法的（一一零一＝1101 或 111），照同一層前一章選接得上的；缺章檢查、
+    連續編號看的都是這裡的章號。"""
+    previous = {}
+    for node in sorted(ctx.chapter_records, key=ctx.chapter_raw_map.get):
+        record = ctx.chapter_records[node]
+        if record["kind"] != "chapter" or not record["number"]:
+            continue
+        parent = ctx.tree.parent(node)
+        if record["prefix"] == "第":
+            record["number"] = resolve_chapter_number(record["number"], record["number_text"], previous.get(parent))
+        previous[parent] = record["number"]
 
 
 def record_title(ctx: BuildContext, state: RenderState, item_id, title_text, processed_render_lines,
@@ -380,10 +525,15 @@ def render_mixed_title(ctx: BuildContext, state: RenderState, apply_format, mixe
     volume_key = (mixed_data['volume_unit'], mixed_data['volume_number'],
                   re.sub(r'\s+', '', mixed_data['volume_body']))
     if state.opts.keep_number:
-        volume_tag = f"第{mixed_data['volume_number_text']}{mixed_data['volume_unit']}"
+        volume_tag = mixed_data['volume_raw']
+        if apply_format and not volume_tag.startswith('第'):
+            # 拆出來的「卷一」寫成「第一卷」（數字照原文）：單獨一行的「卷一」預設不算卷，
+            # 排版後重新辨識會認不出來（跟「套用到本文」同一種寫法）。
+            volume_tag = f"第{volume_tag[1:].strip()}{mixed_data['volume_unit']}"
     else:
         volume_tag = ctx.format_custom_title('', '第', mixed_data['volume_number'],
                                               mixed_data['volume_unit'], '', apply_format)
+    volume_tag += mixed_data.get('volume_note', '')
     volume_title = f"{volume_tag} {mixed_data['volume_body']}".strip()
     chapter_body = mixed_data['chapter_body']
     chosen_raw_idx = title_raw_idx
@@ -401,19 +551,31 @@ def render_mixed_title(ctx: BuildContext, state: RenderState, apply_format, mixe
             and next_data[4] == mixed_data['chapter_unit']
             and next_data[2] == '第')
         if next_marker != 'exclude' and next_data and (not is_weak_numbered_title(next_clean)) and same_chapter:
-            chapter_body = next_data[5].strip()
+            # 下一行只有章號（「第十章」）時，章名還是用這一行的，不然章名整個不見
+            chapter_body = next_data[5].strip() or chapter_body
             chosen_raw_idx = peek
             consume_end = peek + 1
+    if not chapter_body and consume_end == state.idx + 1 and _merging(ctx, state, apply_format):
+        merged_title, merged_index = ctx.find_merge_subtitle(state.idx, state.total)
+        if merged_title:
+            chapter_body = merged_title
+            _note_merge(state, apply_format, title_raw_idx, merged_index, merged_title)
+            consume_end = merged_index + 1
     if state.opts.keep_number:
         chapter_tag = f"第{mixed_data['chapter_number_text']}{mixed_data['chapter_unit']}"
     else:
         chapter_tag = ctx.format_custom_title('', '第', mixed_data['chapter_number'],
                                                mixed_data['chapter_unit'], '', apply_format)
     chapter_title = f'{chapter_tag} {chapter_body}'.strip()
-    volume_is_new = volume_key not in state.volume_nodes
+    # 同一卷的混合表頭每章都會出現一次，要併在同一個卷底下；但中間隔了別的卷之後
+    # 又出現同名的卷（轉貼時重複貼了卷名），就不能併回前面那一卷，不然後面的章節
+    # 會跑到中間那一卷的前面，目錄順序整個亂掉。
+    volume_is_new = state.volume_nodes.get(volume_key) != state.latest_volume_node or volume_key not in state.volume_nodes
     if volume_is_new:
         state.current_lv1_node = ctx.tree.insert('', 'end', text=volume_title)
         state.volume_nodes[volume_key] = state.current_lv1_node
+        if not mixed_data['volume_raw'].startswith('第'):
+            state.split_volumes.add(state.current_lv1_node)
         if apply_format:
             record_title(ctx, state, state.current_lv1_node, volume_title, state.processed_render_lines,
                           True, title_raw_idx, manual_marked)
@@ -421,6 +583,7 @@ def render_mixed_title(ctx: BuildContext, state: RenderState, apply_format, mixe
             ctx.chapter_raw_map[state.current_lv1_node] = title_raw_idx
     else:
         state.current_lv1_node = state.volume_nodes[volume_key]
+    state.latest_volume_node = state.current_lv1_node
     _note_volume(state, state.current_lv1_node, mixed_data['volume_number'], mixed_data['volume_number_text'])
     state.last_chapter_number = mixed_data['chapter_number']
     chapter_node = ctx.tree.insert(state.current_lv1_node, 'end', text=chapter_title)
@@ -454,18 +617,19 @@ def render_volume_title(ctx: BuildContext, state: RenderState, apply_format, cus
     else:
         arc, p_fix, v_num, v_unit, v_body = ('', '', 0, '', line_str)
     merged = False
-    if not v_body and apply_format and state.opts.merge_title:
+    if not v_body and _merging(ctx, state, apply_format):
         merged_title, merged_index = ctx.find_merge_subtitle(state.idx, state.total)
         if merged_title:
             v_body = merged_title
             merged = True
+            _note_merge(state, apply_format, title_raw_idx, merged_index, merged_title)
             state.idx = merged_index
     extra_prefix = f'{arc} ' if arc else ''
     if apply_format and (merged or not state.opts.keep_number or not state.opts.keep_separator):
         title = ctx.format_custom_title(extra_prefix, p_fix, v_num, v_unit, v_body, apply_format,
                                          original_number_text(line_str, v_unit))
     else:
-        title = line_str
+        title = f'{line_str} {v_body}' if merged else line_str
     state.last_found_vol = ctx.format_custom_title(extra_prefix, p_fix, v_num, v_unit, '', apply_format).strip()
     if state.collection_active and state.current_work_node and (not arc):
         volume_key = (state.current_work_name, re.sub(r'\s+', '', title))
@@ -480,7 +644,9 @@ def render_volume_title(ctx: BuildContext, state: RenderState, apply_format, cus
                           apply_format, title_raw_idx, manual_marked)
     else:
         volume_key = (v_unit, v_num, re.sub(r'\s+', '', v_body))
-        if v_num and volume_key in state.volume_nodes and (not forced_level):
+        # 只跟上一個卷合併（同上：隔了別的卷又重複出現的卷名另外算一卷）
+        if (v_num and volume_key in state.volume_nodes and (not forced_level)
+                and state.volume_nodes[volume_key] == state.latest_volume_node):
             state.current_lv1_node = state.volume_nodes[volume_key]
             if not apply_format:
                 state.processed_render_lines.append(raw_line)
@@ -490,9 +656,17 @@ def render_volume_title(ctx: BuildContext, state: RenderState, apply_format, cus
                 state.volume_nodes[volume_key] = state.current_lv1_node
             record_title(ctx, state, state.current_lv1_node, title, state.processed_render_lines,
                           apply_format, title_raw_idx, manual_marked)
+        state.latest_volume_node = state.current_lv1_node
         _note_volume(state, state.current_lv1_node, v_num,
                      original_number_text(line_str, v_unit) if v_unit else '')
     state.idx += 1
+
+
+def _same_chapter_identity(parsed, arc, vol, prefix, number, unit) -> bool:
+    """parse_lv2 的結果跟目前這一章是不是「同一章」：篇名、卷名、前綴、編號、單位全部一致。"""
+    p_arc, p_vol, p_prefix, p_num, p_unit = parsed[:5]
+    return ((p_arc or "").strip(), (p_vol or "").strip(), p_prefix, p_num, p_unit) == \
+        ((arc or "").strip(), (vol or "").strip(), prefix, number, unit)
 
 
 def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, custom_title, forced_level,
@@ -511,11 +685,12 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
         arc, vol, ch_prefix, ch_num, ch_unit, ch_body = ('', '', '', 0.0, '', line_str)
     ch_body = strip_title_body(ch_body)
     merged = False
-    if not ch_body and apply_format and state.opts.merge_title:
+    if not ch_body and _merging(ctx, state, apply_format):
         merged_title, merged_index = ctx.find_merge_subtitle(state.idx, state.total)
         if merged_title:
             ch_body = merged_title
             merged = True
+            _note_merge(state, apply_format, title_raw_idx, merged_index, merged_title)
             state.idx = merged_index
     is_phantom = False
     # 幽靈標題＝同一個標題被拆成兩行（例如「第1章」單獨一行、下一行才是
@@ -524,9 +699,7 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
     #   1. 本行沒有被人工收錄（[::] 是使用者明確表達「這是章節」）
     #   2. 下一個標題的「編號」與本行相同——真正被拆行的標題編號會一致，
     #      而「第1章／第2章」這種相鄰空章編號不同，應予保留。
-    # 「下一行是卷或特殊標題就刪掉空章」曾經也算幽靈，但那會把合法的空章
-    #  整個刪掉（例如「第1章」後面就接「第二卷」），標題與正文一起消失，
-    #  使用者事後完全看不出少了什麼，所以不再這樣判斷。
+    # 下一行是卷或特殊標題不算幽靈：「第1章」後面直接接「第二卷」是合法的空章，刪掉會連正文一起消失。
     if not ch_body and not manual_marked:
         peek = state.idx + 1
         while peek < state.total:
@@ -538,7 +711,7 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
             if next_marker != 'exclude' and is_valid_auto_title(next_clean, state.invalid_tail_regex):
                 next_lv2 = parse_lv2(next_clean)
                 if next_lv2 and not is_weak_numbered_title(next_clean):
-                    if next_lv2[3] == ch_num and next_lv2[4] == ch_unit:
+                    if _same_chapter_identity(next_lv2, arc, vol, ch_prefix, ch_num, ch_unit):
                         is_phantom = True
             break
     if is_phantom:
@@ -550,14 +723,17 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
         if not nxt:
             peek += 1
             continue
-        if nxt_marker != 'exclude' and is_valid_auto_title(nxt, state.invalid_tail_regex):
+        if not nxt_marker and is_valid_auto_title(nxt, state.invalid_tail_regex) \
+                and not ctx._protected_title(peek):
             p_data = parse_lv2(nxt)
             if p_data and (not is_weak_numbered_title(nxt)):
-                p_arc, p_vol, p_prefix, p_num, p_unit, p_body = p_data
+                p_body = p_data[5]
                 # 只比數字不足以證明是同一章：「第1章 開始」與「第1節 插曲」
-                # 是兩個不同的標題。單位與前綴也必須一致才算重複。
-                if (p_num == ch_num and ch_num > 0
-                        and p_unit == ch_unit and p_prefix == ch_prefix):
+                # 是兩個不同的標題；「甲篇 第1章」與「乙篇 第1章」也是。
+                # 單位、前綴、篇名、卷名都一致，而且章名一樣（或其中一個只有章號）才算重複；
+                # 「第12章 風起」「第12章 雲湧」多半是作者編號打錯，兩章都留著，交給「合併重複章節」勾選。
+                if ch_num > 0 and _same_chapter_identity(p_data, arc, vol, ch_prefix, ch_num, ch_unit) \
+                        and _same_title_body(ch_body, strip_title_body(p_body)):
                     dup_cands.append((nxt, p_body, peek))
                     peek += 1
                     continue
@@ -578,11 +754,17 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
         extra_prefix += arc.strip() + ' '
     if vol:
         extra_prefix += vol.strip() + ' '
+    if ctx.skip_duplicate_titles and not apply_format and ch_num:
+        duplicate = _find_duplicate_heading(ctx, state.idx, (arc, vol, ch_prefix, ch_num, ch_unit), ch_body)
+        if duplicate is not None:
+            state.absorbed_titles[duplicate] = chosen_raw_idx
+    if ch_num and ch_prefix == '第':
+        ch_num = resolve_chapter_number(ch_num, original_number_text(chosen_raw, ch_unit), state.last_chapter_number)
     if apply_format and (merged or not state.opts.keep_number or not state.opts.keep_separator):
         chosen_title = ctx.format_custom_title(extra_prefix, ch_prefix, ch_num, ch_unit, ch_body,
                                                 apply_format, original_number_text(chosen_raw, ch_unit))
     else:
-        chosen_title = chosen_raw
+        chosen_title = f'{chosen_raw} {ch_body}' if merged else chosen_raw
     if ch_prefix != '番外':
         # 「第0章」的 0 會被當成「沒有編號」，最新章變成「第章」。只有這種
         # 情況才把原始編號文字傳進去，其餘維持原本的阿拉伯數字寫法（最新章
@@ -604,14 +786,13 @@ def render_special_title(ctx: BuildContext, state: RenderState, apply_format, m_
     arc, vol, spec_tag, spec_body = m_spec
     spec_body = re.sub(r'^[\s，,、:：\-—]+', '', spec_body).strip()
     spec_body = strip_title_body(spec_body)
-    if not spec_body and apply_format and state.opts.merge_title:
+    if not spec_body and _merging(ctx, state, apply_format):
         merged_title, merged_index = ctx.find_merge_subtitle(state.idx, state.total)
         if merged_title:
             spec_body = merged_title
+            _note_merge(state, apply_format, title_raw_idx, merged_index, merged_title)
             state.idx = merged_index
-    # 沒有標題文字的序章／楔子照樣是一個章節：舊版只要下一行是任何標題就把
-    # 它當成「被拆行的標題」刪掉，結果「序章」接「第1章 開始」時，序章連同
-    # 這個位置一起從目錄消失。拆行的情況由上面的 merge_title 處理就夠了。
+    # 沒有標題文字的序章／楔子照樣是一個章節（後面接「第1章」也不刪）；拆行的情況由合併下行標題處理。
     extra_prefix = ''
     if arc:
         extra_prefix += arc.strip() + ' '
@@ -624,11 +805,25 @@ def render_special_title(ctx: BuildContext, state: RenderState, apply_format, m_
     if state.collection_active and state.current_work_node:
         special_parent = state.current_lv1_node or state.current_work_node
     else:
-        special_parent = ''
+        # 卷裡面的特殊標題（書中間的「简介：……」、卷末的後記）掛在那一卷底下，目錄才照閱讀順序；
+        # 卷之前的（內容簡介、序章）放最上層。
+        special_parent = state.current_lv1_node or ''
     item_id = ctx.tree.insert(special_parent, 'end', text=title)
     record_title(ctx, state, item_id, title, state.processed_render_lines, apply_format, title_raw_idx,
                  manual_marked)
     state.idx += 1
+
+
+def _merging(ctx: BuildContext, state: RenderState, apply_format) -> bool:
+    """只有章號的標題要不要把下一行的章名接上來：排版時看排版選項，
+    不排版（重建目錄）時看「自動合併下行標題」的預覽開關。"""
+    return state.opts.merge_title if apply_format else ctx.merge_titles
+
+
+def _note_merge(state: RenderState, apply_format, title_row, subtitle_row, subtitle):
+    """預覽模式記下合併了哪兩行：本文顯示預覽、「套用到本文」都靠這份資料。"""
+    if not apply_format:
+        state.merged_titles[title_row] = (subtitle_row, subtitle)
 
 
 def _note_volume(state: RenderState, node, number, number_text):
@@ -653,11 +848,57 @@ def _is_end_line(state: RenderState, end_mark) -> bool:
 def _close_volume(state: RenderState, row, end_mark, line_str):
     """卷結尾行：目前這一卷到此為止，後面的章節不再掛在它底下。"""
     number = end_mark['number'] if end_mark['number'] is not None else state.current_volume_number
-    state.volume_end_marks.append((row, number, end_mark['unit']))
+    state.volume_end_marks.append((row, number, end_mark['unit'], end_mark.get('name') or ''))
     if re.search(r'[0-9０-９]', line_str):
         state.arabic_volume_numbers = True
     state.current_lv1_node = ''
     state.current_volume_number = None
+
+
+def _split_short_volumes(ctx: BuildContext) -> bool:
+    """「卷一 卷名 第N章」拆成卷＋章：自動補齊卷號與卷名都開著才拆。"""
+    return ctx.infer_volumes and ctx.infer_volume_names
+
+
+# 章節標題前面帶著的卷號（「卷一 山路 第一章 出發」的「卷一」、「第二卷 城裡 第3章」的「第二卷」）
+_PREFIX_VOLUME = re.compile(r"^(?:第\s*(?P<n1>" + CN_NUM_PATTERN + r")\s*(?P<u1>[部卷篇集])"
+                            r"|(?P<u2>[部卷篇])\s*(?P<n2>" + CN_NUM_PATTERN + r"))(?=[\s（(]|$)")
+
+
+def _prefix_volume_groups(ctx: BuildContext, state: RenderState) -> dict:
+    """自動補齊卷號：每章標題前面都帶著卷號、本文卻沒有另外寫卷標題時，
+    照前綴的卷號把相鄰的章節分成一卷一卷（卷名要開「自動補齊卷名」才會拆出來）。"""
+    tree, raw_map = ctx.tree, ctx.chapter_raw_map
+    top = list(tree.get_children(''))
+    numbers = {}
+    for node in top:
+        if node not in raw_map or tree.get_children(node):
+            continue
+        parsed = parse_lv2(strip_persistent_title_marker(ctx.raw_lines[raw_map[node]].strip())[0])
+        match = _PREFIX_VOLUME.match((parsed[0] or '').strip()) if parsed else None
+        if match:
+            value = chinese_to_arabic(match.group("n1") or match.group("n2"))
+            if value and float(value).is_integer():
+                numbers[node] = (int(value), match.group("u1") or match.group("u2"))
+    if len(numbers) < 2:
+        return {}
+    arabic = (state.opts.num_style == '阿拉伯數字'
+              or (state.opts.num_style != '中文數字' and state.arabic_volume_numbers))
+    virtual, current, current_node = {}, None, None
+    for node in top:
+        key = numbers.get(node)
+        if key is None:
+            # 前綴中斷（序章、後記、沒帶卷號的章）：不屬於任何一卷
+            current = current_node = None
+            continue
+        if key != current:
+            number, unit = key
+            title = f"第{number if arabic else arabic_to_chinese(number)}{unit}"
+            current_node = tree.insert('', 'end', text=title)
+            virtual[current_node] = {'title': title, 'number': number, 'row': raw_map[node], 'unit': unit}
+            current = key
+        tree.reparent(node, current_node)
+    return virtual
 
 
 def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
@@ -671,7 +912,15 @@ def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
     同一段內章號又從第1章起算，代表中間換了卷，再往前（或往後）切開一卷。
     完全沒有卷標題也沒有卷結尾行的文件，不推定任何卷。
     """
-    if state.collection_active or not (state.real_volume_numbers or state.volume_end_marks):
+    if not ctx.infer_volumes or state.collection_active:
+        return {}
+    if not state.real_volume_numbers:
+        # 每章前面都帶著卷號的寫法：照前綴分卷（比從卷結尾行、章號重算推測可靠）
+        grouped = _prefix_volume_groups(ctx, state)
+        if grouped:
+            _finish_virtual_volumes(ctx, state, grouped, next(iter(grouped.values()))['unit'])
+            return grouped
+    if not (state.real_volume_numbers or state.volume_end_marks):
         return {}
     tree = ctx.tree
     real = state.real_volume_numbers
@@ -691,7 +940,8 @@ def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
             events.extend((raw_map.get(child, 0), 1, 'item', child) for child in tree.get_children(node))
         elif node in raw_map:
             events.append((raw_map[node], 1, 'item', node))
-    events.extend((row, 0, 'end', number) for row, number, _unit in state.volume_end_marks)
+    events.extend((row, 0, 'end', number) for row, number, _unit, _name in state.volume_end_marks)
+    end_names = {number: name for _row, number, _unit, name in state.volume_end_marks if number and name}
     events.sort(key=lambda event: (event[0], event[1]))
 
     blocks = []
@@ -731,6 +981,8 @@ def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
 
     def assign(seg, number):
         title = f"第{number if arabic else arabic_to_chinese(number)}{unit}"
+        if ctx.infer_volume_names and end_names.get(number):
+            title += f" {end_names[number]}"
         node = tree.insert('', 'end', text=title)
         for child in seg:
             tree.reparent(child, node)
@@ -772,18 +1024,64 @@ def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
                 continue
             assign(seg, number)
 
-    if virtual:
-        order = dict(raw_map)
-        order.update((node, info['row']) for node, info in virtual.items())
-        tree.sort_children('', key=lambda node: order.get(node, 0))
-        # 最後一個正式章節落在推定卷裡，檔名的「最新卷」就是這一卷。
-        last_chapter = max((node for node in raw_map if formal_number(node) is not None),
-                           key=lambda node: raw_map[node], default=None)
-        if last_chapter is not None and tree.parent(last_chapter) in virtual:
-            # 跟真正卷標題的「最新卷」同一種寫法（format_custom_title），檔名才一致。
-            number = virtual[tree.parent(last_chapter)]['number']
-            state.last_found_vol = ctx.format_custom_title('', '第', number, unit, '', False)
+    _finish_virtual_volumes(ctx, state, virtual, unit)
     return virtual
+
+
+def _finish_virtual_volumes(ctx: BuildContext, state: RenderState, virtual: dict, unit: str):
+    """推定卷建好之後：最上層照本文順序排好，最後一章落在推定卷裡時更新「最新卷」。"""
+    if not virtual:
+        return
+    tree, raw_map = ctx.tree, ctx.chapter_raw_map
+
+    def formal_number(node):
+        record = ctx.chapter_records.get(node)
+        if not record or record['kind'] != 'chapter' or record['prefix'] == '番外':
+            return None
+        number = record['number']
+        return int(number) if number and number > 0 and float(number).is_integer() else None
+
+    order = dict(raw_map)
+    order.update((node, info['row']) for node, info in virtual.items())
+    tree.sort_children('', key=lambda node: order.get(node, 0))
+    # 最後一個正式章節落在推定卷裡，檔名的「最新卷」就是這一卷。
+    last_chapter = max((node for node in raw_map if formal_number(node) is not None),
+                       key=lambda node: raw_map[node], default=None)
+    if last_chapter is not None and tree.parent(last_chapter) in virtual:
+        # 跟真正卷標題的「最新卷」同一種寫法（format_custom_title），檔名才一致。
+        number = virtual[tree.parent(last_chapter)]['number']
+        state.last_found_vol = ctx.format_custom_title('', '第', number, unit, '', False)
+
+
+def _build_with_reflow(ctx: BuildContext, write_text: bool) -> StructureResult:
+    """排版選項「整理段落換行」：先認出章節標題，把標題之間正文的硬換行接回去，再照常排版。
+
+    回傳結果的 chapter_raw_map 換算回「整理前」的行號，呼叫端（整份排版、只排選取章節）
+    拿來對照舊行號的方式不用改。"""
+    plain = replace(ctx.options, reflow_paragraphs=False)
+    probe = build_document_structure(replace(ctx, options=plain), apply_format=False, write_text=False)
+    protected = (set(probe.chapter_raw_map.values()) | set(ctx.ignored_chapters) | set(ctx.force_lv1_chapters)
+                 | set(ctx.force_lv2_chapters) | set(ctx.auto_titles))
+    new_lines, row_map = reflow_lines(ctx.raw_lines, protected)
+
+    def moved(rows):
+        return {row_map[row] for row in rows if row in row_map}
+
+    target = replace(
+        ctx, raw_lines=new_lines, options=plain,
+        auto_titles={row_map[row]: record for row, record in ctx.auto_titles.items() if row in row_map},
+        force_lv1_chapters=moved(ctx.force_lv1_chapters), force_lv2_chapters=moved(ctx.force_lv2_chapters),
+        ignored_chapters=moved(ctx.ignored_chapters))
+    result = build_document_structure(target, apply_format=True, write_text=write_text)
+    # 新行號 → 整理前的行號（接起來的幾行取第一行）。只換算原本就認得的標題不夠：
+    # 接回去之後才認出來的標題也要換回舊行號，不然 chapter_raw_map 會新舊行號混在一起。
+    original = {}
+    for row in sorted(row_map):
+        original.setdefault(row_map[row], row)
+    result.chapter_raw_map = {node: original.get(row, row) for node, row in result.chapter_raw_map.items()}
+    ctx.tree, ctx.chapter_raw_map = target.tree, result.chapter_raw_map
+    ctx.chapter_index_map, ctx.chapter_records = target.chapter_index_map, target.chapter_records
+    return result
 
 
 def build_document_structure(ctx: BuildContext, apply_format: bool = False,
@@ -797,6 +1095,8 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
     重新以 apply_format=True、write_text=True 呼叫一次，那一輪算出的位置
     才是實際輸出後的正確位置。
     """
+    if apply_format and ctx.options.reflow_paragraphs:
+        return _build_with_reflow(ctx, write_text)
     state = RenderState()
     ctx.dialogue_depth = 0
     ctx.tree = SimpleTree()
@@ -812,7 +1112,12 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
     if opts.structure != '單本小說':
         for row, record in ctx.auto_titles.items():
             if record.get('kind') == 'work':
-                state.collection_info['work_lines'][row] = record['title']
+                # 作品名稱照本文目前這一行：繁簡轉換、手動改過作品名之後，舊的記錄只說明
+                # 「這一行是作品」，名稱不能拿舊的蓋回去（ChatGPT 測試 R09）。
+                current = ''
+                if 0 <= row < len(ctx.raw_lines):
+                    current = strip_persistent_title_marker(ctx.raw_lines[row].strip())[0]
+                state.collection_info['work_lines'][row] = current or record['title']
                 state.collection_info['active'] = True
     state.collection_active = state.collection_info['active']
     state.collection_combined = state.collection_info['combined']
@@ -827,7 +1132,8 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
         line_str, persistent_marker = strip_persistent_title_marker(raw_line.strip())
         manual_marked = persistent_marker == 'include' and bool(line_str)
         excluded_marked = persistent_marker == 'exclude'
-        mixed_data = None if excluded_marked else parse_mixed_volume_chapter_header(line_str)
+        mixed_data = (None if excluded_marked
+                      else parse_mixed_volume_chapter_header(line_str, _split_short_volumes(ctx)))
         collection_record = state.collection_combined.get(state.idx) if not excluded_marked else None
         collection_work_name = state.collection_work_lines.get(state.idx) if not excluded_marked else None
         custom_title = None if excluded_marked else ctx.match_custom_title(line_str)
@@ -837,7 +1143,26 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
         forced_level = 1 if state.idx in ctx.force_lv1_chapters else 2 if state.idx in ctx.force_lv2_chapters else 0
         if forced_level:
             mixed_data = collection_record = collection_work_name = None
-        is_title = not excluded_marked and (manual_marked or forced_level or stored_title or (mixed_data is not None) or (collection_record is not None) or (collection_work_name is not None) or (custom_title is not None) or is_valid_auto_title(line_str, state.invalid_tail_regex))
+        if mixed_data is not None and not (manual_marked or custom_title or stored_title) \
+                and not _mixed_header_allowed(ctx, mixed_data, state.invalid_tail_regex):
+            mixed_data = None
+        auto_title = is_valid_auto_title(line_str, state.invalid_tail_regex)
+        if auto_title and _repeats_previous_heading(ctx, state.idx, line_str, state.invalid_tail_regex):
+            auto_title = False
+        if not auto_title and mixed_data is None and _period_title_fits(state, line_str):
+            auto_title = True
+        if auto_title and ctx.disabled_words and heading_words(line_str) & ctx.disabled_words:
+            auto_title = False
+        if (auto_title or mixed_data is not None) and not_a_heading(line_str):
+            auto_title = False
+            mixed_data = None
+        special_level = 0
+        if ctx.special_levels and (auto_title or manual_marked) and not (custom_title or stored_title or forced_level
+                                                                          or mixed_data is not None):
+            special_level = ctx.special_levels.get(heading_word(line_str), 0)
+        is_title = not excluded_marked and (manual_marked or forced_level or stored_title or (mixed_data is not None) or (collection_record is not None) or (collection_work_name is not None) or (custom_title is not None) or auto_title)
+        if state.idx in state.absorbed_titles and not (manual_marked or forced_level):
+            is_title = False
         end_mark = None
         if line_str and len(line_str) <= 40 and not (manual_marked or forced_level or custom_title):
             end_mark = parse_end_mark(line_str)
@@ -846,7 +1171,8 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
                 is_title = False
                 if end_mark['level'] == 'volume' and not state.collection_active:
                     _close_volume(state, title_raw_idx, end_mark, line_str)
-        elif is_title and (not (manual_marked or forced_level or custom_title)) and END_MARK_REGEX.search(line_str):
+        elif is_title and (not (manual_marked or forced_level or custom_title)) and END_MARK_REGEX.search(line_str) \
+                and not _chapter_with_end_note(line_str):
             is_title = False
         if is_title and title_raw_idx in ctx.ignored_chapters:
             is_title = False
@@ -898,6 +1224,9 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
             elif stored_title:
                 is_lv1 = stored_title['kind'] == 'volume'
                 is_lv2 = not is_lv1
+            elif special_level:
+                is_lv1 = special_level == 1
+                is_lv2 = special_level == 2
             elif m_lv1:
                 is_lv1 = True
             elif m_lv2 and (manual_marked or not is_weak_numbered_title(line_str)):
@@ -955,4 +1284,7 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
         last_found_vol=state.last_found_vol,
         last_found_ch=state.last_found_ch,
         virtual_volumes=virtual_volumes,
+        split_volumes=set(state.split_volumes),
+        merged_titles=dict(state.merged_titles),
+        absorbed_titles=dict(state.absorbed_titles),
     )

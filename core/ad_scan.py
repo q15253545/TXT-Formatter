@@ -1,11 +1,20 @@
-"""模糊掃描廣告候選：網址、發布頁、QQ／微信群、來源署名、重複段落、作品資訊。"""
+"""模糊掃描廣告候選：網址、發布頁、QQ／微信群、來源署名、重複段落、作品資訊、作者感言。"""
 
+import bisect
 import unicodedata
 import re
 from collections import Counter
 from functools import lru_cache
+from itertools import compress
 
 from .chapter_parse import parse_lv1, parse_lv2
+from .title_markers import strip_persistent_title_marker
+
+# 重複段落：預設「去掉空白後至少 12 個字、整本出現 3 次以上」才列出。
+# 掃描視窗的「重複段落」分頁可以調（太短的分段符號「……」「＊＊＊」會被大量列出）。
+REPEAT_MIN_LENGTH = 12
+REPEAT_MIN_COUNT = 3
+REPEAT_MAX_LENGTH = 180
 
 AD_CATEGORY_LABELS = {
     "url": "網址",
@@ -15,7 +24,13 @@ AD_CATEGORY_LABELS = {
     "source": "小說來源／網站名稱",
     "repeat": "重複廣告段落",
     "meta": "作品資訊／分隔線",
+    "author_note": "作者感言",
+    # 網頁轉存時沒轉回來的字元碼（&#29368;、&nbsp;）：處理方式是換回原字，不是刪行
+    "entity": "網頁字元碼、HTML 標籤",
 }
+# 「作者感言與作品資訊」視窗只看這兩類；其餘（含重複段落）在「掃描無關連內容」視窗。
+NOTE_CATEGORIES = ("author_note", "meta")
+AD_ONLY_CATEGORIES = tuple(key for key in AD_CATEGORY_LABELS if key not in NOTE_CATEGORIES)
 
 COMMON_TLDS = {
     "com", "cn", "net", "org", "cc", "vip", "top", "xyz", "info",
@@ -28,15 +43,23 @@ PUBLISH_WORDS = (
     "訪問地址", "手機閱讀", "手机阅读", "請記住", "请记住", "防失聯", "防失联",
     "網址", "网址", "網站", "网站",
 )
-QQ_WORDS = ("qq群", "qq 群", "q群", "群號", "群号", "加群", "扣扣群")
+QQ_WORDS = ("qq群", "qq 群", "q群", "群號", "群号", "加群", "扣扣群", "内群", "內群", "交流群",
+            "进群", "進群", "粉丝群", "粉絲群")
 WECHAT_WORDS = (
     "微信群", "微信號", "微信号", "微信", "公眾號", "公众号", "威信群",
+)
+# 下載站加在檔案開頭、結尾的版權聲明（「僅供個人學習…24小時內刪除」）：算來源，而且是高信心
+DISCLAIMER_WORDS = (
+    "仅供个人学习", "僅供個人學習", "仅供学习交流", "僅供學習交流", "24小时内删除", "24小時內刪除",
+    "版权归原作者", "版權歸原作者", "非法及商业用途", "非法及商業用途", "与制作者无关", "與製作者無關",
+    "视改动者为制作人", "視改動者為製作人", "支持订阅正版", "支持訂閱正版", "请支持正版", "請支持正版",
 )
 SOURCE_WORDS = (
     "本書來自", "本书来自", "本文來自", "本文来自", "本文件來自", "本文件来自",
     "小說下載", "小说下载", "電子書下載", "电子书下载", "由本站整理",
     "本站發布", "本站发布", "更多精彩", "求收藏", "求推薦", "求推荐",
-)
+    "资源共享", "資源共享", "免费找书", "免費找書", "全网小说", "全網小說",
+) + DISCLAIMER_WORDS
 SEPARATOR_CHARS = set("-—－─_=*＊~～·•。.")
 
 # 對照表放在模組層級，避免每次呼叫都重建。
@@ -53,9 +76,9 @@ def normalize_ad_text(text):
     return unicodedata.normalize("NFKC", text).lower().translate(AD_NORMALIZE_TRANS)
 
 
-@lru_cache(maxsize=100000)
+# 大檔有十幾萬行：快取要裝得下整本，改過本文重掃時才只需要算改到的行。
+@lru_cache(maxsize=1 << 19)
 def compact_ad_text(text):
-    """同一行在掃描過程中會被查詢多次，正規化結果值得快取。"""
     return AD_WHITESPACE_REGEX.sub("", normalize_ad_text(text))
 
 
@@ -84,9 +107,8 @@ def _looks_like_narrative(lines, start, end):
 # --------------------------------------------------------------------------
 # 作品資訊行：作者、字數、發表日期與平台、裝飾分隔線
 #
-# 這些行在網路下載的小說檔裡很常見，但原本的廣告掃描一行都抓不到（它找的是
-# 網址與推廣用語）。判斷一律要求「整行就是這個資訊」：行首就是關鍵字、
-# 長度不長、句末沒有標點，才不會把正文裡提到作者或日期的句子掃進來。
+# 一律要求「整行就是這個資訊」：行首就是關鍵字、長度不長、句末沒有標點，
+# 才不會把正文裡提到作者或日期的句子掃進來。
 # --------------------------------------------------------------------------
 
 # 這類資訊行都很短；超過就當成正文。
@@ -110,8 +132,10 @@ def _repeated_char_line(text):
     return len(compact) >= 10 and len(set(compact)) == 1
 
 
+@lru_cache(maxsize=1 << 19)
 def meta_line_kind(text):
-    """這一行是作品資訊嗎？回傳（種類, 信心）或 None。
+    """這一行是作品資訊嗎？回傳（種類, 信心）或 None。照行的內容快取（開檔後預先算好）：
+    打開作者感言視窗時整本每一行都要問一次。
 
     單獨的日期只給「中」信心：日記體小說每一章開頭就是日期，如果給高信心
     而使用者順手按「全選高信心」，整本書的章節開頭就被刪光了。
@@ -164,23 +188,28 @@ def find_domain_tokens(compact_text):
                 pieces = [piece for piece in host_part.split(".") if piece]
                 tld = pieces[-1] if pieces else ""
                 is_domain = len(pieces) >= 2 and tld in COMMON_TLDS and any(c.isalpha() for c in pieces[-2])
-                is_ipv4 = (len(pieces) == 4 and all(piece.isdigit() and 0 <= int(piece) <= 255
-                                                   for piece in pieces))
+                # 「10……9……8……7」這種倒數接起來也是四段數字：連續的點不算 IP
+                is_ipv4 = (len(pieces) == 4 and ".." not in host_part
+                           and all(piece.isdigit() and 0 <= int(piece) <= 255 for piece in pieces))
                 if is_domain or is_ipv4:
                     tokens.append(token)
             start = None
     return tokens
 
 
-_AD_WORD_CACHE = {}
+_AD_WORD_REGEX = {}
+
+
+def _words_regex(words):
+    regex = _AD_WORD_REGEX.get(words)
+    if regex is None:
+        normalized = sorted({compact_ad_text(word) for word in words}, key=len, reverse=True)
+        regex = _AD_WORD_REGEX[words] = re.compile("|".join(map(re.escape, normalized)))
+    return regex
 
 
 def _compact_contains_any(compact, words):
-    normalized_words = _AD_WORD_CACHE.get(words)
-    if normalized_words is None:
-        normalized_words = tuple(compact_ad_text(word) for word in words)
-        _AD_WORD_CACHE[words] = normalized_words
-    return any(word in compact for word in normalized_words)
+    return _words_regex(words).search(compact) is not None
 
 
 def _url_window_end(lines, index):
@@ -208,34 +237,488 @@ def _url_window_end(lines, index):
     return None
 
 
+_CIRCLED_DIGITS = set("⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳❶❷❸❹❺❻❼❽❾➀➁➂➃➄➅➆➇➈㊀㊁㊂㊃㊄㊅㊆㊇㊈㊉"
+                      "⑴⑵⑶⑷⑸⑹⑺⑻⑼⒈⒉⒊⒋⒌⒍⒎⒏⒐")
+_CJK_DIGITS = set("〇零一二三四五六七八九")
+
+
+def _obfuscated_number(line: str) -> bool:
+    """群號故意混用阿拉伯數字、圈圈數字、國字寫成一串（躲過關鍵字過濾）：
+    短短一行裡至少 7 個「數字」，而且混了兩種以上寫法（其中一種要是圈圈數字或 〇）。"""
+    text = line.strip()
+    if not text or len(text) > 30:
+        return False
+    if "〇" not in text and not any(char in _CIRCLED_DIGITS for char in text):
+        return False
+    ascii_digits = sum(char.isascii() and char.isdigit() or char in "０１２３４５６７８９" for char in text)
+    circled = sum(char in _CIRCLED_DIGITS for char in text)
+    cjk = sum(char in _CJK_DIGITS for char in text)
+    kinds = sum(1 for count in (ascii_digits, circled, cjk) if count)
+    return (ascii_digits + circled + cjk) >= 7 and kinds >= 2 and (circled > 0 or "〇" in text)
+
+
+_SPEAKER_LINE = re.compile(r"^[^:：“「『\"]{1,8}[:：][“「『\"]")
+_SYSTEM_LINE = re.compile(r"^[【\[][^】\]]{1,40}[】\]]$")
+
+
+def _is_dialogue_or_punct(compact: str) -> bool:
+    """整段是一句對話（引號包住、或「名字：『……』」）、整行【系統訊息】、或只有標點：
+    故事裡常常重複出現，但不是廣告（真的廣告另外會被網址、關鍵字抓到）。"""
+    if not any(char.isalnum() for char in compact):
+        return True
+    if _SPEAKER_LINE.match(compact) or _SYSTEM_LINE.match(compact):
+        return True
+    return compact[:1] in "“「『\"" and compact[-1:] in "”」』\""
+
+
+# 只有關鍵字、沒有網址或帳號的類型：出現在長段正文裡就不算
+_KEYWORD_ONLY = frozenset({"publish", "wechat", "source"})
+# 只看這一行本身就能決定的廣告類型（網址要看後面幾行，另外判斷）
+LINE_AD_CATEGORIES = frozenset({"url", "publish", "qq", "wechat", "source"})
+_TWO_ASCII = re.compile(r"[a-z0-9][^a-z0-9]*[a-z0-9]")
+_LINE_PROFILES: dict = {}
+_LINE_PROFILE_LIMIT = 1 << 19
+
+
+def _line_profile(line):
+    """（發布頁, 來源, 微信, QQ, 可能是網址）：只跟這一行的內容有關，照內容快取。"""
+    profile = _LINE_PROFILES.get(line)
+    if profile is None:
+        if len(_LINE_PROFILES) > _LINE_PROFILE_LIMIT:
+            _LINE_PROFILES.clear()
+        compact = compact_ad_text(line)
+        publish = _compact_contains_any(compact, PUBLISH_WORDS)
+        source = _compact_contains_any(compact, SOURCE_WORDS)
+        qq = ((("qq" in compact or _compact_contains_any(compact, QQ_WORDS))
+               and sum(char.isdigit() for char in compact) >= 4) or _obfuscated_number(line))
+        profile = (publish, source, _compact_contains_any(compact, WECHAT_WORDS), qq,
+                   publish or source or _TWO_ASCII.search(compact) is not None)
+        _LINE_PROFILES[line] = profile
+    return profile
+
+
+_NO_FEATURES = frozenset()
+
+
 def _ad_line_features(lines, index, enabled_categories):
-    """回傳某行附近的廣告類型；網址可跨最多三行並容許空白拆分。"""
+    """這一行的廣告類型；網址可跨最多三行並容許空白拆分。"""
+    publish, source, wechat, qq, url_context = _line_profile(lines[index])
+    if not (publish or source or wechat or qq or url_context):
+        return _NO_FEATURES
     features = set()
-    line = lines[index]
-    compact_line = compact_ad_text(line)
-    ascii_count = sum(char.isascii() and char.isalnum() for char in compact_line)
-    url_context = (
-        ascii_count >= 2
-        or _compact_contains_any(compact_line, PUBLISH_WORDS)
-        or _compact_contains_any(compact_line, SOURCE_WORDS)
-    )
     if "url" in enabled_categories and url_context and _url_window_end(lines, index) is not None:
         features.add("url")
-    if "publish" in enabled_categories and _compact_contains_any(compact_line, PUBLISH_WORDS):
-        features.add("publish")
-    if "qq" in enabled_categories:
-        has_qq_word = _compact_contains_any(compact_line, QQ_WORDS) or "qq" in compact_line
-        digit_count = sum(char.isdigit() for char in compact_line)
-        if has_qq_word and digit_count >= 4:
-            features.add("qq")
-    if "wechat" in enabled_categories and _compact_contains_any(compact_line, WECHAT_WORDS):
-        features.add("wechat")
-    if "source" in enabled_categories and _compact_contains_any(compact_line, SOURCE_WORDS):
-        features.add("source")
+    for key, hit in (("publish", publish), ("qq", qq), ("wechat", wechat), ("source", source)):
+        if hit and key in enabled_categories:
+            features.add(key)
     return features
 
 
-def scan_ad_candidates(lines, enabled_categories=None, line_ranges=None):
+# --------------------------------------------------------------------------
+# 作者感言：章末的「作者有話說」、PS、上架感言、分隔線後面的閒聊、括號裡的附註
+#
+# 這類文字大多接在一章的最後面、下一章標題之前，所以從觸發的那一行一路收到
+# 下一個章節標題為止。分隔線也常被當成場景切換用，只有後面那段帶著「更新、
+# 訂閱、讀者、感謝…」這類詞才算；括號附註只收那幾行（常出現在章首），不往下延伸。
+# --------------------------------------------------------------------------
+
+# 比對前先做 NFKC＋小寫＋去空白，全形半形、大小寫都一樣看待。
+_NOTE_HEADER_REGEX = re.compile(
+    r"^(?:作者有(?:话|話)(?:说|說)|作者的(?:话|話)|作者(?:感言|按)|(?:上架|完本|完结|完結|单章|單章|新书|新書)感言"
+    r"|感言[:：]|写在(?:后面|最后)|寫在(?:後面|最後)|题外话|題外話"
+    r"|推(?:荐|薦)?一本|推(?:书|書)[:：]|今晚无更|今晚無更|今天无更|今天無更|[一二三四五六七八九十]{1,2}月(?:总结|總結))")
+# 「※※※第二卷结束，老习惯，休息一天……」：分隔符號後面直接接作者的話
+_NOTE_LEADING_SEPARATOR = re.compile(r"^[-—–_~=*※☆★◆◇●○]{2,}(?=[^-—–_~=*※☆★◆◇●○])")
+_NOTE_PS_REGEX = re.compile(r"^p\.?s\.?[:：.,，、]")
+_NOTE_SEPARATOR_REGEX = re.compile(
+    r"^[-—–_~=*※☆★◆◇●○]{2,}(?:分割(?:线|線)|分隔(?:线|線)|分界(?:线|線))?[-—–_~=*※☆★◆◇●○]*$")
+# 整行被括號包住（後面可以多一個句號之類：「（第5更送上，求订阅……）。」）
+_NOTE_PAREN_REGEX = re.compile(r"^[(（【\[].*[)）】\]][。．.！!]?$")
+_NOTE_WORDS = (
+    "作者", "读者", "讀者", "书友", "書友", "感谢", "感謝", "谢谢", "謝謝", "订阅", "訂閱", "首订", "首訂",
+    "月票", "推荐票", "推薦票", "打赏", "打賞", "收藏", "投票", "加更", "更新", "停更", "断更", "斷更",
+    "请假", "請假", "上架", "新书", "新書", "本书", "本書", "这章", "這章", "本章", "下一章", "码字", "碼字",
+    "卡文", "灵感", "靈感", "抱歉", "见谅", "見諒", "评论", "評論", "点赞", "點贊", "企鹅", "企鵝", "qq",
+    "vip", "主页", "主頁", "私信", "私聊", "简介", "簡介", "后续", "後續", "约稿", "約稿", "金主", "购文",
+    "購文", "包书", "包書", "读者群", "讀者群", "订阅群", "訂閱群", "or2", "orz", "大佬",
+    # 章末常見的「票~~~」「求票票」「點個推薦」：只在分隔線／括號這種短區塊裡才會用到，
+    # 單字「票」不會單獨把正文判成感言。
+    "票", "求票", "推荐", "推薦",
+    # 請假、斷更、月總結、推書
+    "无更", "無更", "补上", "補上", "补更", "補更", "休息一天", "恢复更新", "恢復更新", "总结", "總結",
+    "推一本", "推书", "推書",
+)
+_NOTE_SCAN_LIMIT = 60        # 從觸發行往下找章節標題，最多看幾行
+# 章末一條分隔線、後面幾行短短的作者閒聊（「過渡一章」「見諒見諒」「昨晚喝了酒」），
+# 沒有關鍵詞也算（中信心）：分隔線後面到下一章之間最多這麼多行、每行不超過這麼長。
+_NOTE_TAIL_MAX_LINES = 10
+_NOTE_TAIL_MAX_LENGTH = 60
+_DIALOGUE_OPENERS = "“「『\"‘"
+# 只認一長串破折號／減號／底線（網路小說章末「——————」後面接作者的話的慣例）；
+# ＊＊＊、※※※ 這類多半是場景切換，後面接的是正文。
+_TAIL_SEPARATOR = re.compile(r"^[—―─━\-－_＿]{4,}$")
+_NOTE_MAX_BODY = 30          # 區塊超過這麼多行（不算空行）就不算高信心：可能吃到正文
+_NOTE_SEPARATOR_MAX_BODY = 15
+
+
+def _note_text(line: str) -> str:
+    return AD_WHITESPACE_REGEX.sub("", unicodedata.normalize("NFKC", line).lower())
+
+
+# 觸發行的第一個字只可能是這些（標題型、PS、分隔線、括號）；其他行直接跳過，
+# 不必每一行都做全形半形轉換——大檔（十幾萬行）差好幾倍時間。
+_NOTE_FIRST_CHARS = frozenset("作上完单單新感写寫题題推今一二三四五六七八九十pPｐＰ-—–_~=*※☆★◆◇●○－＿～＝＊(（【[［")
+
+
+def _note_trigger(line: str):
+    first = line.lstrip()[:1]
+    if not first or first not in _NOTE_FIRST_CHARS:
+        return None
+    text = _note_text(line)
+    if not text:
+        return None
+    if _NOTE_HEADER_REGEX.match(text):
+        return "header"
+    if _NOTE_PS_REGEX.match(text):
+        return "ps"
+    leading = _NOTE_LEADING_SEPARATOR.match(text)
+    # 至少兩種關鍵詞：正文裡也有「————抱歉，扯远了」這種用破折號開頭的句子
+    if leading and _note_word_count([text[leading.end():]]) >= 2:
+        return "header"
+    # 只認破折號、底線、星號、※ 這類；點（刪節號「……」會變成一串點）不算。
+    if _NOTE_SEPARATOR_REGEX.match(text):
+        return "separator"
+    if _NOTE_PAREN_REGEX.match(text) and len(text) <= 200:
+        return "paren"
+    return None
+
+
+def _note_word_count(lines) -> int:
+    """出現了幾種關鍵詞。互相包含的只算一次（「月票」裡的「票」不另外算）。"""
+    text = "".join(_note_text(line) for line in lines)
+    found = [word for word in _NOTE_WORDS if word in text]
+    return sum(1 for word in found if not any(word != other and word in other for other in found))
+
+
+def _is_title_line(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and bool(parse_lv1(stripped) or parse_lv2(stripped))
+
+
+def _title_checker(title_rows):
+    """有目錄辨識出的標題行（含自訂規則、人工標記）就用它；沒有才自己判斷。
+    自己判斷只認標準寫法，「第一百五十九章才不讓你……哼」這種章號後面沒空格的
+    會漏掉，章末就找不到。"""
+    if title_rows is None:
+        return lambda lines, row: _is_title_line(lines[row])
+    rows = set(title_rows)
+    return lambda _lines, row: row in rows
+
+
+def _last_before_title(lines, end: int, is_title) -> bool:
+    """end 之後（跳過空行）緊接著章節標題或檔尾：這段是一章的最後一段。"""
+    for row in range(end + 1, len(lines)):
+        if lines[row].strip():
+            return is_title(lines, row)
+    return True
+
+
+def _absorb_leading_marks(lines, index, is_title) -> int:
+    """作者的話前面緊鄰的分隔線、卷／章結尾行（「※※※」「第八卷完」）一起收進來，最多往前 4 行。"""
+    from .title_markers import parse_end_mark
+    start = row = index
+    while row > 0 and index - row < 4:
+        previous = lines[row - 1]
+        text = previous.strip()
+        if not text:
+            row -= 1
+            continue
+        # 卷／章結尾行（「第八卷完」）先認：它長得像卷標題，但其實是結尾
+        if len(text) <= 20 and parse_end_mark(text):
+            row -= 1
+            start = row
+            continue
+        if is_title(lines, row - 1):
+            break
+        if _note_trigger(previous) == "separator":
+            row -= 1
+            start = row
+            continue
+        break
+    return start
+
+
+def _tail_chatter(content, boundary, total) -> bool:
+    """章末分隔線後面的作者閒聊：分隔線後面到下一章標題之間只有幾行短句，
+    而且沒有對話（場景切換後面接的正文常常是對話）、沒有別的分隔線。"""
+    if not content or boundary >= total or len(content) > _NOTE_TAIL_MAX_LINES:
+        return False
+    for line in content:
+        text = line.strip()
+        if (len(text) > _NOTE_TAIL_MAX_LENGTH or text[0] in _DIALOGUE_OPENERS
+                or _note_trigger(line) == "separator"):
+            return False
+    return True
+
+
+def author_note_blocks(lines, title_rows=None):
+    """找出作者感言，回傳 [(起始行, 結束行, 信心)]（0 起算、結束行含在內）。
+
+    title_rows：目錄辨識出的章節標題行號（0 起算）；None 時自己判斷。"""
+    is_title = _title_checker(title_rows)
+    blocks = []
+    total = len(lines)
+    index = 0
+    while index < total:
+        kind = _note_trigger(lines[index])
+        if kind is None or is_title(lines, index):
+            index += 1
+            continue
+        if kind == "paren":
+            # 括號附註：連續的括號行算一段，不往下延伸到章末。沒有關鍵詞時，
+            # 只有「一章的最後一段」才列（中信心）：章末的括號幾乎都是作者在說話，
+            # 正文中間的括號多半是旁白。
+            end = index
+            while end + 1 < total and _note_trigger(lines[end + 1]) == "paren":
+                end += 1
+            # 括號後面緊接的分隔線一起收（「（求票）」下一行「------」）
+            while end + 1 < total and _note_trigger(lines[end + 1]) == "separator":
+                end += 1
+            words = _note_word_count(lines[index:end + 1])
+            if words:
+                blocks.append((index, end, "高" if words >= 2 else "中"))
+            elif _last_before_title(lines, end, is_title):
+                blocks.append((index, end, "中"))
+            index = end + 1
+            continue
+        # 其他三種：一路收到下一個章節標題（或檔尾）為止。
+        boundary = None
+        for row in range(index + 1, min(total, index + 1 + _NOTE_SCAN_LIMIT)):
+            if is_title(lines, row):
+                boundary = row
+                break
+        if boundary is None and index + 1 + _NOTE_SCAN_LIMIT >= total:
+            boundary = total
+        if boundary is None:
+            # 附近沒有章節標題：這不在章末，可能只是正文裡提到。
+            # 標題型與 PS 只收那一行、給中信心；分隔線不算。
+            if kind in ("header", "ps"):
+                blocks.append((index, index, "中"))
+            index += 1
+            continue
+        end = boundary - 1
+        while end > index and not lines[end].strip():
+            end -= 1
+        body = [line for line in lines[index:end + 1] if line.strip()]
+        words = _note_word_count(lines[index:end + 1])
+        if kind == "separator":
+            # 分隔線也是常見的場景切換：後面接的若是一大段正文，正文裡剛好出現
+            # 「推薦」「收藏」「票」一兩個詞並不代表是作者在說話。內容超過 5 行時
+            # 至少要 3 種關鍵詞才算。
+            # 另外，分隔線後面第一段就要是作者在說話（有關鍵詞，或本身是 PS／括號附註）：
+            # 場景切換後面第一段幾乎都是正文敘述。
+            # 作者的話幾乎每行都在講更新、票、感謝；有關鍵詞的行不到一半時，
+            # 比較像是正文剛好提到這些字。
+            content = [line for line in body if _note_trigger(line) != "separator"]
+            opens_as_note = bool(content) and (_note_word_count(content[:1]) > 0
+                                               or _note_trigger(content[0]) in ("header", "ps", "paren"))
+            noted_lines = sum(1 for line in content if _note_word_count([line]))
+            # 頭尾都是分隔線、而且緊接著下一章（boundary 就是標題）：作者用分隔線把一大段話
+            # 框起來（月總結、請假說明），長度與「每行都有關鍵詞」的限制放寬。
+            framed = (len(body) >= 3 and _note_trigger(body[-1]) == "separator"
+                      and boundary < total and opens_as_note and words >= 3)
+            if framed and len(body) <= _NOTE_MAX_BODY * 2:
+                blocks.append((index, end, "中" if len(body) > _NOTE_SEPARATOR_MAX_BODY else "高"))
+                index = end + 1
+                continue
+            if (not words or len(body) > _NOTE_SEPARATOR_MAX_BODY or not opens_as_note
+                    or noted_lines * 2 < len(content)
+                    or (len(content) > 5 and words < 3)):
+                if _TAIL_SEPARATOR.match(lines[index].strip()) and _tail_chatter(content, boundary, total):
+                    blocks.append((_absorb_leading_marks(lines, index, is_title), end, "中"))
+                    index = end + 1
+                    continue
+                index += 1
+                continue
+            confidence = "高" if words >= 3 else "中"
+        elif kind == "header":
+            confidence = "高" if len(body) <= _NOTE_MAX_BODY else "中"
+        else:                                   # ps
+            confidence = "高" if words or len(body) <= 8 else "中"
+            if len(body) > _NOTE_MAX_BODY:
+                confidence = "低"
+        start = _absorb_leading_marks(lines, index, is_title)
+        blocks.append((start, end, confidence))
+        index = end + 1
+    return blocks
+
+
+# 論壇轉貼時夾在正文裡的帖子標頭：「書名 續章330」「作者名 2018-01-24 23:49:45 舉報 閱讀數：24116」
+# 「大家好，我還是作者名」。有日期時間、又有舉報／閱讀數／回覆這類論壇用語的行才算。
+_FORUM_DATETIME = re.compile(r"(?:19|20)\d{2}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?")
+_FORUM_WORDS = ("举报", "舉報", "阅读数", "閱讀數", "阅读", "閱讀", "回复", "回覆", "楼主", "樓主", "只看该作者",
+                "只看該作者", "发表于", "發表於", "点击", "點擊")
+
+
+_FORUM_SENTENCE_TAIL = re.compile(r"[。！？!?…」』”]$")
+
+
+def forum_header_blocks(lines, title_rows=None):
+    """回傳 [(起始行, 結束行)]：日期時間＋論壇用語那一行，連同前一行（短、不是句子）
+    與後面提到同一個名字的行。章節標題（含自訂規則、人工標記）不會被包進來。"""
+    is_title = _title_checker(title_rows)
+    blocks = []
+    for row, line in enumerate(lines):
+        match = _FORUM_DATETIME.search(line)
+        if not match or len(line.strip()) > 80:
+            continue
+        if not any(word in line for word in _FORUM_WORDS):
+            continue
+        start = end = row
+        name = line[:match.start()].strip()
+        previous = row - 1
+        if previous >= 0 and lines[previous].strip():
+            text = lines[previous].strip()
+            # 只看真正的句末標點：標頭常以「（包月10）」這種括號結尾，不能因此排除。
+            if (len(text) <= 40 and not _FORUM_SENTENCE_TAIL.search(text)
+                    and not is_title(lines, previous) and not _is_title_line(text)):
+                start = previous
+        for following in range(row + 1, min(len(lines), row + 3)):
+            text = lines[following].strip()
+            if not text:
+                continue
+            if is_title(lines, following) or _is_title_line(text):
+                break
+            if (name and name in text and len(text) <= 60) or text.startswith(("??", "？？", "大家好")):
+                end = following
+            else:
+                break
+        blocks.append((start, end))
+    return blocks
+
+
+# 論壇（Discuz 這類）轉貼時，每一樓前後夾著的介面文字：評分紀錄「某人 金币 +100 感谢…」、
+# 「引用 使用道具 报告 回复」「TOP 放入宝箱」、使用者名稱、「LEVEL 7」「Rank: 6」、
+# 帖子／精华／积分…一欄一行的資料表、「个人空间发短消息加为好友…」「2楼大中小发表于… 只看该作者」。
+_FORUM_PROFILE_LABELS = frozenset(
+    "帖子 精华 精華 积分 積分 金币 金幣 原创 原創 威望 支持 感谢 感謝 贡献 貢獻 赞助 贊助 推广 推廣 "
+    "阅读权限 閱讀權限 注册时间 註冊時間 在线时间 在線時間 最后登录 最後登錄 主题 主題 好友 听众 聽眾 "
+    "用户组 用戶組 经验 經驗 等级 等級 UID 性别 性別 来自 來自".split())
+_FORUM_VALUE = re.compile(r"^(?:\d+(?:\.\d+)?\s*(?:枚|贴|帖|點|点|度|值|次|人|个|個|分|篇|小时|小時)?"
+                          r"|\d{4}-\d{1,2}-\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)$")
+_FORUM_UI = re.compile(
+    r"^LEVEL\s*\d+$|^Rank:\s*\d+|个人空间|個人空間|发短消息|發短消息|加为好友|加為好友|当前离线|當前離線|当前在线|"
+    r"當前在線|查看宝箱|查看寶箱|使用道具|放入宝箱|放入寶箱|只看该作者|只看該作者|楼大中小|樓大中小|本贴共获得感谢|"
+    r"本帖共獲得感謝|点此感谢|點此感謝|(?:金币|金幣|贡献|貢獻|威望|积分|積分)\s*[+＋-]\s*\d+|"
+    r"本帖最后由|本帖最後由|评分记录|評分記錄|作者的其他主题|作者的其他主題|^Super Moderator$|^Moderator$|"
+    r"^Administrator$|^版主$", re.IGNORECASE)
+# 勳章清單、「作者的其他主題」後面那一串作品連結：常常很長（超過一般的行長上限），但一看就是論壇介面
+_FORUM_LONG = re.compile(r"(?:勋章|勳章).*(?:勋章|勳章).*(?:勋章|勳章)|【[^】]{1,30}】.{0,40}作者[:：].*作者[:：]")
+FORUM_BLOCK_MIN_LINES = 6        # 至少這麼多行論壇用語（其中兩行以上不是單純的數字）才算一段
+
+
+@lru_cache(maxsize=1 << 19)
+def forum_line_strength(line: str) -> int:
+    """2＝論壇介面用語（欄位名稱、按鈕列、評分），1＝資料表的值（數字、日期），0＝都不是。
+    照行的內容快取（開檔後預先算好），打開作者感言視窗時整本每一行都要問一次。"""
+    text = line.strip()
+    if not text:
+        return 0
+    if len(text) > 80:
+        return 2 if len(text) <= 1000 and _FORUM_LONG.search(text) else 0
+    if text in _FORUM_PROFILE_LABELS or _FORUM_UI.search(text) or _FORUM_LONG.search(text):
+        return 2
+    return 1 if _FORUM_VALUE.match(text) else 0
+
+
+def forum_profile_blocks(lines, title_rows=None):
+    """回傳 [(起始行, 結束行)]：一段連續的論壇介面文字（中間可以隔空行，也可以夾著前後都是
+    論壇用語的短行，例如使用者名稱）。單獨一個數字或日期不算，章節標題一律不包進去。"""
+    toc = set(title_rows) if title_rows is not None else set()
+    total = len(lines)
+    # 整本先一次查好（map 在 C 裡跑），主迴圈只看有論壇用語的行：大檔十幾萬行，一行一行問太慢
+    strengths = list(map(forum_line_strength, lines))
+    for row in toc:
+        # 資料表的值（「3062 枚」「1 贴」）長得像「數字空格」的標題：這裡只排除真的在目錄裡的行。
+        # 但打開「純數字獨立一行」時，「2071」「70」這種值也會被收進目錄：夾在論壇資料表裡、
+        # 又不是使用者手動收錄（[::]）的純數字／日期，還是算資料表的一部分。
+        if 0 <= row < total and strengths[row]:
+            manual = strip_persistent_title_marker(lines[row].strip())[1] == "include"
+            strengths[row] = 1 if strengths[row] == 1 and not manual else 0
+    forum_rows = list(compress(range(total), strengths))
+    forum_row = strengths.__getitem__
+
+    def next_text_row(row):
+        while row < len(lines) and not lines[row].strip():
+            row += 1
+        return row if row < len(lines) else None
+
+    def sandwiched(row):
+        """夾在論壇用語中間的短行（使用者名稱、頭銜，最多連續三行），後面還接著論壇用語。"""
+        probe = row
+        for _ in range(3):
+            text = lines[probe].strip()
+            if len(text) > 16 or probe in toc or _is_title_line(text):
+                return False
+            probe = next_text_row(probe + 1)
+            if probe is None:
+                return False
+            if forum_row(probe):
+                return True
+        return False
+
+    blocks = []
+    row = 0
+    while True:
+        position = bisect.bisect_left(forum_rows, row)
+        if position >= len(forum_rows):
+            break
+        row = forum_rows[position]
+        strength = forum_row(row)
+        start = end = row
+        count, strong = 1, strength == 2
+        cursor = next_text_row(row + 1)
+        while cursor is not None:
+            strength = forum_row(cursor)
+            if not strength:
+                if not sandwiched(cursor):
+                    break
+            else:
+                count += 1
+                strong += strength == 2
+            end = cursor
+            cursor = next_text_row(cursor + 1)
+        if count >= FORUM_BLOCK_MIN_LINES and strong >= 2:
+            blocks.append((start, end))
+            row = end + 1
+        else:
+            row += 1
+    return blocks
+
+
+# 網頁轉存留下的 HTML 標籤（<br>、<p>、</div>、<span style=…>）：整個拿掉，字留著
+_HTML_TAG = re.compile(r"</?(?:p|br|div|span|font|b|i|u|em|strong|a|img|hr|center|small|big|sup|sub|tr|td|table)"
+                       r"(?:\s[^<>]{0,300})?\s*/?>", re.IGNORECASE)
+
+
+def entity_candidates(lines) -> list:
+    """網頁字元碼：每一行一個候選，帶著換回原字之後的樣子（fix）。章節標題裡的也算
+    （「第七卷 我家住在&#32418;土高坡」），只換字、不動其他內容。"""
+    from .quote_check import _HTML_ENTITY, _decode_entities
+    candidates = []
+    for row, line in enumerate(lines):
+        has_entity = "&" in line and _HTML_ENTITY.search(line)
+        has_tag = "<" in line and _HTML_TAG.search(line)
+        if has_entity or has_tag:
+            fixed = _decode_entities(_HTML_TAG.sub("", line))
+            if fixed != line:
+                candidates.append({"start": row, "end": row, "types": {"entity"}, "confidence": "高",
+                                   "score": 5, "preview": line, "line": row + 1, "fix": fixed})
+    return candidates
+
+
+def scan_ad_candidates(lines, enabled_categories=None, line_ranges=None, title_rows=None,
+                       repeat_min_length=REPEAT_MIN_LENGTH, repeat_min_count=REPEAT_MIN_COUNT):
     """模糊掃描廣告候選，只產生預覽資料，不直接刪除任何內容。
 
     line_ranges 是「只看這幾段」的行範圍（0 起算的半開區間），給「只掃描選取
@@ -246,17 +729,43 @@ def scan_ad_candidates(lines, enabled_categories=None, line_ranges=None):
         return []
     # compact_ad_text 是純函式，跨掃描保留快取是安全的：使用者常在同一個
     # 對話框裡切換分類重掃，命中快取可省下約一半時間。maxsize 已鎖住記憶體上限。
-    candidates = _scan_ad_candidates(lines, enabled)
+    candidates = _scan_ad_candidates(lines, enabled - {"entity"}, title_rows,
+                                     max(1, int(repeat_min_length)), max(2, int(repeat_min_count)))
+    candidates = _drop_front_matter(candidates, lines, title_rows)
+    if "entity" in enabled:
+        # 換字的候選不跟要刪整段的候選合併：刪除與換字是兩種動作
+        candidates = sorted(candidates + entity_candidates(lines), key=lambda item: (item["start"], item["end"]))
     if line_ranges is None:
         return candidates
     return _clip_to_ranges(candidates, lines, line_ranges)
+
+
+def _drop_front_matter(candidates, lines, title_rows):
+    """第一章之前的書名、作者、簡介、又名……是 TXT 常見的開頭資訊，不是要刪的
+    東西：只由「作品資訊／作者感言」組成、而且整段在第一個章節標題之前的候選
+    拿掉。網址、QQ 這類真正的廣告即使在開頭也照樣列出。"""
+    if title_rows is not None:
+        first_title = min(title_rows) if title_rows else None
+    else:
+        first_title = next((row for row, line in enumerate(lines) if _is_title_line(line)), None)
+    if first_title is None:
+        return candidates
+    informational = {"meta", "author_note"}
+    return [candidate for candidate in candidates
+            if not (candidate["end"] < first_title and set(candidate["types"]) <= informational)]
 
 
 def _clip_to_ranges(candidates, lines, line_ranges):
     """只留下跟選取範圍有交集的候選，並把範圍外的行切掉。
 
     不切的話，選了第三章卻刪掉跨到第四章的段落，等於偷偷改了沒選的地方。"""
-    ranges = sorted((start, end) for start, end in line_ranges if start < end)
+    ranges = []
+    for start, end in sorted((start, end) for start, end in line_ranges if start < end):
+        # 重疊或相連的範圍（選了整卷又選了其中一章）先合併，同一個候選才不會出現兩次
+        if ranges and start <= ranges[-1][1]:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+        else:
+            ranges.append((start, end))
     kept = []
     for candidate in candidates:
         for start, end in ranges:
@@ -269,37 +778,106 @@ def _clip_to_ranges(candidates, lines, line_ranges):
             clipped["preview"] = "\n".join(lines[new_start:new_end + 1])
             clipped["line"] = new_start + 1
             kept.append(clipped)
-            break
+            # 不停在第一段：同一個候選可能跟好幾個選取的章節都有交集
     return kept
 
 
-def _scan_ad_candidates(lines, enabled):
-    repeated = Counter()
-    if "repeat" in enabled:
-        for line in lines:
-            compact = compact_ad_text(line)
-            if 12 <= len(compact) <= 180 and not parse_lv1(line.strip()) and not parse_lv2(line.strip()):
-                repeated[compact] += 1
+_AD_TYPES = frozenset({"url", "publish", "qq", "wechat", "source"})
+_AD_BLOCK_REACH = 10         # 往上／往下最多找幾行分隔線
+_AD_BLOCK_MAX_LINES = 12     # 分隔線中間最多幾行文字（太長就不是一段廣告）
+
+
+def _expand_ads_to_separator_blocks(lines, hits, title_rows):
+    """廣告常用兩條分隔線框成一段（群號、網址夾在「全網小說資源共享」「已滿請換群號」
+    這類說明中間）：候選的上下各找得到分隔線、中間沒有章節標題、而且不長，就整段收進來。"""
+    is_title = _title_checker(title_rows)
+    total = len(lines)
+
+    def find(row, step):
+        seen = 0
+        while 0 <= row < total and seen < _AD_BLOCK_REACH:
+            text = lines[row].strip()
+            if text:
+                if is_title(lines, row):
+                    return None
+                if looks_like_separator(text) or _note_trigger(text) == "separator":
+                    return row
+                seen += 1
+            row += step
+        return None
+
+    for hit in hits:
+        if not (hit["types"] & _AD_TYPES):
+            continue
+        top = find(hit["start"] - 1, -1) if not looks_like_separator(lines[hit["start"]]) else hit["start"]
+        bottom = find(hit["end"] + 1, 1) if not looks_like_separator(lines[hit["end"]]) else hit["end"]
+        if top is None or bottom is None:
+            continue
+        inside = [line for line in lines[top + 1:bottom] if line.strip() and not looks_like_separator(line)]
+        if len(inside) > _AD_BLOCK_MAX_LINES:
+            continue
+        # 後面緊接著再一小段分隔線框住的廣告說明（「已满或搜不到请换个群号」）也一起收
+        while True:
+            following = find(bottom + 1, 1)
+            if following is None:
+                break
+            extra = [compact_ad_text(line) for line in lines[bottom + 1:following]
+                     if line.strip() and not looks_like_separator(line)]
+            if not extra or len(extra) > 3 or not any(
+                    _compact_contains_any(text, QQ_WORDS + SOURCE_WORDS + PUBLISH_WORDS + WECHAT_WORDS)
+                    for text in extra):
+                break
+            bottom = following
+        hit["start"], hit["end"] = min(hit["start"], top), max(hit["end"], bottom)
+
+
+def _repeated_compacts(lines, min_length, min_count) -> dict:
+    """整本出現 min_count 次以上的段落（去掉空白後的樣子 → 出現幾次）。先數再篩：對話、純標點、
+    章節標題只檢查數量夠的那幾種，不必每一行都做標題判斷。"""
+    counts = Counter()
+    first_line = {}
+    for line in lines:
+        compact = compact_ad_text(line)
+        if min_length <= len(compact) <= REPEAT_MAX_LENGTH:
+            counts[compact] += 1
+            first_line.setdefault(compact, line)
+    repeated = {}
+    for compact, count in counts.items():
+        if count < min_count or _is_dialogue_or_punct(compact):
+            continue
+        stripped = first_line[compact].strip()
+        if not parse_lv1(stripped) and not parse_lv2(stripped):
+            repeated[compact] = count
+    return repeated
+
+
+def _scan_ad_candidates(lines, enabled, title_rows=None, repeat_min_length=REPEAT_MIN_LENGTH,
+                        repeat_min_count=REPEAT_MIN_COUNT):
+    repeated = (_repeated_compacts(lines, repeat_min_length, repeat_min_count)
+                if "repeat" in enabled else {})
 
     hits = []
     total = len(lines)
-    features_by_line = [_ad_line_features(lines, index, enabled) for index in range(total)]
+    if enabled & LINE_AD_CATEGORIES:
+        features_by_line = [_ad_line_features(lines, index, enabled) for index in range(total)]
+    else:
+        features_by_line = [_NO_FEATURES] * total
     # 作品資訊自己帶信心度（作者／字數／平台是高，日期與分隔線是中），
     # 不走下面那套「特徵愈多分數愈高」的算法。
-    meta_by_line = ([meta_line_kind(line) for line in lines] if "meta" in enabled
+    meta_by_line = (list(map(meta_line_kind, lines)) if "meta" in enabled
                     else [None] * total)
     # 併進 features_by_line，底下「把相鄰的廣告行合併成一段」才看得到它們：
     # 作者、字數、發表資訊通常連續好幾行，被切成好幾個候選很難勾。
     for row, kind in enumerate(meta_by_line):
         if kind is not None:
-            features_by_line[row].add("meta")
+            features_by_line[row] = features_by_line[row] | {"meta"}
     for index, line in enumerate(lines):
-        features = set(features_by_line[index])
-        compact = compact_ad_text(line)
-        if "repeat" in enabled and repeated.get(compact, 0) >= 3:
-            features.add("repeat")
-        if not features:
+        is_repeat = bool(repeated) and compact_ad_text(line) in repeated
+        if not features_by_line[index] and not is_repeat:
             continue
+        features = set(features_by_line[index])
+        if is_repeat:
+            features.add("repeat")
 
         start = end = index
         if features != {"repeat"}:
@@ -321,14 +899,21 @@ def _scan_ad_candidates(lines, enabled):
         if end + 1 < total and looks_like_separator(lines[end + 1]):
             end += 1
 
+        narrative = _looks_like_narrative(lines, start, end)
+        if narrative and features <= _KEYWORD_ONLY:
+            # 故事裡提到微信、網站、發布（「給丈夫發了一條微信」）：沒有網址、帳號，不是廣告
+            continue
         edge = start < 200 or end >= max(0, total - 200)
         score = len(features) * 2 + (1 if edge else 0)
+        if "source" in features and any(_compact_contains_any(compact_ad_text(lines[row]), DISCLAIMER_WORDS)
+                                        for row in range(start, end + 1)):
+            score += 2
         if "url" in features and ({"publish", "source"} & features):
             score += 2
         # 網址若出現在「看起來像正文」的行裡（有段落縮排、對話引號、而且夠長），
         # 通常是角色提到某個網站，不是廣告行。整段刪掉會傷到故事內容，
         # 所以調降信心度、不讓它落入預設勾選，改由使用者自行判斷。
-        if _looks_like_narrative(lines, start, end):
+        if narrative:
             score = min(score, 2)
         if "meta" in features:
             # 這一段裡只要有一行是高信心的作品資訊，整段就算高信心；
@@ -339,6 +924,17 @@ def _scan_ad_candidates(lines, enabled):
         confidence = "高" if score >= 5 else "中" if score >= 3 else "低"
         hits.append({"start": start, "end": end, "types": set(features),
                      "confidence": confidence, "score": score})
+
+    _expand_ads_to_separator_blocks(lines, hits, title_rows)
+
+    if "meta" in enabled:
+        for start, end in forum_header_blocks(lines, title_rows) + forum_profile_blocks(lines, title_rows):
+            hits.append({"start": start, "end": end, "types": {"meta"}, "confidence": "高", "score": 5})
+    if "author_note" in enabled:
+        scores = {"高": 5, "中": 3, "低": 1}
+        for start, end, confidence in author_note_blocks(lines, title_rows):
+            hits.append({"start": start, "end": end, "types": {"author_note"},
+                         "confidence": confidence, "score": scores[confidence]})
 
     merged = []
     for hit in sorted(hits, key=lambda item: (item["start"], item["end"])):
@@ -353,4 +949,8 @@ def _scan_ad_candidates(lines, enabled):
     for candidate in merged:
         candidate["preview"] = "\n".join(lines[candidate["start"]:candidate["end"] + 1])
         candidate["line"] = candidate["start"] + 1
+        if "repeat" in candidate["types"]:
+            # 段落前後併進分隔線時也照那一行重複的次數顯示
+            candidate["repeat_count"] = max(repeated.get(compact_ad_text(line), 0)
+                                            for line in lines[candidate["start"]:candidate["end"] + 1])
     return merged

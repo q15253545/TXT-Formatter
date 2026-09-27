@@ -19,6 +19,8 @@ class FormatOptions:
     add_empty: bool = False
     format_title: bool = False
     merge_title: bool = False
+    # 整理段落換行：固定欄寬的硬換行接回同一段
+    reflow_paragraphs: bool = False
     normalize_punct: bool = False
     halfwidth_punct: bool = False
     format_dialogue: bool = False

@@ -12,3 +12,25 @@ TODO.md
 bug/
 pending/
 crop*.png
+
+# 配色預覽圖（本機討論用）
+theme/
+
+# 使用者放的測試小說、截圖、審查報告：絕不上傳
+txtissue/
+adtemplate/
+bug/
+txt-demo/
+not-found/
+
+# 本機開發用：測試、ChatGPT／Gemini 審查資料、開發指引（不上傳）
+tests/
+chatgpt/
+gemini/
+novel/
+novel-scan/
+corpus/
+CLAUDE.md
+ui_qt/UI_RULES.md
+# 打包、整批檢查的腳本（本機用，不上傳）
+tools/

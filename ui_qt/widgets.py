@@ -2,18 +2,196 @@
 攔截 Ctrl+Z/Ctrl+Shift+Z 交給自訂復原系統的編輯器、繁／簡切換鈕。"""
 
 from PySide6.QtCore import (
-    QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation,
+    Property, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen,
+    QColor, QFont, QFontMetricsF, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QPlainTextEdit, QPushButton, QSizePolicy,
-    QStyledItemDelegate, QToolButton, QWidget,
+    QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QMenu, QPlainTextEdit,
+    QPushButton, QScrollArea,
+    QSizePolicy, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import i18n, icons
+from .text_positions import PositionMap
+from .theme import active_tokens
+
+
+_TRACK_W, _TRACK_H, _KNOB_MARGIN, _TOGGLE_GAP = 36, 20, 2, 12
+
+
+class ToggleSwitch(QCheckBox):
+    """開關樣式的勾選框：文字在左、開關在右，圓鈕滑動有動畫。
+
+    用在「設定」類的選項（排版設定、只檢查選取的章節…）；多選清單（表格裡的
+    勾選、常用格式、檢查項目）維持一般勾選框。繼承 QCheckBox，isChecked／
+    setChecked／toggled 都照舊。
+
+    fill=True：撐滿整列，開關貼齊右邊（排版設定面板）；
+    fill=False：只佔「文字＋開關」的寬度，放在寬對話框裡不會被拉到最右邊。"""
+
+    def __init__(self, text="", parent=None, fill=True):
+        super().__init__(text, parent)
+        self._offset = 0.0
+        self._animation = QVariantAnimation(self)
+        self._animation.setDuration(150)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._animation.valueChanged.connect(self._set_offset)
+        self.toggled.connect(self._animate)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        horizontal = QSizePolicy.Policy.Expanding if fill else QSizePolicy.Policy.Fixed
+        self.setSizePolicy(horizontal, QSizePolicy.Policy.Fixed)
+
+    def _set_offset(self, value):
+        self._offset = float(value)
+        self.update()
+
+    def _get_offset(self) -> float:
+        return self._offset
+
+    offset = Property(float, _get_offset, _set_offset)   # 0＝關、1＝開
+
+    def setChecked(self, checked: bool):
+        super().setChecked(checked)
+        if self.signalsBlocked():
+            # 程式自己設定（例如載入設定時擋住訊號）：toggled 不會送出，直接到位。
+            self._animation.stop()
+            self._set_offset(1.0 if checked else 0.0)
+
+    def showEvent(self, event):
+        self._animation.stop()
+        self._set_offset(1.0 if self.isChecked() else 0.0)
+        super().showEvent(event)
+
+    def _animate(self, checked: bool):
+        target = 1.0 if checked else 0.0
+        if not self.isVisible():
+            self._set_offset(target)
+            return
+        self._animation.stop()
+        self._animation.setStartValue(self._offset)
+        self._animation.setEndValue(target)
+        self._animation.start()
+
+    def sizeHint(self):
+        metrics = self.fontMetrics()
+        width = metrics.horizontalAdvance(self.text()) + _TOGGLE_GAP + _TRACK_W + 2
+        return QSize(width, max(metrics.height(), _TRACK_H) + 6)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)      # 整列都可以點，不只開關本身
+
+    def paintEvent(self, _event):
+        tokens = active_tokens()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        enabled = self.isEnabled()
+        if not enabled:
+            painter.setOpacity(0.45)
+        rect = self.rect()
+        track = QRectF(rect.right() - _TRACK_W - 1, (rect.height() - _TRACK_H) / 2, _TRACK_W, _TRACK_H)
+        painter.setPen(QColor(tokens.text))
+        painter.setFont(self.font())
+        text_rect = QRectF(rect.left(), rect.top(), max(0.0, track.left() - _TOGGLE_GAP - rect.left()), rect.height())
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, int(text_rect.width()))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+        # 軌道：關＝半透明淡灰、開＝主要按鈕色，滑動時兩色漸變
+        off = QColor(tokens.text_faint)
+        off.setAlpha(120)
+        on = QColor(tokens.accent)
+        t = self._offset
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(round(off.red() + (on.red() - off.red()) * t),
+                                round(off.green() + (on.green() - off.green()) * t),
+                                round(off.blue() + (on.blue() - off.blue()) * t),
+                                round(off.alpha() + (255 - off.alpha()) * t)))
+        painter.drawRoundedRect(track, _TRACK_H / 2, _TRACK_H / 2)
+        knob = _TRACK_H - _KNOB_MARGIN * 2
+        x = track.left() + _KNOB_MARGIN + (_TRACK_W - _KNOB_MARGIN * 2 - knob) * t
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawEllipse(QRectF(x, track.top() + _KNOB_MARGIN, knob, knob))
+        if self.hasFocus() and enabled:          # 鍵盤焦點（Tab 過來、空白鍵切換）
+            focus = QColor(tokens.icon_hover)      # 焦點框跟其他控制項一樣用互動色
+            focus.setAlpha(90)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(focus)
+            painter.drawRoundedRect(track.adjusted(-2, -2, 2, 2), _TRACK_H / 2 + 2, _TRACK_H / 2 + 2)
+        painter.end()
+
+
+class CompactToggle(ToggleSwitch):
+    """放在寬對話框裡的開關：只佔文字＋開關的寬度。"""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent, fill=False)
+
+
+class ScopeToggle(CompactToggle):
+    """工具視窗最上面的「只○○選取的 N 章」（掃描、校對、繁簡轉換共用）。
+
+    只選了一章時不預設打勾：點目錄通常只是跳到那一章看內容，預設只處理那一章的話，
+    找不到東西會讓人以為整本都沒問題；刻意選兩章以上才當成只想處理這幾章。"""
+
+    def __init__(self, verb: str, count: int = 0, parent=None):
+        super().__init__("", parent)
+        self._verb = verb
+        self.set_count(count)
+        self.setChecked(count >= 2)
+
+    def set_count(self, count: int):
+        """count＝0：目錄沒有選取，不能開。"""
+        i18n.set_text(self, f"只{self._verb}選取的 {count} 章" if count
+                      else f"只{self._verb}選取的章節（先在目錄選取章節）")
+        self.setEnabled(bool(count))
+        if not count:
+            self.setChecked(False)
+
+
+class ThemeButton(QToolButton):
+    """工具列的主題按鈕：按鈕上畫目前主題的雙色圓點（左半底色、右半主要按鈕色），
+    點了跳出主題選單。選單依序列出淺色系、分隔線、深色系，目前的主題打勾。"""
+
+    themeSelected = Signal(str)
+
+    def __init__(self, themes, tooltip: str, parent=None):
+        super().__init__(parent)
+        self._themes = list(themes)
+        self._current = None
+        self.setObjectName("toolbarButton")
+        self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setIconSize(QSize(20, 20))
+        self.clicked.connect(self._show_menu)
+
+    def set_current(self, name: str):
+        self._current = name
+        tokens = next((t for t in self._themes if t.name == name), self._themes[0])
+        self.setIcon(icons.make_swatch_icon(tokens.bg, tokens.primary_bg, 20))
+
+    def build_menu(self) -> QMenu:
+        """組出選單（不 exec，方便測試）。"""
+        menu = QMenu(self)
+        previous_dark = None
+        for tokens in self._themes:
+            if previous_dark is not None and tokens.is_dark != previous_dark:
+                menu.addSeparator()
+            previous_dark = tokens.is_dark
+            # 「\t」後面的字會靠右顯示（選單的快速鍵欄位），拿來放目前主題的打勾。
+            label = i18n.T(tokens.label) + ("\t✓" if tokens.name == self._current else "")
+            action = menu.addAction(icons.make_swatch_icon(tokens.bg, tokens.primary_bg, 16), label)
+            action.setData(tokens.name)
+            action.triggered.connect(lambda _checked=False, name=tokens.name: self.themeSelected.emit(name))
+        return menu
+
+    def _show_menu(self):
+        menu = self.build_menu()
+        menu.exec(self.mapToGlobal(QPoint(0, self.height() + 4)))
+        menu.deleteLater()
 
 
 class FlowLayout(QLayout):
@@ -161,6 +339,59 @@ def size_dialog(dialog, width: int, height: int):
     keep_on_screen(dialog)
 
 
+def slider_with_spin(layout, label_text, value_range, value, suffix):
+    """數值設定：標籤＋拉桿＋數字框（單位寫在數字框裡），拉桿與數字框互相同步；回傳（拉桿, 數字框）。"""
+    label = QLabel(label_text)
+    label.setObjectName("fileLabel")
+    layout.addWidget(label)
+    value = max(value_range[0], min(value_range[1], int(value)))
+    slider = QSlider(Qt.Orientation.Horizontal)
+    slider.setRange(*value_range)
+    slider.setValue(value)
+    slider.setMinimumWidth(72)
+    layout.addWidget(slider, 1)
+    spin = QSpinBox()
+    spin.setRange(*value_range)
+    spin.setValue(value)
+    spin.setSuffix(i18n.T(suffix))
+    spin.setMinimumWidth(104)          # 兩位數＋單位＋上下箭頭
+    layout.addWidget(spin)
+    spin.valueChanged.connect(slider.setValue)
+
+    def follow(new_value):
+        if spin.value() != new_value:
+            spin.blockSignals(True)
+            spin.setValue(new_value)
+            spin.blockSignals(False)
+    slider.valueChanged.connect(follow)
+    return slider, spin
+
+
+class PanelScroll(QScrollArea):
+    """側邊卡片的內容區：視窗矮時整段捲動，不會把按鈕壓扁、也不會把視窗的最小高度撐高。
+    內容放在 content 裡。
+
+    捲動區預設不會把內容的最小寬度往上回報，卡片就能被拉得比內容還窄，
+    下拉框、按鈕直接超出卡片邊界。這裡把「內容最小寬度＋捲軸寬度」當成
+    自己的最小寬度，卡片最窄就只到剛好裝得下內容。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("panelScroll")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.content = QWidget()
+        self.content.setObjectName("panelScrollContent")
+        self.setWidget(self.content)
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        width = (self.content.minimumSizeHint().width() + self.verticalScrollBar().sizeHint().width()
+                 + 2 * self.frameWidth())
+        return QSize(max(hint.width(), width), hint.height())
+
+
 class Card(QFrame):
     """帶圓角、細邊框的卡片容器，取代明顯的分隔線。
 
@@ -191,7 +422,10 @@ class AppWidgetPolisher(QObject):
        那種擠在一起、目前項目外面套一個黑框的樣子。
     3. 下拉框的最小寬度不再由最長的選項決定：否則卡片拉到最窄時，下拉框
        撐不下去就會連同整個面板內容一起超出卡片邊界。放不下時 Qt 會自動
-       截斷顯示中的文字，展開的清單仍然完整。"""
+       截斷顯示中的文字，展開的清單仍然完整。
+    5. 按鈕不接受滑鼠點擊取得焦點（只接受 Tab）：「測試目前文件」這類一次動作的
+       按鈕按完會一直掛著焦點框，看起來像還開著。按鈕行為的規則見 UI_RULES.md。
+    6. 捲動區一律預留直向捲軸的位置（見 reserve_scrollbar_gutter）。"""
 
     _HINTING = QFont.HintingPreference.PreferFullHinting
     _FONT_EVENTS = (QEvent.Type.Polish, QEvent.Type.FontChange)
@@ -206,6 +440,9 @@ class AppWidgetPolisher(QObject):
             if font.hintingPreference() != self._HINTING:
                 font.setHintingPreference(self._HINTING)
                 watched.setFont(font)
+        if (event.type() == QEvent.Type.Polish and isinstance(watched, (QPushButton, QToolButton))
+                and watched.focusPolicy() in (Qt.FocusPolicy.StrongFocus, Qt.FocusPolicy.ClickFocus)):
+            watched.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         if event.type() == QEvent.Type.Polish and isinstance(watched, QComboBox):
             if not watched.property("styledPopup"):
                 watched.setProperty("styledPopup", True)
@@ -213,7 +450,32 @@ class AppWidgetPolisher(QObject):
                 watched.setSizeAdjustPolicy(
                     QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
                 watched.setMinimumContentsLength(3)
+        if event.type() == QEvent.Type.Polish and isinstance(watched, QAbstractScrollArea):
+            reserve_scrollbar_gutter(watched)
         return False
+
+
+def reserve_scrollbar_gutter(area):
+    """直向捲軸一直佔著位置，不需要捲動時畫成透明：視窗變矮、捲軸冒出來時，
+    內容寬度不會突然變窄、整個版面往左跳一下。下拉清單、補全這類彈出的清單不處理。"""
+    if area.property("gutterReserved") or area.window().windowType() == Qt.WindowType.Popup:
+        return
+    area.setProperty("gutterReserved", True)
+    if area.verticalScrollBarPolicy() != Qt.ScrollBarPolicy.ScrollBarAsNeeded:
+        return
+    area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+    bar = area.verticalScrollBar()
+
+    def mark_idle(minimum, maximum):
+        idle = maximum <= minimum
+        if bar.property("idle") != idle:
+            bar.setProperty("idle", idle)
+            bar.style().unpolish(bar)
+            bar.style().polish(bar)
+            bar.update()
+
+    bar.rangeChanged.connect(mark_idle)
+    mark_idle(bar.minimum(), bar.maximum())
 
 
 # 三張卡片（格式選項／章節管理、目錄、本文）的標題列一律同一個高度：
@@ -248,10 +510,17 @@ class ElidedLabel(QLabel):
     擠掉旁邊的目錄；切到別章時卡片寬度還會跳來跳去。這裡把水平尺寸策略
     設成 Ignored（完全不理會文字寬度），文字則照目前實際寬度截斷。"""
 
+    clicked = Signal()
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self._full_text = text
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
 
     def setText(self, text: str):
         self._full_text = text
@@ -271,7 +540,55 @@ class ElidedLabel(QLabel):
     def _apply_elide(self):
         metrics = self.fontMetrics()
         super().setText(metrics.elidedText(self._full_text, Qt.TextElideMode.ElideRight,
-                                           max(0, self.width())))
+                                           max(0, self.contentsRect().width())))
+
+
+class VDivider(QFrame):
+    """直的 1px 分隔線（工具列上分開兩組按鈕），顏色同 Divider。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("divider")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(1)
+        self.setFixedHeight(24)
+
+
+class _EnterStaysLocal(QObject):
+    """輸入框、數字框、表格裡按 Enter 只做那一欄自己的事（加標點、從範例產生…）：沒被吃掉的 Enter
+    會一路傳到對話框，按下預設的主要按鈕（保存並重掃、刪除已勾選項目），視窗就關了或內容被改了。
+    焦點在按鈕上時按 Enter 照常按那顆按鈕（按鈕自己會處理，不會傳到這裡）。"""
+
+    def eventFilter(self, watched, event):
+        return (event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier))
+
+
+def dialog_frame(dialog, margins=(20, 18, 20, 14), enter_submits: bool = False):
+    """功能視窗的版面：上面放內容，最下面一條貫穿整個視窗的分隔線，線下面是按鈕列
+    （跟側邊卡片置底的按鈕同一種做法）。回傳（內容用的 QVBoxLayout, 按鈕列用的 QHBoxLayout）。
+
+    enter_submits：只有簡單的確認視窗（新增章節、匯出檔名…）在輸入框按 Enter 等於按主要按鈕；
+    工具視窗的 Enter 只做那一欄的事（見 _EnterStaysLocal）。"""
+    if not enter_submits:
+        guard = _EnterStaysLocal(dialog)
+        dialog.installEventFilter(guard)
+    outer = QVBoxLayout(dialog)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(0)
+    body_host = QWidget()
+    body = QVBoxLayout(body_host)
+    left, top, right, bottom = margins
+    body.setContentsMargins(left, top, right, bottom)
+    body.setSpacing(12)
+    outer.addWidget(body_host, 1)
+    outer.addWidget(Divider())
+    footer = QHBoxLayout()
+    footer.setContentsMargins(left, 12, right, 14)
+    footer.setSpacing(10)
+    outer.addLayout(footer)
+    return body, footer
 
 
 class Divider(QFrame):
@@ -351,9 +668,7 @@ class IconButton(QToolButton):
 
 
 class IconTextButton(QPushButton):
-    """圖示＋文字的按鈕，用在需要比純圖示更容易辨識的動作——尤其是切換
-    側邊面板的按鈕：純圖示配 tooltip 的按鈕使用者要 hover 才知道是什麼，
-    這裡改成文字直接寫在按鈕上，並支援 checkable 的「目前開啟中」樣式。
+    """圖示＋文字的按鈕（工具列的面板切換等），支援 checkable 的「開啟中」樣式。
 
     用 QPushButton 而不是 QToolButton：QToolButton 的「文字在圖示旁」模式
     會把圖示＋文字靠左排，按鈕比內容寬時右邊空一截；QPushButton 會把
@@ -373,6 +688,7 @@ class IconTextButton(QPushButton):
         self._color = "#000000"
         self._hover_color = "#000000"
         self._active_color = "#000000"
+        self._disabled_color = None
         self.setCheckable(checkable)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -396,20 +712,31 @@ class IconTextButton(QPushButton):
         self._icon_name = icon_name
         self._refresh_icon()
 
-    def set_colors(self, color: str, hover_color: str, active_color: str):
+    def set_colors(self, color: str, hover_color: str, active_color: str, disabled_color: str | None = None):
+        """disabled_color：不能按的時候圖示跟文字一樣淡（不給就沿用一般顏色）。"""
         self._color = color
         self._hover_color = hover_color
         self._active_color = active_color
+        self._disabled_color = disabled_color
         self._refresh_icon()
 
     def _refresh_icon(self):
-        color = self._active_color if self.isChecked() else (
-            self._hover_color if self.underMouse() else self._color)
+        if not self.isEnabled() and self._disabled_color:
+            color = self._disabled_color
+        elif self.isChecked():
+            color = self._active_color
+        else:
+            color = self._hover_color if self.underMouse() else self._color
         self.setIcon(icons.make_icon(self._icon_name, color, self._size))
 
     def setChecked(self, checked: bool):
         super().setChecked(checked)
         self._refresh_icon()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.EnabledChange:
+            self._refresh_icon()
+        super().changeEvent(event)
 
     def enterEvent(self, event):
         self._refresh_icon()
@@ -418,6 +745,44 @@ class IconTextButton(QPushButton):
     def leaveEvent(self, event):
         self._refresh_icon()
         super().leaveEvent(event)
+
+
+class HoverIconButton(QPushButton):
+    """卡片裡的一般按鈕（掃描無關連內容、合併重複章節…）：滑鼠移上去時圖示跟文字
+    一起變色（文字色由樣式表的 QPushButton:hover 負責），停用時圖示變淡。"""
+
+    def __init__(self, icon_name: str, text: str, *, size: int = 16, parent=None):
+        super().__init__(text, parent)
+        self._icon_name = icon_name
+        self._size = size
+        self._color = self._hover_color = self._disabled_color = "#000000"
+        self.setIconSize(QSize(size, size))
+
+    def set_colors(self, color: str, hover_color: str, disabled_color: str):
+        self._color = color
+        self._hover_color = hover_color
+        self._disabled_color = disabled_color
+        self._refresh_icon()
+
+    def _refresh_icon(self):
+        if not self.isEnabled():
+            color = self._disabled_color
+        else:
+            color = self._hover_color if self.underMouse() else self._color
+        self.setIcon(icons.make_icon(self._icon_name, color, self._size))
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._refresh_icon()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._refresh_icon()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.EnabledChange:
+            self._refresh_icon()
+        super().changeEvent(event)
 
 
 class Editor(QPlainTextEdit):
@@ -435,14 +800,19 @@ class Editor(QPlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Qt 自己的復原堆疊完全用不到（復原走 MainWindow 的快照系統），但它
-        # 預設開著，每次編輯、每次套標題格式都會再存一份；實測開一個 5.8MB
-        # 的檔就累積上百萬步，記憶體白白被吃掉。
+        # 復原走 MainWindow 的快照系統；Qt 自己的復原堆疊開著的話，每次套標題格式都會存一份，
+        # 大檔累積上百萬步。
         self.setUndoRedoEnabled(False)
         self._wheel_accum = 0
         self._show_whitespace = False
         self._whitespace_color = QColor("#A9B1BE")
         self._trailing_color = QColor(180, 56, 60, 40)
+        # 合併下行標題的預覽：接在標題後面畫出來的章名、暫時藏起來的行
+        self._preview_texts: list = []
+        self._preview_blocks: list = []
+        self._hidden_blocks: list = []
+        self._preview_color = QColor("#0F7B6C")
+        self.cursorPositionChanged.connect(self._reveal_cursor_block)
 
     # --- 拖曳開檔 -------------------------------------------------------
 
@@ -489,6 +859,78 @@ class Editor(QPlainTextEdit):
         super().paintEvent(event)
         if self._show_whitespace:
             self._paint_whitespace(event.rect())
+        if self._preview_texts:
+            self._paint_title_preview(event.rect())
+
+    # --- 合併下行標題的預覽 ---------------------------------------------
+
+    def set_title_preview(self, appended: dict, hidden_rows, color: str):
+        """「自動合併下行標題」開著時：本文一個字都不改，只在畫面上把章名接在標題後面
+        （非原文色），原本放章名的那幾行先藏起來。appended 是 行號 → 要接上去的章名。
+
+        記在段落（QTextBlock）自己身上（userState 當索引），使用者在前面打字、行號位移時
+        預覽還是跟著原本那一行；整份文字換掉時這些段落就不存在了，自然不會殘留。"""
+        document = self.document()
+        for block in self._preview_blocks:
+            if block.isValid():
+                block.setUserState(-1)
+        for block in self._hidden_blocks:
+            if block.isValid() and not block.isVisible():
+                block.setVisible(True)
+                document.markContentsDirty(block.position(), block.length())
+        self._preview_texts, self._preview_blocks, self._hidden_blocks = [], [], []
+        self._preview_color = QColor(color)
+        for row, text in sorted(appended.items()):
+            block = document.findBlockByNumber(row)
+            if block.isValid():
+                block.setUserState(len(self._preview_texts))
+                self._preview_texts.append(text)
+                self._preview_blocks.append(block)
+        for row in sorted(hidden_rows):
+            block = document.findBlockByNumber(row)
+            if block.isValid() and block.isVisible():
+                block.setVisible(False)
+                document.markContentsDirty(block.position(), block.length())
+                self._hidden_blocks.append(block)
+        self.viewport().update()
+
+    def _reveal_cursor_block(self):
+        """游標跑進被預覽藏起來的行（尋找、方向鍵、點目錄）：那一行顯示回來，不能停在看不見的地方。"""
+        block = self.textCursor().block()
+        if not block.isVisible():
+            block.setVisible(True)
+            self.document().markContentsDirty(block.position(), block.length())
+            self.viewport().update()
+
+    def set_preview_color(self, color: str):
+        self._preview_color = QColor(color)
+        if self._preview_texts:
+            self.viewport().update()
+
+    def _paint_title_preview(self, clip):
+        painter = QPainter(self.viewport())
+        painter.setPen(self._preview_color)
+        offset = self.contentOffset()
+        block = self.firstVisibleBlock()
+        while block.isValid():
+            geometry = self.blockBoundingGeometry(block).translated(offset)
+            if geometry.top() > clip.bottom():
+                break
+            index = block.userState()
+            if block.isVisible() and 0 <= index < len(self._preview_texts) and geometry.bottom() >= clip.top():
+                layout = block.layout()
+                line = layout.lineAt(layout.lineCount() - 1)
+                # 字型照標題本身（粗體、放大）；行尾隱藏標記是 1px，不能拿它的字型
+                fragments = block.begin()
+                char_format = fragments.fragment().charFormat() if not fragments.atEnd() else block.charFormat()
+                font = char_format.font().resolve(self.font())
+                painter.setFont(font)
+                gap = QFontMetricsF(font).horizontalAdvance(" ")
+                x = geometry.left() + line.x() + line.naturalTextWidth() + gap
+                baseline = geometry.top() + line.y() + line.ascent()
+                painter.drawText(QPointF(x, baseline), self._preview_texts[index])
+            block = block.next()
+        painter.end()
 
     def _paint_whitespace(self, clip):
         """把空白字元畫出來：半形空格「·」、全形空格「□」、Tab「→」，行尾
@@ -521,6 +963,9 @@ class Editor(QPlainTextEdit):
             return
         layout = block.layout()
         stripped = len(text.rstrip(" \t\u3000\u00a0"))
+        # 視覺行的起點、長度是 Qt 的位置（emoji、擴充漢字算 2），text 是 Python 字串：
+        # 要換算，不然空白會畫錯位置。每個段落建一次，多行共用。
+        positions = PositionMap(text)
         for line_index in range(layout.lineCount()):
             line = layout.lineAt(line_index)
             top = origin.y() + line.y()
@@ -528,16 +973,17 @@ class Editor(QPlainTextEdit):
                 continue
             if top > clip.bottom():
                 break
-            self._paint_line_whitespace(painter, pen, line, text, stripped, origin)
+            self._paint_line_whitespace(painter, pen, line, text, stripped, origin, positions)
 
-    def _paint_line_whitespace(self, painter, pen, line, text, stripped, origin):
-        start = line.textStart()
-        for index in range(start, start + line.textLength()):
-            char = text[index] if index < len(text) else ""
+    def _paint_line_whitespace(self, painter, pen, line, text, stripped, origin, positions):
+        first = positions.to_python(line.textStart())
+        last = min(len(text), positions.to_python(line.textStart() + line.textLength()))
+        for index in range(first, last):
+            char = text[index]
             if char not in " \t\u3000\u00a0":
                 continue
-            left = line.cursorToX(index)[0]
-            right = line.cursorToX(index + 1)[0]
+            left = line.cursorToX(positions.to_qt(index))[0]
+            right = line.cursorToX(positions.to_qt(index + 1))[0]
             width = right - left
             # 行尾隱藏標記前面的空白被縮成 1px，畫出來只會是雜訊。
             if width < 3:
@@ -608,6 +1054,8 @@ class LanguageToggle(QWidget):
         self._simplified = False
         self._position = 0.0   # 0＝方塊在「繁」，1＝在「简」
         self._colors = {}
+        self._hover_index = None   # 滑鼠在哪一邊（0／1），不在上面是 None
+        self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedSize(80, 36)
@@ -616,10 +1064,24 @@ class LanguageToggle(QWidget):
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._animation.valueChanged.connect(self._on_animation)
 
-    def set_colors(self, track: str, knob: str, active_text: str, inactive_text: str, shadow: str):
+    def set_colors(self, track: str, knob: str, active_text: str, inactive_text: str, shadow: str,
+                   hover_text: str | None = None):
         self._colors = {"track": QColor(track), "knob": QColor(knob), "active": QColor(active_text),
-                        "inactive": QColor(inactive_text), "shadow": QColor(shadow)}
+                        "inactive": QColor(inactive_text), "shadow": QColor(shadow),
+                        "hover": QColor(hover_text or active_text)}
         self.update()
+
+    def mouseMoveEvent(self, event):
+        index = 1 if event.position().x() >= self.width() / 2 else 0
+        if index != self._hover_index:
+            self._hover_index = index
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_index = None
+        self.update()
+        super().leaveEvent(event)
 
     def is_simplified(self) -> bool:
         return self._simplified
@@ -688,6 +1150,8 @@ class LanguageToggle(QWidget):
             color.setRedF(color.redF() + (active.redF() - color.redF()) * nearness)
             color.setGreenF(color.greenF() + (active.greenF() - color.greenF()) * nearness)
             color.setBlueF(color.blueF() + (active.blueF() - color.blueF()) * nearness)
+            if self._hover_index == index and self.isEnabled():
+                color = self._colors["hover"]      # 滑鼠移上去：跟其他按鈕一樣變成 hover 色
             painter.setPen(color)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
         painter.end()

@@ -25,12 +25,6 @@ class TextEdit:
 
 
 @dataclass(frozen=True)
-class RepairPreview:
-    source: str
-    edits: tuple[TextEdit, ...]
-
-
-@dataclass(frozen=True)
 class PhysicalLine:
     start: int
     end: int
@@ -315,6 +309,47 @@ def _plan_body_edits(body: str, base_offset: int, check_spaces: bool = True) -> 
             )
 
     return sorted(linebreak_edits + space_edits, key=lambda edit: edit.start)
+
+
+def reflow_lines(lines: list, protected_rows) -> tuple:
+    """排版的「整理段落換行」：把正文裡固定欄寬的硬換行接回同一段。
+
+    protected_rows（章節標題、被標成非章節的行…）不動，也不會跟前後接在一起；
+    兩個保護行之間的正文各自整理。回傳（新的行, 舊行號 → 新行號）：被接到上一行的
+    舊行對到它接進去的那一行，章節標題的行號靠這份對照搬過去。"""
+    from bisect import bisect_right
+
+    protected = set(protected_rows)
+    new_lines: list = []
+    row_map: dict = {}
+    index, total = 0, len(lines)
+    while index < total:
+        if index in protected:
+            row_map[index] = len(new_lines)
+            new_lines.append(lines[index])
+            index += 1
+            continue
+        end = index
+        while end < total and end not in protected:
+            end += 1
+        text = "\n".join(lines[index:end])
+        edits = [edit for edit in _plan_body_edits(text, 0, check_spaces=False) if edit.kind == "linebreak"]
+        # 每個編輯吃掉的換行位置；第 k 行前面被吃掉幾個換行，新行號就往前挪幾行
+        removed = sorted(edit.start + offset for edit in edits
+                         for offset, char in enumerate(edit.before) if char == "\n")
+        base = len(new_lines)
+        for offset, start in enumerate(_line_starts(text)):
+            row_map[index + offset] = base + offset - bisect_right(removed, start - 1)
+        # 編輯照位置排好、不重疊：一次接起來，不要每改一處就複製整段（長段落會變成平方時間）
+        parts, cursor = [], 0
+        for edit in sorted(edits, key=lambda edit: edit.start):
+            parts.append(text[cursor:edit.start])
+            parts.append(edit.after)
+            cursor = edit.end
+        parts.append(text[cursor:])
+        new_lines.extend("".join(parts).split("\n"))
+        index = end
+    return new_lines, row_map
 
 
 def _line_starts(text: str) -> list[int]:

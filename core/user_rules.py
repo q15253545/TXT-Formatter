@@ -3,37 +3,37 @@
 import re
 from functools import lru_cache
 
+from . import safe_regex
+from .chapter_parse import too_long_for_title
 from .cn_numerals import chinese_to_arabic
 
-# 純數字這類弱格式（#1、1.、1、、(1)…）不再自動辨識：一般正文的條列、
-# 對話裡的數字很容易長得一模一樣，自動學習誤判時使用者很難察覺。改成
-# 「自訂章節規則」裡的常用格式，一種格式一條規則，需要哪種就勾哪種（可複選）。
-# 章名不可以用逗號、句號這類句中／句末標點結尾，也不可以太長——正文的
-# 條列項目通常是完整句子，這兩個條件能擋掉大部分。
+# 純數字這類弱格式（#1、1.、1、、(1)…）不自動辨識：正文的條列、對話裡的數字長得一模一樣，
+# 誤判時很難察覺。所以做成常用格式，一種格式一條規則，需要哪種就勾哪種。
+# 章名的長度上限、結尾是哪些標點都照「辨識格式」的設定（match_user_chapter_rule 的 title_check），
+# 預設不收逗號、句號結尾：正文的條列項目通常是完整句子。這裡的 200 字只是防呆。
 _NUMBER = r"(?P<number>[0-9０-９]{1,4})"
 _CN_NUMBER = r"(?P<number>[一二三四五六七八九十百千零〇兩两]{1,6})"
-_TITLE = r"(?P<title>\S(?:.{0,38}\S)?)(?<![，。：；、,;:])"
+_ANY_NUMBER = r"(?P<number>[0-9０-９]{1,4}|[一二三四五六七八九十百千零〇兩两]{1,6})"
+_TITLE = r"(?P<title>\S(?:.{0,198}\S)?)"
+# 引號收尾的標題（「1 他說“走吧”」）不受標題結尾限制，跟自動辨識的例外一樣
+_CLOSING_QUOTE_TAIL = re.compile(r"[”’」』]\s*$")
 _LEAD_SEP = r"(?:[\.．、:：\-—]\s*)?"
 
 PRESET_RULES = [
-    {"preset": "hash_number", "name": "井號數字", "example": "#1 標題、## 12. 標題",
-     "pattern": rf"^[#＃]{{1,6}}\s*{_NUMBER}\s*{_LEAD_SEP}{_TITLE}$"},
-    {"preset": "hash_chapter", "name": "井號＋第N章", "example": "## 第1章 標題",
-     "pattern": r"^[#＃]{1,6}\s*第\s*(?P<number>[0-9０-９一二三四五六七八九十百千零〇兩两]+)\s*[章回節节]"
-                rf"[\s：:、.．\-—]*{_TITLE}$"},
+    {"preset": "hash_number", "name": "井號數字", "example": "#1 標題、#12. 標題",
+     "pattern": rf"^[#＃](?![#＃])\s*{_NUMBER}\s*{_LEAD_SEP}{_TITLE}$"},
     {"preset": "dot_number", "name": "數字加點", "example": "1. 標題、12．標題",
      "pattern": rf"^{_NUMBER}\s*[\.．]\s*(?![0-9０-９]){_TITLE}$"},   # 3.14 是小數，不是章號
     {"preset": "comma_number", "name": "數字頓號", "example": "1、標題",
      "pattern": rf"^{_NUMBER}\s*、\s*{_TITLE}$"},
     {"preset": "space_number", "name": "數字空格", "example": "1 標題",
      "pattern": rf"^{_NUMBER}[ \t　]+{_TITLE}$"},
-    {"preset": "bracket_number", "name": "括號數字", "example": "(1) 標題、【1】標題",
-     "pattern": rf"^[\(（\[【]\s*{_NUMBER}\s*[\)）\]】]\s*{_LEAD_SEP}{_TITLE}$"},
+    {"preset": "bracket_number", "name": "括號數字", "example": "(1) 標題、【1】標題、（一）",
+     "pattern": rf"^[\(（\[【]\s*{_ANY_NUMBER}\s*[\)）\]】]\s*(?:{_LEAD_SEP}{_TITLE})?$"},   # 「(3)」單獨一行也算
     {"preset": "cn_comma_number", "name": "中文數字頓號", "example": "一、標題",
      "pattern": rf"^{_CN_NUMBER}\s*、\s*{_TITLE}$"},
     {"preset": "bare_number", "name": "純數字獨立一行", "example": "1、001",
      "pattern": rf"^{_NUMBER}(?P<title>)$"},
-    # 以下兩種原本是預設自動辨識，審查後改成可選（預設只收「第N章」這類正規格式）。
     # 編號後面一定要有分隔，才不會把「卷三十萬大軍」「集三千寵愛於一身」當成卷。
     {"preset": "leading_unit_volume", "name": "不帶「第」的卷號", "example": "卷一 風起、集三：歸來",
      "level": 1,
@@ -50,6 +50,14 @@ PRESET_RULES = [
     {"preset": "english_chapter", "name": "英文 Chapter N", "example": "Chapter 1、Ch.12",
      "pattern": r"^(?:Chapter|Chap|Ch)\.?\s*(?P<number>[0-9]{1,4})"
                 r"(?:[\s:：.\-—]+(?P<title>\S.{0,60}?))?\s*$"},
+    {"preset": "english_section", "name": "英文 Section N", "example": "Section 1、Sec.12",
+     "pattern": r"^(?:Section|Sect|Sec)\.?\s*(?P<number>[0-9]{1,4})"
+                r"(?:[\s:：.\-—]+(?P<title>\S.{0,60}?))?\s*$"},
+    # 編號後面一定要有分隔，才不會把「章三十萬字」這種句子當成章。
+    {"preset": "leading_unit_chapter", "name": "不帶「第」的章號", "example": "章一 風起、回三：歸來",
+     "pattern": r"^[【\[\(（]?\s*[章回節节]\s*"
+                r"(?P<number>[0-9０-９一二兩两三四五六七八九十百千零〇]{1,8})\s*[】\]\)）]?"
+                rf"(?:[\s:：、．.\-—·]+{_TITLE})?$"},
 ]
 
 
@@ -60,6 +68,10 @@ _SEPARATORS = "：:、，,.．。\\-—─～~|｜/／"
 _VOLUME_UNITS_IN_SAMPLE = "卷部篇集"
 _CLOSING = "】\\]）\\)》>」』〕"
 # 編號後面依序是：單位（章／話／節…）、收尾括號、分隔符、章名，後三者都可有可無。
+# 章節單位白名單：編號後面緊接這些字才是單位，其餘都是章名（「第1章山河」的單位只有「章」）。
+_UNITS_IN_SAMPLE = "章回節节折幕卷部篇集話话"
+_FORMAL_SAMPLE = re.compile(
+    rf"第\s*(?P<number>[{_ARABIC}]+|[{_CHINESE_NUMBER}]+)\s*(?P<unit>[{_UNITS_IN_SAMPLE}])")
 _SAMPLE_REST = re.compile(
     rf"^(?P<unit>[^\s{_SEPARATORS}{_CLOSING}]{{0,4}})(?P<close>[{_CLOSING}]?)"
     rf"(?:[\s{_SEPARATORS}]*(?P<title>\S.*))?$")
@@ -93,21 +105,37 @@ def rule_from_sample(sample: str):
     clean = (sample or "").strip()
     if not clean or len(clean) > 120:
         return None
-    match = re.search(rf"[{_ARABIC}]+", clean)
-    number_class = f"[{_ARABIC}]"
-    if match is None:
-        match = re.search(rf"[{_CHINESE_NUMBER}]+", clean)
-        number_class = f"[{_CHINESE_NUMBER}]"
-    if match is None:
-        return None
-
-    prefix, rest = clean[:match.start()], clean[match.end():]
-    rest_match = _SAMPLE_REST.match(rest)
-    if rest_match:
-        unit = rest_match.group("unit") + rest_match.group("close")
-        title = rest_match.group("title") or ""
+    # 先認正規的「第＋數字＋單位」：章名裡的數字（「第一章 2026年的故事」）不能被當成章號
+    # 。
+    formal = _FORMAL_SAMPLE.search(clean)
+    if formal:
+        start, end = formal.span("number")
+        number_text = formal.group("number")
+        number_class = f"[{_ARABIC}]" if re.match(rf"[{_ARABIC}]", number_text) else f"[{_CHINESE_NUMBER}]"
+        prefix = clean[:start]
+        rest = clean[end:]
     else:
-        unit, title = rest.strip(), ""
+        match = re.search(rf"[{_ARABIC}]+", clean)
+        number_class = f"[{_ARABIC}]"
+        if match is None:
+            match = re.search(rf"[{_CHINESE_NUMBER}]+", clean)
+            number_class = f"[{_CHINESE_NUMBER}]"
+        if match is None:
+            return None
+        prefix, rest = clean[:match.start()], clean[match.end():]
+
+    unit_match = re.match(rf"\s*([{_UNITS_IN_SAMPLE}])([{_CLOSING}]?)", rest)
+    if unit_match:
+        # 單位只有一個字（章、回、節…），後面全部是可變的章名：「第1章山河」要能對到「第2章星海」
+        unit = unit_match.group(1) + unit_match.group(2)
+        title = rest[unit_match.end():].lstrip(" \t　" + "：:、，,.．。-—─～~|｜/／").strip()
+    else:
+        rest_match = _SAMPLE_REST.match(rest)
+        if rest_match:
+            unit = rest_match.group("unit") + rest_match.group("close")
+            title = rest_match.group("title") or ""
+        else:
+            unit, title = rest.strip(), ""
 
     # 章名一律做成「可有可無」：同一種格式常常有幾章只有章號、沒有標題。
     pattern = (r"^\s*" + _literal_pattern(prefix)
@@ -154,32 +182,91 @@ def _compile_rule_pattern(pattern):
     綽綽有餘，重複呼叫可命中；即使遇到壞掉的正則，交由呼叫端的
     try/except 處理，這裡不特別攔截。
     """
-    return re.compile(pattern, re.IGNORECASE)
+    from .title_blocks import GENERATED_PATTERNS
+    if pattern in _BUILTIN_PATTERNS or pattern in GENERATED_PATTERNS:
+        return re.compile(pattern, re.IGNORECASE)     # 內建的常用格式、積木組出來的：安全，用標準 re 比較快
+    return safe_regex.compile(pattern, re.IGNORECASE)
 
 
-def match_user_chapter_rule(text, rules):
-    """套用使用者規則；規則仍受獨立行、長度與有效擷取內容限制。"""
-    if not text or len(text) > 180:
+_BUILTIN_PATTERNS = frozenset(preset["pattern"] for preset in PRESET_RULES)
+
+
+_PRESET_COMPILED = tuple((preset["preset"], re.compile(preset["pattern"], re.IGNORECASE),
+                          {"name": preset["name"], "level": preset.get("level", 2)})
+                         for preset in PRESET_RULES)
+
+
+@lru_cache(maxsize=1 << 18)
+def preset_match(text):
+    """這一行第一個符合的常用格式：（preset id, 比對結果）或 None。照內容快取
+    （「本文可疑章節」每次開都要把整本每一行比一遍）；內建格式都是安全的正則，直接用 re。"""
+    if not text or len(text) > _MAX_RULE_TEXT:
+        return None
+    for preset_id, pattern, rule in _PRESET_COMPILED:
+        match = pattern.fullmatch(text)
+        result = _rule_result(match, rule, text) if match else None
+        if result:
+            return preset_id, result
+    return None
+
+
+# 在期限內跑不完的規則（寫法造成大量回溯）：這次開啟期間停用，不再拿來比對
+# （改了正則內容就是另一條，會重新試）。還沒提醒過使用者的名稱另外記著，
+# 介面重建目錄後用 pop_timed_out_rules() 取出來顯示。
+_TIMED_OUT_PATTERNS: set = set()
+_UNREPORTED_TIMEOUTS: set = set()
+
+
+def pop_timed_out_rules() -> list:
+    """取出（並清空）還沒提醒過的逾時規則名稱；規則本身維持停用。"""
+    names = sorted(_UNREPORTED_TIMEOUTS)
+    _UNREPORTED_TIMEOUTS.clear()
+    return names
+
+
+_MAX_RULE_TEXT = 180
+
+
+def _rule_result(match, rule, text):
+    """比對成功之後：取出章號與標題，章號不合理或什麼都沒有就不算。"""
+    groups = match.groupdict()
+    number_text = (groups.get("number") or "").strip()
+    number = chinese_to_arabic(number_text) if number_text else 0
+    # 規則裡有 title 群組就用它（可以是空的，例如只有章號的「純數字獨立一行」）；
+    # 沒有 title 群組才拿整行當標題。
+    title = (groups["title"] or "").strip() if "title" in groups else text.strip()
+    if number_text and (number <= 0 or not float(number).is_integer()):
+        return None
+    if not title and not number_text:
+        return None
+    return {"rule": rule["name"], "level": int(rule["level"]),
+            "number": int(number) if number else 0, "title": title}
+
+
+def match_user_chapter_rule(text, rules, title_check=None):
+    """套用使用者規則；規則仍受獨立行、長度與有效擷取內容限制。
+    title_check（「標題結尾」「標題長度」的設定）只管常用格式與積木組合：使用者自己寫的正則照寫法，不另外擋。"""
+    if not text or len(text) > _MAX_RULE_TEXT:
         return None
     for rule in rules:
         if not rule.get("enabled", True):
             continue
+        pattern_text = rule.get("pattern", "")
+        if pattern_text in _TIMED_OUT_PATTERNS:
+            continue
         try:
-            match = _compile_rule_pattern(rule["pattern"]).fullmatch(text)
-        except (KeyError, re.error):
+            match = safe_regex.fullmatch(_compile_rule_pattern(pattern_text), text)
+        except safe_regex.RegexTimeout:
+            _TIMED_OUT_PATTERNS.add(pattern_text)
+            _UNREPORTED_TIMEOUTS.add(rule.get("name", "") or pattern_text)
             continue
-        if not match:
+        except (KeyError, *safe_regex.errors):
             continue
-        groups = match.groupdict()
-        number_text = (groups.get("number") or "").strip()
-        number = chinese_to_arabic(number_text) if number_text else 0
-        # 規則裡有 title 群組就用它（可以是空的，例如只有章號的「純數字獨立
-        # 一行」）；沒有 title 群組才拿整行當標題。
-        title = (groups["title"] or "").strip() if "title" in groups else text.strip()
-        if number_text and (number <= 0 or not float(number).is_integer()):
+        result = _rule_result(match, rule, text) if match else None
+        if result and (rule.get("preset") or rule.get("blocks")) and title_check is not None and (
+                too_long_for_title(text, getattr(title_check, "max_length", len(text)))
+                or (title_check.search(text) and not _CLOSING_QUOTE_TAIL.search(text))):
             continue
-        if not title and not number_text:
-            continue
-        return {"rule": rule["name"], "level": int(rule["level"]),
-                "number": int(number) if number else 0, "title": title}
+        if result:
+            return result
     return None

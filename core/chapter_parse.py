@@ -2,6 +2,7 @@
 
 import re
 import unicodedata
+from functools import lru_cache
 
 from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 
@@ -35,11 +36,11 @@ VOL_PATTERN = rf"(?:(?P<volume>第{CN_NUM_PATTERN}\s*[部卷篇集]){SEP})?"
 # 關鍵字後面必須是行尾、空白、分隔符號或括號，不能直接接著文字：
 # 否則「序幕拉開了」「簡介一下我自己」「後記得……」這種句子都會被當成
 # 特殊標題（實測預設規則會把它們全部收進目錄）。
-_TAG_BOUNDARY = r"(?=$|[\s　:：、．.·・\-—_~～（(【\[「『《〈】\]\)）」』》〉])"
+_TAG_BOUNDARY = r"(?=$|[\s　:：、．.·・•▪\-—_~～（(【\[「『《〈】\]\)）」』》〉])"
 
 COMBO_SPECIAL_REGEX = re.compile(
     r"^[\s【\[\(-]*" + ARC_PATTERN + VOL_PATTERN +
-    r"(?P<tag>前言|簡介|简介|人物簡介|人物简介|序章|序言|序|楔子|引子|後記|后记|尾聲|尾声|內容簡介|内容简介)"
+    r"(?P<tag>前言|簡介|简介|人物簡介|人物简介|序章|序言|序|楔子|引子|後記|后记|尾聲|尾声|內容簡介|内容简介|間章|间章)"
     + _TAG_BOUNDARY +
     r"[\s】\]\)-]*(?P<title>.*)$", re.IGNORECASE)
 
@@ -57,7 +58,7 @@ LV1_B_REGEX = re.compile(
 
 COMBO_LV2_REGEX = re.compile(
     r"^[\s【\[\(-]*" + ARC_PATTERN + VOL_PATTERN +
-    rf"第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})\s*(?P<unit>[章回節节折幕])"
+    rf"第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})(?:\s*[、，,]\s*(?P<also>[0-9０-９]{{1,4}}))?\s*(?P<unit>[章回節节折幕])"
     r"[\s】\]\)-]*(?P<title>.*)$", re.IGNORECASE)
 
 COMBO_LV2_EXTRA_REGEX = re.compile(
@@ -83,6 +84,7 @@ WEAK_PLAIN_TITLE_REGEX = re.compile(
 )
 
 
+@lru_cache(maxsize=1 << 18)
 def parse_weak_numbered_title(text):
     """共用弱格式解析器：供次行章名合併與稀有章節掃描使用。"""
     for style, regex in (
@@ -144,10 +146,16 @@ def weak_candidate_to_user_rule(candidate):
     }
 
 
+# 章號裡把 0 打成英文字母 o（「第2oo章」、「第1O5章」）：至少有一個真的數字才換，
+# 單獨的「第o章」不算。
+_OCR_ZERO = re.compile(r"(?<=第)(\s*)([0-9][0-9oO]*[oO][0-9oO]*)(?=\s*[章回節节])")
+
+
 def parse_lv2(line):
-    # 自動辨識只收正規格式（第N章／回／節…、番外）。英文的 Chapter N 已經改成
-    # 「自訂章節規則」裡的常用格式，要用的人自己勾；COMBO_LV2_NUM_REGEX 仍留給
-    # 連續編號、保留標題間隔這些「已經確定是標題」之後的處理使用。
+    # 自動辨識只收正規格式（第N章／回／節…、番外）；英文 Chapter N 是「自訂章節規則」的常用格式。
+    # COMBO_LV2_NUM_REGEX 給連續編號、保留標題間隔這些「已經確定是標題」之後的處理使用。
+    if "o" in line or "O" in line:
+        line = _OCR_ZERO.sub(lambda match: match.group(1) + match.group(2).replace("o", "0").replace("O", "0"), line)
     for regex, prefix in ((COMBO_LV2_REGEX, "第"), (COMBO_LV2_EXTRA_REGEX, "番外")):
         match = regex.match(line)
         if match:
@@ -163,10 +171,8 @@ def parse_lv2(line):
 
 def parse_lv1(line):
     m = LV1_A_REGEX.match(line)
-    # 只收「第N卷／部／篇／集」。不帶「第」的「卷一」「集三」後面不需要任何分隔，
-    # 「集三千寵愛於一身」「部三十人的隊伍出發了」都會被當成卷標題；改成
-    # 「自訂章節規則」的常用格式（那裡要求編號後面有分隔）。LV1_A_REGEX 本身
-    # 仍保留兩種語序，給連續編號這類「已經確定是標題」之後的處理使用。
+    # 只收「第N卷／部／篇／集」：不帶「第」的「集三千寵愛於一身」會被當成卷，那種寫法是
+    # 「自訂章節規則」的常用格式（要求編號後面有分隔）。LV1_A_REGEX 的另一種語序給連續編號用。
     if m and m.group("number"):
         fields = m.groupdict(default="")
         return (_clean_arc(fields["arc"]), fields["prefix"] or "第", chinese_to_arabic(fields["number"]),
@@ -180,21 +186,122 @@ def parse_lv1(line):
 
 
 MAX_TITLE_LENGTH = 45
-SENTENCE_TAIL_CHARS = "，。：；.,;”’"
 CLOSING_QUOTE_TAIL_REGEX = re.compile(r"[”’」』]\s*$")
 
 
-def build_invalid_tail_regex(allowed_chars=""):
-    """組出「標題不可用這些標點結尾」的樣式；allowed_chars 是使用者設定的例外。"""
-    blocked = set(SENTENCE_TAIL_CHARS) - set(allowed_chars or "")
+# 標題結尾允許字元：每一組是（顯示用的符號, 這一組包含的全形／半形字, 名稱），各自是開關。
+# 預設允許問號、驚嘆號、刪節號、波浪號；問句結尾的正文被當成章節時，使用者可以關掉問號。
+TITLE_TAIL_GROUPS = (
+    ("？", "？?", "問號"),
+    ("！", "！!", "驚嘆號"),
+    ("…", "…", "刪節號"),
+    ("～", "～~", "波浪號"),
+    ("，", "，,", "逗號"),
+    ("。", "。.", "句號"),
+    ("：", "：:", "冒號"),
+    ("；", "；;", "分號"),
+    ("、", "、", "頓號"),
+    ("”", "”’", "收尾引號"),
+)
+DEFAULT_TITLE_TAIL_ALLOWED = "？?！!…～~"
+_TITLE_TAIL_CHARS = "".join(chars for _symbol, chars, _name in TITLE_TAIL_GROUPS)
+
+
+def title_tail_groups(extra_chars: str = "") -> list:
+    """內建的幾組，加上使用者在「標題結尾」分頁自己新增的標點（每個字一組）。"""
+    groups = list(TITLE_TAIL_GROUPS)
+    for char in dict.fromkeys(extra_chars or ""):
+        if char not in _TITLE_TAIL_CHARS:
+            groups.append((char, char, "自訂"))
+    return groups
+
+
+def build_title_tail_regex(allowed_chars=DEFAULT_TITLE_TAIL_ALLOWED, extra_chars: str = ""):
+    """「標題不可用這些標點結尾」的樣式：清單上（內建＋使用者新增）沒有被允許的字。
+    正式標題用引號收尾（「第1章「起點」」）的例外照舊（見 is_valid_auto_title）。"""
+    blocked = (set(_TITLE_TAIL_CHARS) | set(extra_chars or "")) - set(allowed_chars or "")
     if not blocked:
         return None
-    return re.compile(f"[{re.escape(''.join(sorted(blocked)))}]\\s*$")
+    ellipsis_allowed = "…" in (allowed_chars or "")
+    parts = []
+    if "." in blocked:
+        # 半形的「......」（兩個點以上）是刪節號：刪節號允許時不擋，單獨一個「.」照舊算句號
+        blocked.discard(".")
+        parts.append(r"(?<!\.)(?<!\. )(?<!\.　)\.(?!\.)" if ellipsis_allowed else r"\.")
+    if not ellipsis_allowed:
+        parts.append(r"\.(?:[ 　]?\.)+")
+    if blocked:
+        parts.insert(0, f"[{re.escape(''.join(sorted(blocked)))}]")
+    return re.compile(f"(?:{'|'.join(parts)})\\s*$")
+
+
+def title_tail_group(text: str, extra_chars: str = ""):
+    """標題最後一個字屬於哪一組（回傳顯示用的符號）；不是清單上的標點就回傳 None。"""
+    text = text.rstrip()
+    if not text:
+        return None
+    return next((symbol for symbol, chars, _name in title_tail_groups(extra_chars) if text[-1] in chars), None)
+
+
+class TitleCheck:
+    """標題的基本限制：最長幾個字、結尾不能是哪些標點。可以直接當成「標題結尾」的正則傳下去
+    （有 search），各處判斷長度時用 title_length_limit() 取上限。"""
+
+    def __init__(self, tail_regex=None, max_length: int = MAX_TITLE_LENGTH):
+        self.tail_regex = tail_regex
+        self.max_length = max_length
+
+    def search(self, text):
+        # 樣式都錨在行尾、最多往前看到句點前兩個字：只拿最後三個字去比，整本十幾萬行不必每行從頭掃
+        if self.tail_regex is None:
+            return None
+        return self.tail_regex.search(text.rstrip()[-3:])
+
+
+def build_title_check(allowed_chars=DEFAULT_TITLE_TAIL_ALLOWED, extra_chars: str = "",
+                      max_length: int = MAX_TITLE_LENGTH) -> TitleCheck:
+    return TitleCheck(build_title_tail_regex(allowed_chars, extra_chars), max_length)
+
+
+def title_length_limit(check) -> int:
+    return getattr(check, "max_length", MAX_TITLE_LENGTH)
+
+
+_SPACE_RUN = re.compile(r"([ 　\t\xa0])\1+")
+
+
+def too_long_for_title(text: str, limit: int) -> bool:
+    """比標題長度上限長。章號跟章名之間塞了一大串空白（排版對齊用）時空白只算一個字，
+    短的行不用多做這一步。"""
+    if len(text) <= limit:
+        return False
+    # 正文行幾乎都比上限長、也沒有連續的空白：直接算太長，不用做取代（每一行都會問）
+    if "  " not in text and "　　" not in text and "\t\t" not in text and "\xa0\xa0" not in text:
+        return True
+    return len(text) - sum(match.end() - match.start() - 1 for match in _SPACE_RUN.finditer(text)) > limit
+
+
+LONG_FORMAL_TITLE_LENGTH = 100
+_FORMAL_HEAD = re.compile(rf"第\s*{CN_NUM_PATTERN}\s*[章回節节][ 　\t:：\-—·、]+(?=\S)")
+
+
+def long_formal_title(text: str, limit: int) -> bool:
+    """超過標題長度、但是「第N章＋分隔＋章名」的正式寫法：有些書的章名就是一整段（六七十字），
+    放寬到 LONG_FORMAL_TITLE_LENGTH。章名裡有句號、引號開了沒關的是章名跟正文第一句黏在
+    同一行，照樣擋。使用者把標題長度調得比預設短，就照設定、不放寬。"""
+    if limit < MAX_TITLE_LENGTH or not text.startswith("第"):
+        return False
+    head = _FORMAL_HEAD.match(text)
+    if not head or too_long_for_title(text, max(limit, LONG_FORMAL_TITLE_LENGTH)):
+        return False
+    body = text[head.end():]
+    return ("。" not in body and body.count("“") <= body.count("”") and body.count("「") <= body.count("」")
+            and body.count("『") <= body.count("』"))
 
 
 def is_valid_title(text, invalid_tail_regex):
     """標題的基本限制：不可過長，且不可用句末標點結尾。"""
-    if len(text) > MAX_TITLE_LENGTH:
+    if too_long_for_title(text, title_length_limit(invalid_tail_regex)):
         return False
     return not (invalid_tail_regex and invalid_tail_regex.search(text))
 
@@ -206,10 +313,12 @@ def is_valid_auto_title(text, invalid_tail_regex):
     例外二：只有章號、章名寫在下一行的格式，例如『第6章：』。結尾的分隔符
             不是句末標點，而章號前綴本身就是夠強的結構證據。
     """
-    if is_valid_title(text, invalid_tail_regex):
-        return True
-    if len(text) > MAX_TITLE_LENGTH:
+    # 長度先看（整本每一行都會問，只算一次），沒超過再照 is_valid_title 看結尾
+    limit = title_length_limit(invalid_tail_regex)
+    if too_long_for_title(text, limit) and not long_formal_title(text, limit):
         return False
+    if not (invalid_tail_regex and invalid_tail_regex.search(text)):
+        return True
 
     lv2 = parse_lv2(text)
     strong_lv2 = bool(lv2 and not is_weak_numbered_title(text))
@@ -225,6 +334,118 @@ def is_valid_auto_title(text, invalid_tail_regex):
     if special and not strip_title_body(special[3]):
         return True
     return False
+
+
+def looks_like_heading(text: str, max_length: int = MAX_TITLE_LENGTH) -> bool:
+    """有章號（第N章，不含弱格式）、卷號或序章這類開頭，而且不太長：看起來像標題。
+    「辨識格式」各頁數「未收錄」用（快取在 heading_word，長度上限可以改）。"""
+    if too_long_for_title(text, max_length) and not long_formal_title(text, max_length):
+        return False
+    return heading_word(text) is not None and not not_a_heading(text)
+
+
+# 自動辨識認得的字：（代號, 顯示, 這一組包含的寫法）。使用者可以在「自訂章節規則 → 辨識格式」
+# 關掉其中幾個，例如關掉「節」「部」，正文裡的「第一節課」「第一部手機」就不會被當成章節。
+CHAPTER_WORDS = (("章", "第N章", ("章",)), ("回", "第N回", ("回",)), ("節", "第N節", ("節", "节")),
+                 ("折", "第N折", ("折",)), ("幕", "第N幕", ("幕",)), ("番外", "番外", ("番外",)))
+VOLUME_WORDS = (("卷", "第N卷", ("卷",)), ("部", "第N部", ("部",)), ("篇", "第N篇", ("篇",)),
+                ("集", "第N集", ("集",)), ("外傳", "外傳", ("外傳", "外传")), ("終章", "終章", ("終章", "终章")))
+SPECIAL_WORDS = (("序章", "序章", ("序章",)), ("序言", "序言", ("序言",)), ("序", "序", ("序",)),
+                 ("前言", "前言", ("前言",)), ("楔子", "楔子", ("楔子",)), ("引子", "引子", ("引子",)),
+                 ("簡介", "簡介", ("簡介", "简介", "內容簡介", "内容简介", "人物簡介", "人物简介")),
+                 ("後記", "後記", ("後記", "后记")), ("尾聲", "尾聲", ("尾聲", "尾声")),
+                 ("間章", "間章", ("間章", "间章")))
+# 可以在「辨識章節 → 特殊標題」改成卷或章的字，與預設的層級（1＝卷、2＝章）。序章這類預設「2」的
+# 是特殊標題（掛在目前的卷底下）；改成卷時後面的章會掛在它底下。
+SPECIAL_LEVELS = {**{key: 2 for key, _label, _variants in SPECIAL_WORDS}, "番外": 2, "外傳": 1, "終章": 1}
+_WORD_KEY = {variant: key for key, _label, variants in CHAPTER_WORDS + VOLUME_WORDS + SPECIAL_WORDS
+             for variant in variants}
+# heading_word 認得的標題一定有這些字：章、卷的單位前面要有「第」，不用「第」的只有番外、外傳、終章
+# 與特殊標題。沒有的行不用跑整套標題正則（大檔的正文幾乎都是這種）。
+_NUMBERED_UNITS = {"章", "回", "節", "折", "幕", "卷", "部", "篇", "集"}
+_WORD_HINT_REGEX = re.compile("|".join(sorted(
+    map(re.escape, {"第"} | {variant for key, _label, variants in CHAPTER_WORDS + VOLUME_WORDS + SPECIAL_WORDS
+                             if key not in _NUMBERED_UNITS for variant in variants}),
+    key=len, reverse=True)))
+
+
+# 不是標題的行：作者的話「PS：第五部總結…」、卷尾的一句話「第三卷……到此結束，下一章開始新的一卷」、
+# 名稱是作者的話的卷「第一部總結兼請假」。自動辨識不收（人工收錄、自訂規則照舊）。
+_PS_PREFIX = re.compile(r"^p\.?s\.?\s*[:：]", re.IGNORECASE)
+_END_SENTENCE = re.compile(r"(?:到此|至此)(?:结束|結束|完结|完結|终|終|告一段落)|下一[章卷集部篇](?:开始|開始)")
+_NOTE_TITLE_WORDS = re.compile(r"请假|請假|月票|求票|推荐票|推薦票|保底|感言|订阅|訂閱|^总结|^總結")
+
+
+# 單位字跟後面的字合起來是一個詞：「第二部分，是…」「第一集團軍」不是卷，
+# 「第三回合」「第一節課」「第二節自習課」「第一節晚自習」是正文的句子開頭，不是章節
+_UNIT_WORD = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*"
+                        r"(?:部[分门門队隊长長落位]|集[团團中合体體]|篇幅|卷[入起子轴軸]|回合"
+                        r"|[节節](?:[一-鿿]{0,2}[课課]|晚自[习習]))")
+
+
+def not_a_heading(text: str) -> bool:
+    if _PS_PREFIX.match(text) or _END_SENTENCE.search(text) or _UNIT_WORD.match(text):
+        return True
+    volume = parse_lv1(text)
+    if volume and not parse_lv2(text):
+        return bool(_NOTE_TITLE_WORDS.search(strip_title_body(volume[4])))
+    return False
+
+
+def word_key(unit: str):
+    """單位的寫法（节、外传…）對到「辨識格式」開關用的代號（節、外傳…）。"""
+    return _WORD_KEY.get(unit)
+
+
+def may_have_heading_word(text: str) -> bool:
+    return _WORD_HINT_REGEX.search(text) is not None
+
+
+@lru_cache(maxsize=1 << 18)
+def heading_word(text: str):
+    """自動辨識會照哪個字把這一行當成標題（照目錄辨識的順序：卷 → 章 → 特殊標題）；不是就回傳 None。"""
+    if not may_have_heading_word(text):
+        return None
+    volume = parse_lv1(text)
+    if volume:
+        return _WORD_KEY.get(volume[3])
+    chapter = parse_lv2(text)
+    if chapter and not is_weak_numbered_title(text):
+        return "番外" if chapter[2] == "番外" else _WORD_KEY.get(chapter[4])
+    special = parse_special(text)
+    if special:
+        return _WORD_KEY.get(special[2]) or _WORD_KEY.get(special[2].lower())
+    return None
+
+
+def heading_words(text: str) -> set:
+    """這一行標題用到的所有單位（「第一卷 山路 第一章」有卷和章兩個）。
+    「辨識格式」關掉其中任何一個，這一行就不自動當成標題。"""
+    if not may_have_heading_word(text):
+        return set()
+    keys = set()
+    volume = parse_lv1(text)
+    if volume:
+        keys.add(_WORD_KEY.get(volume[3]))
+    chapter = parse_lv2(text)
+    if chapter and not is_weak_numbered_title(text):
+        keys.add("番外" if chapter[2] == "番外" else _WORD_KEY.get(chapter[4]))
+    special = parse_special(text)
+    if special:
+        keys.add(_WORD_KEY.get(special[2]) or _WORD_KEY.get(special[2].lower()))
+    keys.discard(None)
+    return keys
+
+
+@lru_cache(maxsize=1 << 18)
+def heading_number(text: str):
+    """正式章號（第N章／節…，不含弱格式）的號碼；不是就回傳 None。缺章檢查找「原文有、沒收錄」的章用。"""
+    if "第" not in text or len(text) > 200:
+        return None
+    parsed = parse_lv2(text)
+    if not parsed or parsed[2] != "第" or not parsed[3] or is_weak_numbered_title(text):
+        return None
+    return int(parsed[3]) if float(parsed[3]).is_integer() else None
 
 
 def parse_special(line):
@@ -314,6 +535,28 @@ def render_chapter_number_like(new_number, sample_text):
     """依照樣本採用的數字系統輸出新編號文字。"""
     number = int(new_number)
     return str(number) if uses_arabic_numerals(sample_text) else arabic_to_chinese(number)
+
+
+_DIGIT_WISE = re.compile(r"[〇零一二三四五六七八九两兩]+")
+
+
+def ten_as_zero_reading(number_text):
+    """有的作者把「十」寫成「零」：一百一十一 → 一一零一、一百三十九 → 一三零九。
+    逐位寫法、最後是「零＋一個數字」時回傳這種讀法的值，其他寫法回傳 None。
+    單看號碼分不出是 1101 還是 111，要照前後章決定（resolve_chapter_number）。"""
+    text = (number_text or "").strip()
+    if len(text) < 3 or not _DIGIT_WISE.fullmatch(text) or text[-2] not in "零〇" or text[-1] in "零〇":
+        return None
+    return int(chinese_to_arabic(text[:-2])) * 10 + int(chinese_to_arabic(text[-1]))
+
+
+def resolve_chapter_number(number, number_text, previous):
+    """號碼有兩種讀法時，選跟前一章（previous）接得比較上的那個。"""
+    alternative = ten_as_zero_reading(number_text)
+    if alternative is None or not previous:
+        return number
+    expected = previous + 1
+    return alternative if abs(alternative - expected) < abs(number - expected) else number
 
 
 def original_number_text(text, unit):
@@ -457,27 +700,66 @@ def clean_merged_subtitle(text):
     return weak["body"], True
 
 
+# 卷的寫法兩種：「第一卷」或「卷一」（每章標題前面都帶著卷，例如「卷一 山路 第一章 出發」）；
+# 卷號後面可以有一段括號附註（「卷十二（终卷） 歸途 第一章 …」）。
+# 「卷一」這種寫法只在「自動補齊卷號＋卷名」都開著時才拆（short_volume=True）；
+# 平常照原本的做法，整行當一章。卷名與章號之間可以沒有空白（「第四卷风流第729节」）。
 MIXED_VOLUME_CHAPTER_REGEX = re.compile(
-    r"^\s*(第\s*(" + CN_NUM_PATTERN + r")\s*([部卷篇集]))\s*"
-    r"(.{0,30}?)\s+"
-    r"(第\s*(" + CN_NUM_PATTERN + r")\s*([章回節节折幕])\s*(.*?))\s*$",
+    r"^\s*(?P<vraw>第\s*(?P<vnum1>" + CN_NUM_PATTERN + r")\s*(?P<vunit1>[部卷篇集])"
+    r"|(?P<vunit2>[部卷篇])\s*(?P<vnum2>" + CN_NUM_PATTERN + r")(?=[\s（(]))"
+    r"\s*(?P<vnote>[（(][^（）()]{1,6}[）)])?\s*"
+    r"(?P<vbody>.{0,30}?)\s*"
+    r"(?P<craw>第\s*(?P<cnum>" + CN_NUM_PATTERN + r")\s*(?P<cunit>[章回節节折幕])\s*(?P<cbody>.*?))\s*$",
     re.IGNORECASE,
 )
 
 
-def parse_mixed_volume_chapter_header(text):
-    """解析「第一卷 青雲篇 第01章 初入山門（修）」式混合表頭。"""
-    match = MIXED_VOLUME_CHAPTER_REGEX.match(text)
-    if not match:
+_MIXED_PAREN_REGEX = re.compile(
+    r"^\s*(?P<vraw>第\s*(?P<vnum>" + CN_NUM_PATTERN + r")\s*(?P<vunit>[部卷篇集]))\s*"
+    r"[（(]\s*(?P<cnum>" + CN_NUM_PATTERN + r")\s*[、.．]\s*(?P<cbody>[^（）()]{1,30})[）)]\s*$")
+_WHOLE_BRACKET = re.compile(r"^\s*[【\[]\s*(.+?)\s*[】\]]\s*$")
+
+# 混合表頭的正則有好幾段可以吃空白的地方，異常長的行（例如一行裡有幾千個
+# 空白）會反覆回溯好幾秒；真正的表頭不會這麼長，超過就不解析。
+MIXED_HEADER_MAX_LENGTH = 120
+
+
+def parse_mixed_volume_chapter_header(text, short_volume=False):
+    """解析「第一卷 青雲篇 第01章 初入山門（修）」式混合表頭。
+    short_volume=True 時也認「卷一 青雲篇 第一章 …」。"""
+    # 底下每一種寫法都有「第」：大部分正文行在這裡就結束，不必再看括號、外框
+    if len(text) > MIXED_HEADER_MAX_LENGTH or "第" not in text:
         return None
-    volume_raw, volume_number_text, volume_unit = match.group(1), match.group(2), match.group(3)
-    volume_body = match.group(4).strip(" \t　:：-—")
-    chapter_raw, chapter_number_text, chapter_unit = match.group(5), match.group(6), match.group(7)
-    chapter_body = match.group(8).strip()
+    paren = _MIXED_PAREN_REGEX.match(text) if "（" in text or "(" in text else None
+    if paren:
+        # 「第一卷（一、山路）」：卷號後面括號裡是這一章的號碼與章名
+        number_text, body = paren.group("cnum"), paren.group("cbody").strip()
+        return {"volume_raw": re.sub(r"\s+", "", paren.group("vraw")), "volume_note": "",
+                "volume_number_text": paren.group("vnum"), "volume_number": int(chinese_to_arabic(paren.group("vnum"))),
+                "volume_unit": paren.group("vunit"), "volume_body": "",
+                "chapter_raw": f"第{number_text}章 {body}", "chapter_number_text": number_text,
+                "chapter_number": int(chinese_to_arabic(number_text)), "chapter_unit": "章", "chapter_body": body}
+    # 整行包在【】裡（「【第三集·第一章】」）：拿掉外框再比對。
+    # 每一行都會走到這裡：先看第一個字，也不用 sub(r"\1")（帶反斜線的取代字串每次都會觸發 import）
+    if text.lstrip()[:1] in ("【", "["):
+        whole = _WHOLE_BRACKET.match(text)
+        if whole:
+            text = whole.group(1)
+    match = MIXED_VOLUME_CHAPTER_REGEX.match(text)
+    if not match or (match.group("vunit2") and not short_volume):
+        return None
+    volume_raw = re.sub(r"\s+", "", match.group("vraw"))
+    volume_number_text = match.group("vnum1") or match.group("vnum2")
+    volume_unit = match.group("vunit1") or match.group("vunit2")
+    volume_note = match.group("vnote") or ""
+    volume_body = match.group("vbody").strip(" \t　:：-—·・•▪")
+    chapter_raw, chapter_number_text = match.group("craw"), match.group("cnum")
+    chapter_unit, chapter_body = match.group("cunit"), match.group("cbody").strip()
     # 混合表頭常附下載站版本字樣；若下一行有正式表頭，後續仍會優先採用下一行。
     chapter_body = re.sub(r"\s*[（(]\s*(?:修|修改|校對|校对|補|补)\s*[）)]\s*$", "", chapter_body).strip()
     return {
         "volume_raw": volume_raw,
+        "volume_note": volume_note,
         "volume_number_text": volume_number_text,
         "volume_number": int(chinese_to_arabic(volume_number_text)),
         "volume_unit": volume_unit,

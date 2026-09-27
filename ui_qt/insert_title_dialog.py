@@ -1,11 +1,11 @@
 """插入章節標題對話框：依游標位置推算建議編號。"""
 
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QGridLayout, QLabel, QLineEdit, QVBoxLayout,
+    QComboBox, QDialog, QDialogButtonBox, QGridLayout, QLabel, QLineEdit,
 )
 
 from core.insert_suggestions import INSERTABLE_KINDS, NUMERIC_KINDS, build_inserted_title
-from .widgets import keep_on_screen
+from .widgets import dialog_frame, keep_on_screen
 from . import dialogs, i18n
 
 
@@ -14,14 +14,13 @@ class InsertTitleDialog(QDialog):
 
     def __init__(self, suggestions: dict, default_kind: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("在此插入章節")
+        self.setWindowTitle("新增章節")
         self.setMinimumWidth(440)
         keep_on_screen(self)
         self._suggestions = suggestions
         self.result_text = ""
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
+        root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True)
         root.setSpacing(14)
 
         grid = QGridLayout()
@@ -61,7 +60,7 @@ class InsertTitleDialog(QDialog):
         insert_button.setObjectName("primary")
         cancel_button.clicked.connect(self.reject)
         insert_button.clicked.connect(self._try_accept)
-        root.addWidget(buttons)
+        footer.addWidget(buttons)
 
         self.kind_combo.currentIndexChanged.connect(self._update_preview)
         self.number_input.textChanged.connect(self._update_preview)

@@ -10,9 +10,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from core.script_convert import SCRIPT_CHOICES, SCRIPT_TRAD
 from . import i18n
-from .widgets import Divider, IconTextButton
+from .widgets import Divider, IconButton, IconTextButton
 
 STRUCTURE_CHOICES = ["自動判斷", "單本小說", "多作品合集"]
 STATUS_CHOICES = ["未指定", "未完結", "已完結"]
@@ -60,6 +59,9 @@ class MetadataBar(QWidget):
         self.encoding_badge.setObjectName("badge")
         self.encoding_badge.hide()
         summary_layout.addWidget(self.encoding_badge)
+        # 說明（章節標記、本文字色、自動補齊卷、設定檔位置）
+        self.help_button = IconButton("circle-help", "說明", size=16)
+        summary_layout.addWidget(self.help_button)
         summary_layout.addStretch(1)
 
         self.toggle_button = IconTextButton("chevron-down", "書籍資料", checkable=True)
@@ -76,7 +78,7 @@ class MetadataBar(QWidget):
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 12, 0, 0)
-        grid.setHorizontalSpacing(16)
+        grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
         details_layout.addLayout(grid)
         self.details.hide()
@@ -88,39 +90,43 @@ class MetadataBar(QWidget):
         self._add_field(grid, 0, 1, "作者", self.author_input)
         # 最新卷／最新章由目錄辨識結果自動填入，但可以改：例如不想讓檔名
         # 帶卷數，直接把「最新卷」清空即可。自動填入的規則見 set_last_found。
-        auto_tip = "由目錄自動填入，可直接修改（例如清空讓檔名不含卷數）；按重新整理目錄（F5）會重新填入"
         self._auto_last = {}
         self.last_vol_label = QLineEdit()
         self.last_vol_label.setPlaceholderText("－")
-        self.last_vol_label.setToolTip(auto_tip)
         self._add_field(grid, 0, 2, "最新卷", self.last_vol_label)
         self.last_ch_label = QLineEdit()
         self.last_ch_label.setPlaceholderText("－")
-        self.last_ch_label.setToolTip(auto_tip)
         self._add_field(grid, 0, 3, "最新章", self.last_ch_label)
 
         self.status_combo = QComboBox()
         self.status_combo.addItems(STATUS_CHOICES)
         self.status_combo.currentIndexChanged.connect(
             lambda _index: self.set_status_badge(i18n.combo_value(self.status_combo)))
-        self._add_field(grid, 1, 0, "狀態", self.status_combo)
+        self._add_field(grid, 0, 4, "狀態", self.status_combo)
 
         self.structure_combo = QComboBox()
         self.structure_combo.addItems(STRUCTURE_CHOICES)
         self.structure_combo.currentIndexChanged.connect(
             lambda _index: self.structure_changed.emit(i18n.combo_value(self.structure_combo)))
-        self._add_field(grid, 1, 1, "結構", self.structure_combo)
+        self._add_field(grid, 0, 5, "結構", self.structure_combo)
 
         self.encoding_combo = QComboBox()
         self.encoding_combo.addItems(ENCODING_CHOICES)
         self.encoding_combo.currentIndexChanged.connect(
             lambda _index: self.encoding_changed.emit(i18n.combo_value(self.encoding_combo)))
-        self._add_field(grid, 1, 2, "讀取編碼", self.encoding_combo)
-
-        self.filename_script_combo = QComboBox()
-        self.filename_script_combo.addItems(SCRIPT_CHOICES)
-        i18n.set_combo_value(self.filename_script_combo, SCRIPT_TRAD)
-        self._add_field(grid, 1, 3, "儲存檔名", self.filename_script_combo)
+        self._add_field(grid, 0, 6, "讀取編碼", self.encoding_combo)
+        # 全部排成一行：書名最長、作者其次，其他欄位平分剩下的空間。視窗窄時每一欄至少
+        # 放得下常見的內容（下拉框照選項、輸入框照幾個字），不會被壓到看不到字。
+        for column, stretch in enumerate((4, 3, 2, 2, 2, 2, 2)):
+            grid.setColumnStretch(column, stretch)
+        char = self.fontMetrics().horizontalAdvance("字")
+        for field, chars in ((self.title_input, 5), (self.author_input, 3), (self.last_vol_label, 3),
+                             (self.last_ch_label, 4)):
+            field.setMinimumWidth(char * chars + 24)
+        metrics = self.fontMetrics()
+        for combo in (self.status_combo, self.structure_combo, self.encoding_combo):
+            longest = max(metrics.horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
+            combo.setMinimumWidth(longest + 80)       # 左右內距＋下拉箭頭（theme.py 的 QComboBox）
 
 
     @staticmethod
@@ -183,13 +189,6 @@ class MetadataBar(QWidget):
 
     def structure(self) -> str:
         return i18n.combo_value(self.structure_combo)
-
-    def filename_script(self) -> str:
-        return i18n.combo_value(self.filename_script_combo)
-
-
-    def set_filename_script(self, value: str):
-        i18n.set_combo_value(self.filename_script_combo, value)
 
     def last_vol_text(self) -> str:
         return self.last_vol_label.text().strip()

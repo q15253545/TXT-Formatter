@@ -112,13 +112,6 @@ def set_text(widget, text: str):
     widget.setText(converted)
 
 
-def set_tooltip(widget, text: str):
-    converted = T(text)
-    widget.setProperty("i18n_tip_src", text)
-    widget.setProperty("i18n_tip_shown", converted)
-    widget.setToolTip(converted)
-
-
 def combo_value(combo: QComboBox, index: int | None = None) -> str:
     """下拉選項的原文（不論畫面上顯示繁體還是簡體）。"""
     index = combo.currentIndex() if index is None else index

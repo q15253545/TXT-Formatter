@@ -1,13 +1,9 @@
-"""尋找／取代面板：跟「格式選項」「章節管理」共用左側卡片。
-
-原本是貼在本文卡片上緣的浮動列，會壓縮本文的高度；搬到左側卡片之後，
-本文維持完整，搜尋結果也有足夠的高度可以看。
+"""尋找／取代面板：跟排版設定、章節管理、內容檢查共用左側卡片。
 
 幾個刻意的設計：
 
-* 結果清單自己畫，不再每一筆塞一個 QLabel。十萬筆命中時，建立十萬個
-  元件會讓整個程式卡死（實測 4,000 筆就要 5 秒）；改成只畫看得到的那幾
-  列，另外限制最多保留幾筆結果。
+* 結果清單自己畫、只畫看得到的那幾列，並限制最多保留幾筆：每一筆一個元件的話，
+  上萬筆命中會讓程式卡死。
 * 預覽一律截斷成一行、關閉橫向捲軸：預覽只是用來確認「是不是這一筆」，
   拖著橫向捲軸看完整行並不實用，而且捲動時會重畫整份清單。
 * 正則模式不邊打邊搜尋，要按 Enter 或「搜尋」。使用者寫的正則可能花上
@@ -26,6 +22,7 @@ from PySide6.QtWidgets import (
     QStyle, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
+from core import safe_regex
 from core.user_rules import RISKY_REGEX as _RISKY_REGEX
 from . import i18n
 from .widgets import Divider, IconButton, make_card_header
@@ -126,13 +123,18 @@ class FindBar(QWidget):
         self._current = -1
         # _truncated：這一頁之後還有命中（清單只列了前 MAX_MATCHES 筆）。
         self._truncated = False
+        self._timed_out = False
         # 每一頁從正文的哪個位置開始找、前面已經有幾筆：編號才能接著算
         # （第 2 頁的第一筆是 5001），往回翻頁時也知道要從哪裡重找。
         self._page_starts: list[int] = [0]
+        self._page_skips: list = [None]      # 每一頁開頭要略過的那一筆（見 _after）
         self._page_bases: list[int] = [0]
         # 搜尋結果記的是字元位置，正文一改就全部失效：記下當時的正文版本，
         # 取代前再比對一次，才不會把「改之前算出來的位置」套到新的正文上。
         self._source_version: object = None
+        # 目前這批結果是用哪個搜尋字串、哪種模式找出來的：字串改了但計時器還沒
+        # 重新搜尋的那一小段時間，按取代不能拿舊結果去改。
+        self._source_query: object = None
         self._research_timer = QTimer(self)
         self._research_timer.setSingleShot(True)
         self._research_timer.setInterval(250)
@@ -203,7 +205,7 @@ class FindBar(QWidget):
         root.addWidget(preset_label)
         self.preset_combo = QComboBox()
         self.preset_combo.addItem(_PRESET_PLACEHOLDER)
-        # 說明不常駐顯示，改成滑鼠停在選項上時的提示。
+        # 說明放在滑鼠停在選項上時的提示。
         for name, (pattern, explanation) in SEARCH_PRESETS.items():
             self.preset_combo.addItem(name)
             self.preset_combo.setItemData(self.preset_combo.count() - 1, f"{pattern}\n{explanation}",
@@ -258,7 +260,7 @@ class FindBar(QWidget):
         self._tokens = tokens
         for button in self._icon_buttons:
             button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
-        self.regex_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint, tokens.accent)
+        self.regex_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint, tokens.checked_text)
         self._delegate.match_color = QColor(tokens.find_match_bg)
         self._delegate.text_color = QColor(tokens.text)
         self.results_list.viewport().update()
@@ -281,15 +283,20 @@ class FindBar(QWidget):
         if not text:
             return None
         if self.regex_button.isChecked():
+            # 使用者寫的正則交給 safe_regex：寫法不好時能在期限內停下來，不會卡死介面。
             try:
-                return re.compile(text)
-            except re.error as error:
+                return safe_regex.compile(text)
+            except safe_regex.errors as error:
                 self._set_hint(f"正則錯誤：{error}")
                 return None
         return re.compile(re.escape(text))
 
     def _on_regex_toggled(self, checked: bool):
-        self._set_hint("正則模式：按 Enter 或「搜尋」才執行" if checked else "")
+        hint = "正則模式：按 Enter 或「搜尋」才執行"
+        if not safe_regex.HAS_TIMEOUT:
+            # 沒有 regex 套件就沒有逾時保護（打包版有附）：先講清楚，寫法不好的正則可能讓程式停住
+            hint += "。沒有安裝 regex 套件，寫法不好的正則可能讓程式停住很久（pip install regex）"
+        self._set_hint(hint if checked else "")
         self._run_search()
 
     def _on_text_changed(self, text):
@@ -334,55 +341,81 @@ class FindBar(QWidget):
         self._current = -1
         self._truncated = False
         self._page_starts, self._page_bases = [0], [0]
+        self._page_skips = [None]
         self._update_label()
         self.results_list.clear()
         self._on_matches_changed([], -1)
 
-    def _is_stale(self) -> bool:
-        return self._source_version != self._get_version()
+    def _query_key(self):
+        return self.find_input.text(), self.regex_button.isChecked()
 
-    def _collect(self, pattern, content, start=0):
+    def _is_stale(self) -> bool:
+        return self._source_version != self._get_version() or self._source_query != self._query_key()
+
+    def _stale_message(self, action: str) -> str:
+        if self._source_version != self._get_version():
+            return f"本文已變更，搜尋結果已更新，請確認後再{action}"
+        return f"搜尋字串已變更，已重新搜尋，請確認後再{action}"
+
+    def _collect(self, pattern, content, start=0, skip=None):
         """從 start 開始逐筆取出命中，超過上限或時間就停下來。
 
         finditer 從中間開始找時，^ 仍然只認真正的行首，所以接著找下一頁的
         結果跟一次找完是一樣的。
 
         正則寫得不好時 finditer 本身可能就很慢，這裡擋得住「命中太多」與
-        「整體太久」，擋不住單一次比對就卡住的極端情況（那種會被卡死監看
-        記錄下來，見 ui_qt/app_log.py）。"""
+        「整體太久」；單一次比對就卡住的極端情況由 safe_regex 的逾時中止
+        （有裝 regex 套件時），已經找到的照樣列出。
+
+        skip：上一頁最後一筆是空字串命中時，這一頁從同一個位置重找，第一筆
+        會是它自己，略過。"""
         matches, deadline = [], time.monotonic() + SEARCH_DEADLINE
-        for match in pattern.finditer(content, start):
-            matches.append(match)
-            if len(matches) >= MAX_MATCHES:
-                return matches, True
-            if not len(matches) % 512 and time.monotonic() > deadline:
-                return matches, True
+        try:
+            for match in safe_regex.finditer(pattern, content, start, timeout=SEARCH_DEADLINE + 1.0):
+                if skip is not None and not matches and match.span() == skip:
+                    skip = None
+                    continue
+                matches.append(match)
+                if len(matches) >= MAX_MATCHES:
+                    return matches, True
+                if not len(matches) % 512 and time.monotonic() > deadline:
+                    return matches, True
+        except safe_regex.RegexTimeout:
+            self._timed_out = True
+            return matches, True
         return matches, False
 
     @staticmethod
-    def _after(match) -> int:
-        """下一頁從哪裡接著找。空字串的命中（例如只寫了 ^）要往後挪一格，
-        不然會一直找到同一個位置。"""
-        return match.end() if match.end() > match.start() else match.end() + 1
+    def _after(match):
+        """下一頁從哪裡接著找：（起點, 要略過的那一筆）。
+
+        空字串的命中不能直接往後挪一格：同一個位置可能先有空字串命中、再有一筆
+        非空的命中（例如 (?=a)|a），跳過就漏掉了。改成從同一個
+        位置重找、略過重複的空字串那一筆，結果跟一次找完完全一樣。"""
+        if match.end() > match.start():
+            return match.end(), None
+        return match.start(), match.span()
 
     def _load_first_page(self, pattern, content):
         self._page_starts, self._page_bases = [0], [0]
+        self._page_skips = [None]
         self._matches, self._truncated = self._collect(pattern, content, 0)
 
     def _load_next_page(self, pattern, content) -> bool:
         """這一頁之後還有命中就載入下一頁；已經是最後一頁回傳 False。"""
         if not (self._truncated and self._matches):
             return False
-        start = self._after(self._matches[-1])
+        start, skip = self._after(self._matches[-1])
         if start > len(content):
             self._truncated = False
             return False
-        matches, truncated = self._collect(pattern, content, start)
+        matches, truncated = self._collect(pattern, content, start, skip)
         if not matches:
             self._truncated = False      # 剛好是 5000 的倍數，其實已經到底
             return False
         self._page_bases.append(self._page_bases[-1] + len(self._matches))
         self._page_starts.append(start)
+        self._page_skips.append(skip)
         self._matches, self._truncated = matches, truncated
         return True
 
@@ -391,7 +424,9 @@ class FindBar(QWidget):
             return False
         self._page_starts.pop()
         self._page_bases.pop()
-        self._matches, self._truncated = self._collect(pattern, content, self._page_starts[-1])
+        self._page_skips.pop()
+        self._matches, self._truncated = self._collect(pattern, content, self._page_starts[-1],
+                                                       self._page_skips[-1])
         return True
 
     def _show_page(self, content: str):
@@ -409,11 +444,14 @@ class FindBar(QWidget):
         pattern = self._pattern()
         content = self._get_text()
         self._source_version = self._get_version()
+        self._source_query = self._query_key()
         self._truncated = False
+        self._timed_out = False
         if pattern is None or not content:
             self._matches = []
             self._current = -1
             self._page_starts, self._page_bases = [0], [0]
+            self._page_skips = [None]
         else:
             if self.regex_button.isChecked() and _RISKY_REGEX.search(self.find_input.text()):
                 self._set_hint("這個正則有巢狀量詞（例如 (a+)+），在長文字上可能要跑很久")
@@ -436,9 +474,8 @@ class FindBar(QWidget):
                         self._current = 0
                         break
             elapsed = time.monotonic() - started
-            if self._truncated:
-                self._set_hint(f"結果很多，清單一次列 {len(self._matches)} 筆；在最後一筆按「下一個」"
-                               "會接著往下找。「全部取代」仍會處理整份文字")
+            if self._timed_out:
+                self._set_hint(f"正則執行太久，已停止搜尋；只列出已找到的 {len(self._matches)} 筆")
             elif elapsed > 0.5:
                 self._set_hint(f"這次搜尋花了 {elapsed:.1f} 秒")
             elif not _RISKY_REGEX.search(self.find_input.text()):
@@ -534,14 +571,15 @@ class FindBar(QWidget):
             return replacement
         try:
             return match.expand(replacement)
-        except (re.error, IndexError) as error:
+        except (IndexError, *safe_regex.errors) as error:
             self._set_hint(f"取代字串錯誤：{error}")
             return None
 
     def _on_replace_clicked(self):
         if self._is_stale():
+            message = self._stale_message("取代")
             self._run_search()
-            self._on_message("本文已變更，搜尋結果已更新，請確認後再取代")
+            self._on_message(message)
             return
         if not (0 <= self._current < len(self._matches)):
             return
@@ -556,8 +594,9 @@ class FindBar(QWidget):
 
     def _on_replace_all_clicked(self):
         if self._is_stale():
+            message = self._stale_message("全部取代")
             self._run_search()
-            self._on_message("本文已變更，搜尋結果已更新，請確認後再全部取代")
+            self._on_message(message)
             return
         pattern = self._pattern()
         content = self._get_text()
@@ -568,10 +607,13 @@ class FindBar(QWidget):
             # 直接在整份文字上取代：結果清單有筆數上限，不能拿來當取代依據，
             # 否則「全部取代」會變成「取代前面幾筆」。
             if self.regex_button.isChecked():
-                new_content, count = pattern.subn(replacement, content)
+                new_content, count = safe_regex.subn(pattern, replacement, content)
             else:
                 new_content, count = pattern.subn(lambda _m: replacement, content)
-        except (re.error, IndexError) as error:
+        except safe_regex.RegexTimeout:
+            self._set_hint("正則執行太久，已停止；本文沒有被修改")
+            return
+        except (IndexError, *safe_regex.errors) as error:
             self._set_hint(f"取代字串錯誤：{error}")
             return
         if not count:

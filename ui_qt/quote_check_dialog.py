@@ -1,7 +1,7 @@
-"""引號與標點檢查結果，以及自動修正。
+"""標點校對結果，以及自動修正。
 
 有明確答案的問題（兩段對話黏在一起、標點在行首、對話中途斷行、引號方向
-顛倒、少了開引號）可以勾起來一次修正，「修正後」欄先顯示改完的樣子；看不出
+顛倒、少了開引號、分隔線太長、重複標點）可以勾起來一次修正，「修正後」欄先顯示改完的樣子；看不出
 正確寫法的只列出來、點一下跳到那一行，由使用者自己在本文裡改。
 """
 
@@ -11,16 +11,17 @@ import re
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
     QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
-    QVBoxLayout,
 )
 
-from core.quote_check import QUOTE_PROBLEM_LABELS, apply_fixes, scan_quote_problems
+from core.quote_check import (
+    QUOTE_PROBLEM_LABELS, SEPARATOR_LENGTH, apply_fixes, scan_quote_problems, separator_styles,
+)
 from . import dialogs, i18n
-from .sortable_table import data_index, enable_sorting, make_item, resort, setup_columns
+from .sortable_table import PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
 from .theme import active_tokens
-from .widgets import Divider, flow_container, size_dialog
+from .widgets import Divider, ScopeToggle, dialog_frame, flow_container, size_dialog
 
 # 每種問題該怎麼看待，寫在勾選框的提示裡。
 _KIND_TIPS = {
@@ -28,7 +29,16 @@ _KIND_TIPS = {
     "unpaired": "收尾引號找不到對應的開引號，或巢狀順序錯亂。",
     "leading_punct": "行首就是逗號、句號這類標點，代表上一行被截斷了。",
     "missing_separator": "上一句的收尾引號後面直接接下一句的開引號，兩個人的對話黏在同一行。",
+    "separator_line": "整行都是同一個符號的分隔線（----、*****、====…），保留原本的符號、縮成三個。",
+    "repeated_punct": "連續的句號（。。。）、太長的刪節號（…………）、中文裡的半形點（...）改成標準的「……」。"
+                      "網址、英文裡的點不會動。",
+    "dash_run": "段落裡太長的破折號（——————、——-、中文裡的 ----）改成兩格「——」；"
+                "~~~~、～～～～ 改成一個「～」。整行的分隔線、英文與網址裡的不會動。",
 }
+
+# 「分隔線不一致」不是勾選框：由下拉選單決定要不要統一、統一成哪一種
+_SEPARATOR_KIND = "separator_style"
+_NO_UNIFY = "不統一"
 
 _FIX_COLUMN, _KIND_COLUMN, _TEXT_COLUMN, _AFTER_COLUMN = range(4)
 
@@ -43,16 +53,38 @@ _CHANGED_ROLE = Qt.ItemDataRole.UserRole + 20   # 要標紅的字元位置
 _FOCUS_ROLE = Qt.ItemDataRole.UserRole + 21     # 第一個改動的位置（太長時從這附近開始顯示）
 
 
+_DIFF_LIMIT = 400        # 前後相同的部分去掉後，中間超過這麼多字就不細比
+
+
 def _diff_marks(before: str, after: str):
     """比對修正前後，回傳（after 裡要標紅的字元位置, before 的第一個改動位置,
     after 的第一個改動位置）。純刪除（例如兩行接回一行）沒有新字，標在接起來
     的那個字上，才看得出是在哪裡接的。"""
+    # 先去掉前後相同的部分（線性），只對中間改動的那一小段做 difflib。
+    # 整段 diff 在上萬個重複字的段落要好幾秒；中間那段
+    # 還是太長就整段標紅，不再細比。
+    prefix = 0
+    limit = min(len(before), len(after))
+    while prefix < limit and before[prefix] == after[prefix]:
+        prefix += 1
+    suffix = 0
+    while (suffix < limit - prefix
+           and before[len(before) - 1 - suffix] == after[len(after) - 1 - suffix]):
+        suffix += 1
+    middle_before = before[prefix:len(before) - suffix]
+    middle_after = after[prefix:len(after) - suffix]
+    if not middle_before and not middle_after:
+        return set(), None, None
     changed = set()
     first_before = first_after = None
-    matcher = difflib.SequenceMatcher(None, before, after, autojunk=False)
-    for tag, i1, _i2, j1, j2 in matcher.get_opcodes():
+    if len(middle_before) > _DIFF_LIMIT or len(middle_after) > _DIFF_LIMIT:
+        opcodes = [("replace", 0, len(middle_before), 0, len(middle_after))]
+    else:
+        opcodes = difflib.SequenceMatcher(None, middle_before, middle_after, autojunk=False).get_opcodes()
+    for tag, i1, _i2, j1, j2 in opcodes:
         if tag == "equal":
             continue
+        i1, j1, j2 = i1 + prefix, j1 + prefix, j2 + prefix
         if first_before is None:
             first_before, first_after = i1, j1
         if j2 > j1:
@@ -80,7 +112,7 @@ class _DiffDelegate(QStyledItemDelegate):
             return
         rect = QRectF(style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget))
         rect.adjust(8, 0, -8, 0)          # 跟樣式表的儲存格左右 padding 一致
-        changed = index.data(_CHANGED_ROLE) or ()
+        changed = set(index.data(_CHANGED_ROLE) or ())     # 每個字都要查一次，用 set 才不會變成平方時間
         focus = index.data(_FOCUS_ROLE)
         tokens = active_tokens()
         normal_font = QFont(opt.font)
@@ -95,7 +127,16 @@ class _DiffDelegate(QStyledItemDelegate):
         ellipsis_width = normal_metrics.horizontalAdvance("…")
         available = rect.width()
         start = 0
-        if focus is not None and sum(advance(i) for i in range(len(text))) > available:
+        def overflows():
+            # 量到超過欄寬就停，不必量完整段（段落很長時每次重畫都量全部會很慢）
+            width = 0.0
+            for position in range(len(text)):
+                width += advance(position)
+                if width > available:
+                    return True
+            return False
+
+        if focus is not None and overflows():
             lead = sum(advance(i) for i in range(focus))
             if lead > available * 0.35:
                 # 改動前面留大約三成欄寬的上下文。
@@ -151,7 +192,7 @@ class _DiffDelegate(QStyledItemDelegate):
 class QuoteCheckDialog(QDialog):
     """非模式對話框：開著時可以直接在本文手動修改。
 
-    按「修正勾選的項目」時送出 fixesReady（修正後的整份本文, 修了幾處），由主
+    按「修正已勾選項目」時送出 fixesReady（修正後的整份本文, 修了幾處），由主
     視窗套用；對話框不關，主視窗再用 reload() 換成新的本文重新檢查，剩下要
     手動處理的項目繼續留在清單上。"""
 
@@ -159,29 +200,41 @@ class QuoteCheckDialog(QDialog):
     fixesReady = Signal(list, int)
 
     def __init__(self, raw_lines: list, parent=None, selected_ranges=None, selected_count: int = 0,
-                 enabled_kinds=None):
+                 enabled_kinds=None, title_rows=None):
         super().__init__(parent)
-        self.setWindowTitle("引號與標點檢查")
+        self.setWindowTitle("標點校對")
         size_dialog(self, 960, 640)
         self._raw_lines = list(raw_lines)
+        # 目錄辨識出的章節標題行：自動修正不能跨過它們（None＝自己判斷）
+        self._title_rows = set(title_rows) if title_rows is not None else None
         self._selected_ranges = list(selected_ranges or [])
         self._all_problems: list = []
+        self._visible_total = 0
         self._visible: list[int] = []          # 目前表格顯示的是 _all_problems 的哪幾筆
         self._checked: set[int] = set()
         self.result_lines: list | None = None
         self.applied_count = 0
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
+        root, footer = dialog_frame(self)
         root.setSpacing(12)
 
-        title = QLabel("選擇檢查項目")
+        # 「只檢查選取的章節」是範圍，所有工具視窗都放在最上面（跟掃描無關連內容一致）。
+        # 只選了一章時不預設打勾：點目錄是用來跳到那一章看內容的，幾乎隨時都
+        # 有一個被選著；預設只掃那一章的話，掃不到東西會讓人以為整本都沒問題。
+        # 刻意多選兩章以上，才當成「只想處理這幾章」。
+        self.scope_check = ScopeToggle("檢查", selected_count if self._selected_ranges else 0)
+        self.scope_check.toggled.connect(self._run_scan)
+        root.addWidget(self.scope_check)
+
+        title = QLabel("檢查項目")
         title.setObjectName("appTitle")
         root.addWidget(title)
 
         kind_box, kind_flow = flow_container(uniform=True)
         self._kind_checks = {}
         for key, label in QUOTE_PROBLEM_LABELS.items():
+            if key == _SEPARATOR_KIND:
+                continue
             checkbox = QCheckBox(label)
             checkbox.setChecked(enabled_kinds is None or key in enabled_kinds)
             checkbox.setToolTip(_KIND_TIPS.get(key, ""))
@@ -189,17 +242,20 @@ class QuoteCheckDialog(QDialog):
             self._kind_checks[key] = checkbox
             kind_flow.addWidget(checkbox)
         root.addWidget(kind_box)
-        # 「只檢查選取的章節」是範圍，不是檢查項目，用分隔線隔開。
+        # 分隔線統一：同一本書裡 --- 和 === 混用時，由使用者決定要不要統一、統一成哪一種。
+        # 只列這本書出現過的樣式（附行數，多的在前）；選了之後，其他樣式的分隔線才列成「分隔線不一致」。
+        separator_row = QHBoxLayout()
+        separator_row.setSpacing(10)
+        separator_label = QLabel("分隔線統一成")
+        separator_label.setObjectName("fileLabel")
+        separator_row.addWidget(separator_label)
+        self.separator_combo = QComboBox()
+        self.separator_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.separator_combo.currentIndexChanged.connect(self._run_scan)
+        separator_row.addWidget(self.separator_combo)
+        separator_row.addStretch(1)
+        root.addLayout(separator_row)
         root.addWidget(Divider())
-
-        # 只選了一章時不預設打勾：點目錄是用來跳到那一章看內容的，幾乎隨時都
-        # 有一個被選著；預設只掃那一章的話，掃不到東西會讓人以為整本都沒問題。
-        # 刻意多選兩章以上，才當成「只想處理這幾章」。
-        self.scope_check = QCheckBox("")
-        self._set_scope(self._selected_ranges, selected_count)
-        self.scope_check.setChecked(bool(self._selected_ranges) and selected_count >= 2)
-        self.scope_check.toggled.connect(self._run_scan)
-        root.addWidget(self.scope_check)
 
         select_row = QHBoxLayout()
         select_row.setSpacing(8)
@@ -216,7 +272,7 @@ class QuoteCheckDialog(QDialog):
 
         # 不放行號：點一下就會跳到本文那一行，行號本身沒有用處；
         # 「還原原本順序」就是照行號排（見 sortable_table 的三段排序）。
-        self.table = QTableWidget(0, 4)
+        self.table = PreviewTable(0, 4)
         self.table.setHorizontalHeaderLabels(["修正", "類型", "內容", "修正後"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -233,12 +289,13 @@ class QuoteCheckDialog(QDialog):
 
         buttons = QDialogButtonBox()
         close_button = buttons.addButton("關閉", QDialogButtonBox.ButtonRole.RejectRole)
-        self.fix_button = buttons.addButton("修正勾選的項目", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.fix_button = buttons.addButton("修正已勾選項目", QDialogButtonBox.ButtonRole.AcceptRole)
         self.fix_button.setObjectName("primary")
         close_button.clicked.connect(self.reject)
         self.fix_button.clicked.connect(self._apply_fixes)
-        root.addWidget(buttons)
+        footer.addWidget(buttons)
 
+        self._fill_separator_styles()
         self._run_scan()
 
     # ------------------------------------------------------------------
@@ -246,37 +303,60 @@ class QuoteCheckDialog(QDialog):
     def enabled_kinds(self) -> set:
         return {key for key, box in self._kind_checks.items() if box.isChecked()}
 
+    def separator_target(self):
+        """使用者選的分隔線符號；不統一時是 None。"""
+        return self.separator_combo.currentData()
+
+    def _fill_separator_styles(self):
+        """照目前的本文重新列出分隔線樣式；之前選的樣式還在就維持。"""
+        current = self.separator_target()
+        ranges = self._selected_ranges if self.scope_check.isChecked() else None
+        styles = separator_styles(self._raw_lines, ranges, self._title_rows)
+        self.separator_combo.blockSignals(True)
+        self.separator_combo.clear()
+        self.separator_combo.addItem(i18n.T(_NO_UNIFY), None)
+        for char, count in styles.items():
+            self.separator_combo.addItem(i18n.T(f"{char * SEPARATOR_LENGTH}（{count} 行）"), char)
+        index = self.separator_combo.findData(current) if current is not None else 0
+        self.separator_combo.setCurrentIndex(max(0, index))
+        self.separator_combo.blockSignals(False)
+        # 樣式表的 padding 讓 AdjustToContents 算得太窄：照最長的選項自己算
+        metrics = self.separator_combo.fontMetrics()
+        longest = max(metrics.horizontalAdvance(self.separator_combo.itemText(i))
+                      for i in range(self.separator_combo.count()))
+        self.separator_combo.setMinimumWidth(longest + 64)
+        # 只有一種（或沒有）分隔線時沒什麼好統一的
+        self.separator_combo.setEnabled(len(styles) > 1)
+
     def _set_scope(self, selected_ranges, selected_count: int):
         self._selected_ranges = list(selected_ranges or [])
-        i18n.set_text(self.scope_check,
-                      f"只檢查選取的 {selected_count} 個章節" if selected_count else "只檢查選取的章節")
-        self.scope_check.setEnabled(bool(self._selected_ranges))
-        if not self._selected_ranges:
-            self.scope_check.setChecked(False)
-        self.scope_check.setToolTip("" if self._selected_ranges
-                                    else i18n.T("先在目錄選取章節，再開啟檢查，就可以只檢查那幾章"))
+        self.scope_check.set_count(selected_count if self._selected_ranges else 0)
 
     @staticmethod
     def _problem_key(problem):
         return problem["kind"], problem["preview"]
 
-    def reload(self, raw_lines, selected_ranges=None, selected_count: int = 0):
+    def reload(self, raw_lines, selected_ranges=None, selected_count: int = 0, title_rows=None):
         """本文改過了（使用者手動修改，或剛套用完自動修正）：用新的本文重新檢查。
-        勾選狀態與目前選取的那一筆照內容對回去，不會因為行號位移而跑掉。"""
-        checked = {self._problem_key(self._all_problems[index]) for index in self._checked}
+        勾選狀態與目前選取的那一筆照內容對回去（sortable_table.carry_over），不會因為行號位移而跑掉。"""
+        old_problems, old_checked = self._all_problems, {index: True for index in self._checked}
         rows = self.table.selectionModel().selectedRows()
-        current = self._problem_key(self._all_problems[data_index(self.table, rows[0].row())]) if rows else None
+        current = {data_index(self.table, rows[0].row()): True} if rows else {}
         self._raw_lines = list(raw_lines)
+        if title_rows is not None:
+            self._title_rows = set(title_rows)
         self.scope_check.blockSignals(True)
         self._set_scope(selected_ranges, selected_count)
         self.scope_check.blockSignals(False)
+        self._fill_separator_styles()
         self._run_scan()
-        self._checked = {index for index, problem in enumerate(self._all_problems)
-                         if problem["fix"] and self._problem_key(problem) in checked}
+        self._checked = {index for index in carry_over(old_problems, self._all_problems, self._problem_key, old_checked)
+                         if self._all_problems[index]["fix"]}
         self._refresh()
+        current = next(iter(carry_over(old_problems, self._all_problems, self._problem_key, current)), None)
         if current is not None:
             for row in range(self.table.rowCount()):
-                if self._problem_key(self._all_problems[data_index(self.table, row)]) == current:
+                if data_index(self.table, row) == current:
                     self.table.blockSignals(True)
                     self.table.selectRow(row)
                     self.table.blockSignals(False)
@@ -284,13 +364,18 @@ class QuoteCheckDialog(QDialog):
 
     def _run_scan(self, *_args):
         ranges = self._selected_ranges if self.scope_check.isChecked() else None
-        self._all_problems = scan_quote_problems(self._raw_lines, ranges)
+        self._all_problems = scan_quote_problems(self._raw_lines, ranges, self._title_rows,
+                                                 separator_target=self.separator_target())
         self._checked = set()
         self._refresh()
 
     def _refresh(self, *_args):
-        kinds = self.enabled_kinds()
-        self._visible = [index for index, problem in enumerate(self._all_problems) if problem["kind"] in kinds]
+        kinds = self.enabled_kinds() | {_SEPARATOR_KIND}     # 由下拉決定，選了才會有這種問題
+        matching = [index for index, problem in enumerate(self._all_problems) if problem["kind"] in kinds]
+        # 太多時只列出一部分（可以自動修正的優先），勾選也只留列出來的。
+        self._visible, self._visible_total = limit_rows(
+            matching, lambda index: 0 if self._all_problems[index]["fix"] else 1)
+        self._checked &= set(self._visible)
         self.table.blockSignals(True)
         self.table.setRowCount(len(self._visible))
         for row, index in enumerate(self._visible):
@@ -325,12 +410,20 @@ class QuoteCheckDialog(QDialog):
         self._update_status()
 
     def _update_status(self):
+        wrapped = getattr(self._all_problems, "wrapped", 0)
         if not self._all_problems:
-            text = "沒有發現引號或標點問題"
+            text = "沒有找到標點問題"
         else:
             fixable = sum(1 for index in self._visible if self._all_problems[index]["fix"])
             text = (f"共 {len(self._visible)} 處，其中 {fixable} 處可以自動修正；"
                     f"已勾選 {len(self._checked)} 處")
+            if len(self._visible) < self._visible_total:
+                text = (f"共 {self._visible_total} 處，太多了只列出 {len(self._visible)} 處"
+                        f"（可修正的優先，修正後會列出其餘的），其中 {fixable} 處可以自動修正；"
+                        f"已勾選 {len(self._checked)} 處")
+        if wrapped:
+            text += (f"。這本是硬換行（句子被切成好幾行），有 {wrapped} 段跨行的引號沒有列出；"
+                     "建議先用排版設定的「整理段落換行」接回去")
         i18n.set_text(self.status_label, text)
         self.fix_button.setEnabled(bool(self._checked))
 

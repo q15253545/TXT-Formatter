@@ -1,12 +1,15 @@
 """文件層級的章節結構分析：多作品合集、弱格式章節候選、缺章檢查。"""
 
+import bisect
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 
 from .title_markers import strip_persistent_title_marker
-from .user_rules import PRESET_RULES, match_user_chapter_rule, preset_rule
+from .title_blocks import TEMPLATES
+from .user_rules import PRESET_RULES, preset_match
 from .chapter_parse import (
     CN_NUM_PATTERN,
+    MAX_TITLE_LENGTH,
     is_noise_prefix,
     parse_lv1,
     parse_lv2,
@@ -14,6 +17,7 @@ from .chapter_parse import (
     parse_weak_numbered_title,
     is_weak_numbered_title,
     parse_mixed_volume_chapter_header,
+    too_long_for_title,
 )
 
 COLLECTION_COMBINED_REGEX = re.compile(
@@ -140,9 +144,9 @@ def _collect_weak_candidates(lines):
     return candidates
 
 
-def scan_weak_chapter_candidates(lines):
-    """找出弱格式章節候選並算好信心度。"""
-    return score_chapter_candidates(lines, _collect_weak_candidates(lines))
+# 章名是一整句：有句號、分號（或句號結尾）幾乎一定是正文；只有逗號的也可能是章名（「先出虎穴，又入狼窩」）
+_SENTENCE_BODY = re.compile(r"[。；;]|[．.]$")
+_CLAUSE_BODY = re.compile(r"[，]|,(?!\d)")
 
 
 def score_chapter_candidates(lines, candidates):
@@ -182,8 +186,13 @@ def score_chapter_candidates(lines, candidates):
             score += 2
         if blank_before or blank_after:
             score += 1
-        if body_chars < 30 and sequence_links:
-            score -= 3
+        if body_chars < 60 and sequence_links:
+            score -= 3                  # 連號但中間只有一兩行：正文裡的條列（數值、條款、步驟）
+        body = candidate.get("body") or ""
+        if _SENTENCE_BODY.search(body):
+            score -= 4                  # 章名是一整句：正文的條列
+        elif _CLAUSE_BODY.search(body):
+            score -= 2
         if candidate["style"] == "一般" and candidate["style_key"] == "一般:空格":
             score -= 1
 
@@ -219,8 +228,46 @@ def weak_style_label(style_key: str) -> str:
     return f"數字＋「{separator}」"
 
 
-def scan_chapter_candidates(lines, known_rows=frozenset(), max_length=60):
+_TAIL_CLAUSE = re.compile(r"[，,]")
+
+
+def missed_tail_chapters(lines, chapters, last_row, max_length=MAX_TITLE_LENGTH):
+    """最後一個目錄項目（last_row）之後漏掉的章節：後半本換了寫法。只看那之後的本文，平常只有最後一章。
+
+    chapters：目錄裡的章 [(行號, 章號)]，照行號排好。回傳 None，或
+    {"kind": "template", "key": 內建組合, "count": 行數}——常用寫法的章號接著最後一章往下數；
+    {"kind": "candidates", "format": 可疑章節的格式, "count": 行數}——接不上號，但後面還有一大段
+    （平均一章的五倍以上）、裡面有同一種寫法（「2-1」這種沒有內建組合的）。"""
+    rest = lines[last_row + 1:]
+    if len(rest) < 3 or not chapters:
+        return None
+    last_number = chapters[-1][1]
+    by_format = {}
+    for candidate in scan_chapter_candidates(rest, set(), max_length):
+        by_format.setdefault(candidate["format"], []).append(candidate)
+    template_ids = {key for key, _level, _blocks in TEMPLATES}
+    average = max(1, last_row // len(chapters))
+    for fmt, items in sorted(by_format.items(), key=lambda pair: -len(pair[1])):
+        key = fmt.split(":", 1)[1] if fmt.startswith("preset:") else None
+        # 像一整句的（附錄的日記「5.今天……，……」）、每項只有幾行的（書末的人物表）不算接下去的章
+        numbers = [candidate["number"] for candidate in items if candidate["confidence"] == "高"
+                   and not (len(candidate["text"]) > 15 and _TAIL_CLAUSE.search(candidate["text"]))]
+        if (key in template_ids and len(numbers) >= 3 and isinstance(last_number, (int, float)) and last_number >= 1
+                and last_number < numbers[0] <= last_number + 3
+                and sum(after == before + 1 for before, after in zip(numbers, numbers[1:])) >= 2
+                and len(rest) / len(numbers) >= average / 5):
+            return {"kind": "template", "key": key, "count": len(numbers)}
+    if len(rest) >= max(200, average * 5):
+        fmt, items = max(by_format.items(), key=lambda pair: len(pair[1]), default=(None, []))
+        if len(items) >= 3:
+            return {"kind": "candidates", "format": fmt, "count": len(items)}
+    return None
+
+
+def scan_chapter_candidates(lines, known_rows=frozenset(), max_length=MAX_TITLE_LENGTH):
     """「本文可疑章節」：看起來像章節、但目前不在目錄裡的行。
+    max_length 照「標題長度」的設定：常用格式本身不限章名長度，不擋的話正文裡一整句的條列
+    （「4、依照規定應當…」）也會被列成高信心的可疑章節。
 
     每一行先看符不符合某個常用格式（依 PRESET_RULES 的順序，第一個符合的
     算數）；都不符合時，再看是不是常用格式沒涵蓋的弱格式（例如「1: 標題」）。
@@ -231,31 +278,90 @@ def scan_chapter_candidates(lines, known_rows=frozenset(), max_length=60):
       label：清單上顯示的格式名稱
       level：逐行加入目錄時該當成卷（1）還是章（2）
     """
-    presets = [(preset["preset"], preset["name"], [preset_rule(preset["preset"])],
-                preset.get("level", 2)) for preset in PRESET_RULES]
+    presets = {preset["preset"]: (preset["name"], preset.get("level", 2)) for preset in PRESET_RULES}
     weak_by_row = {candidate["index"]: candidate for candidate in _collect_weak_candidates(lines)}
     candidates = []
     for index, raw_line in enumerate(lines):
         if index in known_rows:
             continue
         text, marker = strip_persistent_title_marker(raw_line.strip())
-        if not text or marker == "exclude" or len(text) > max_length:
+        if not text or marker == "exclude" or too_long_for_title(text, max_length):
             continue
-        for preset_id, name, rule, level in presets:
-            match = match_user_chapter_rule(text, rule)
-            if match:
-                candidates.append({
-                    "index": index, "text": text, "number": match["number"], "body": match["title"],
-                    "style": "preset", "style_key": f"preset:{preset_id}",
-                    "format": f"preset:{preset_id}", "label": name, "level": level,
-                })
-                break
+        found = preset_match(text)
+        if found:
+            preset_id, match = found
+            name, level = presets[preset_id]
+            candidates.append({
+                "index": index, "text": text, "number": match["number"], "body": match["title"],
+                "style": "preset", "style_key": f"preset:{preset_id}",
+                "format": f"preset:{preset_id}", "label": name, "level": level,
+            })
         else:
             weak = weak_by_row.get(index)
             if weak is not None:
                 candidates.append({**weak, "format": f"weak:{weak['style_key']}",
                                    "label": weak_style_label(weak["style_key"]), "level": 2})
-    return score_chapter_candidates(lines, candidates)
+                continue
+            # 章號被打成字母或符號（「第A章 二進宮」）：不能自動當章節（沒有章號可排），
+            # 但列進可疑清單，讓使用者自己決定要不要加進目錄。
+            odd = _ODD_NUMBER_TITLE.match(text)
+            if odd:
+                candidates.append({
+                    "index": index, "text": text, "number": 0, "body": odd.group("body"),
+                    "style": "odd", "style_key": "odd_number", "format": "weak:odd_number",
+                    "label": "章號不是數字", "level": 1 if odd.group("unit") in "卷部篇集" else 2,
+                })
+    return _demote_subsections(score_chapter_candidates(lines, candidates), known_rows)
+
+
+def _demote_subsections(candidates, known_rows):
+    """每一章裡面的小節（「第1章」底下又分「（一）（二）」，下一章從「（一）」重新開始）：
+    同一種寫法一再從頭數、而且每次重來前面都隔著正式的章節標題，就不是漏掉的章，
+    降成中信心、不預設勾選。"""
+    rows = sorted(known_rows)
+    if not rows:
+        return candidates
+    by_style = defaultdict(list)
+    for candidate in candidates:
+        by_style[candidate["style_key"]].append(candidate)
+    for items in by_style.values():
+        restarts = after_title = 0
+        for previous, current in zip(items, items[1:]):
+            if current["number"] <= previous["number"]:
+                restarts += 1
+                position = bisect.bisect_right(rows, previous["index"])
+                if position < len(rows) and rows[position] < current["index"]:
+                    after_title += 1
+        if restarts >= 2 and after_title >= max(2, restarts * 0.4):
+            for candidate in items:
+                if candidate["confidence"] == "高":
+                    candidate["confidence"] = "中"
+                    candidate["selected"] = False
+    return candidates
+
+
+_ODD_NUMBER_TITLE = re.compile(
+    r"^第\s*[A-Za-zＡ-Ｚａ-ｚ?？○□]{1,3}\s*(?P<unit>[章回節节卷部篇集])\s*(?P<body>\S.{0,40})$")
+
+
+def _section_parents(records, parent_of) -> set:
+    """哪些卷（或全書）裡「節」是章底下的小節：同一層章、節都至少 5 個，而且節的號碼
+    一再從頭數（每章重新開始）。只有幾個「第16節」（或幾個「章」）的，多半是寫錯，一起數。"""
+    sections, others = {}, Counter()
+    for node, record in records.items():
+        if record["kind"] != "chapter":
+            continue
+        parent = parent_of(node)
+        if record.get("unit") in ("節", "节"):
+            sections.setdefault(parent, []).append(record["number"])
+        elif record.get("unit"):
+            others[parent] += 1
+    result = set()
+    for parent, numbers in sections.items():
+        restarts = sum(1 for previous, current in zip(numbers, numbers[1:]) if current <= previous)
+        if others[parent] >= 5 and len(numbers) >= 5 and restarts >= 2:
+            result.add(parent)
+    return result
 
 
 def group_formal_chapters(records, parent_of, label_of):
@@ -266,6 +372,7 @@ def group_formal_chapters(records, parent_of, label_of):
     不想重畫整棵目錄）。番外、小數章與沒有編號的標題不列入。
     """
     groups: dict = {}
+    section_parents = _section_parents(records, parent_of)
     for node, record in records.items():
         number = record["number"]
         if (record["kind"] != "chapter" or record["prefix"] == "番外"
@@ -277,26 +384,155 @@ def group_formal_chapters(records, parent_of, label_of):
             if records.get(ancestor, {}).get("kind") == "work":
                 work = ancestor
             ancestor = parent_of(ancestor)
-        entry = groups.setdefault(parent_of(node), {
-            "label": " / ".join(ancestors) or "全書", "work": work, "numbers": [], "nodes": []})
+        # 章底下再分節（「第1節」每章重新數）：節另外一組，不跟章混在一起數
+        section = record.get("unit") in ("節", "节") and parent_of(node) in section_parents
+        label = (" / ".join(ancestors) or "全書") + ("（節）" if section else "")
+        entry = groups.setdefault((parent_of(node), section), {
+            "label": label, "work": work, "numbers": [], "nodes": [], "titles": []})
         entry["numbers"].append(int(number))
         entry["nodes"].append(node)
+        entry["titles"].append(label_of(node))
     return list(groups.values())
 
 
-def chapter_gap_report(numbers, label, mode="僅檢查中間缺口", previous_last=None):
+# 同一章分成幾段：「（上）（下）」「(1)(2)」
+_PART_SUFFIX = re.compile(r"[（(]\s*([上中下]|[一二三四五六七八九十]+|\d+)\s*[)）]\s*$")
+# 章號後面緊接「（第2部分）」「(二)」
+_PART_AFTER_NUMBER = re.compile(r"[章回節节]\s*[（(]\s*第?\s*([上中下]|[一二三四五六七八九十]+|\d+)\s*(?:部分)?\s*[)）]")
+
+
+def _split_parts(titles) -> bool:
+    """同一個章號的幾個標題都帶著不同的分段標記（結尾的「（上）」、章號後面的「（第2部分）」）：
+    是一章分成幾段，不是重複。第一段常常不寫標記（「第766章」「第766章（第2部分）」），最多一個沒有。"""
+    parts = [(_PART_SUFFIX.search(title or "") or _PART_AFTER_NUMBER.search(title or "")) for title in titles]
+    marked = [part.group(1) for part in parts if part]
+    return len(marked) >= len(parts) - 1 and bool(marked) and len(set(marked)) == len(marked)
+
+
+def _extra_digit(value, expected) -> bool:
+    """value 是 expected 多打了一個數字（11407 ← 1407）。"""
+    text, want = str(int(value)), str(int(expected))
+    return len(text) == len(want) + 1 and any(text[:i] + text[i + 1:] == want for i in range(len(text)))
+
+
+def number_anomalies(numbers) -> dict:
+    """照本文順序的章號裡，明顯打錯或不是章節的：{索引: ("typo", 應該是幾) | ("stray", None)}。
+
+    - 前一章 N、後一章 N+k+1，中間 k 個（最多 3 個、彼此連號）卻不是 N+1…N+k：作者打錯
+      （「第两百十一五章」讀成 225、「第389九章」讀成 3899），照前後章當成 N+1…N+k。
+    - 前後兩章正好連號，中間卻夾了幾個差很遠的號碼（正文裡的「第32470节车厢」）：不是章節。
+    - 後面沒有章可以對照（一卷的最後幾章）時，多打了一個數字的（「第11407章」接在第 1406 章後面）也算打錯。
+    - 一組最前面的號碼比後面大很多、後面從頭連號（卷首多一個上一卷的「第102章」）：也當成不是章節。
+    這樣一個錯字就不會在缺章報告裡變成上千章的缺口。"""
+    found = {}
+    count = len(numbers)
+    if count >= 3 and numbers[1] + 1 == numbers[2] and numbers[0] > numbers[1] + 10:
+        found[0] = ("stray", None)
+    index = 1
+    previous = numbers[1] if 0 in found else numbers[0]
+    if 0 in found:
+        index = 2
+    while index < count - 1:
+        current = numbers[index]
+        handled = False
+        for size in (1, 2, 3):
+            if index + size >= count:
+                break
+            run = numbers[index:index + size]
+            if any(b != a + 1 for a, b in zip(run, run[1:])):
+                break
+            # 跟前一章同號的是重複（另外列），不當成打錯
+            if run[0] not in (previous, previous + 1) and numbers[index + size] == previous + size + 1:
+                for offset in range(size):
+                    found[index + offset] = ("typo", previous + 1 + offset)
+                previous += size
+                index += size
+                handled = True
+                break
+        if handled:
+            continue
+        stray = 0
+        for size in (1, 2, 3):
+            run = numbers[index:index + size]
+            if index + size < count and numbers[index + size] == previous + 1 and \
+                    all(abs(value - previous) > (1 if size == 1 else 10) for value in run):
+                stray = size
+                break
+        if stray:
+            for offset in range(stray):
+                found[index + offset] = ("stray", None)
+            index += stray
+            continue
+        previous = current
+        index += 1
+    # 最後幾章（後面沒有章可以對照）：只認「多打了一個數字」這種明顯的打錯
+    for index in range(max(1, count - 3), count):
+        if index in found:
+            continue
+        before = next((found[i][1] if i in found and found[i][0] == "typo" else numbers[i]
+                       for i in range(index - 1, -1, -1) if found.get(i, ("",))[0] != "stray"), None)
+        if before is not None and numbers[index] != before + 1 and _extra_digit(numbers[index], before + 1):
+            found[index] = ("typo", before + 1)
+    return found
+
+
+def _restart_segments(numbers) -> list:
+    """同一卷裡章號又從 1（或 2）重新數起、後面也連號：當成新的一段各自算缺口
+    （卷尾接了續寫、番外，卻沒有卷標題）。回傳每一段的號碼。"""
+    segments, start = [], 0
+    for index in range(1, len(numbers)):
+        value = numbers[index]
+        if value <= 2 and numbers[index - 1] >= value + 3 and \
+                (index + 1 >= len(numbers) or numbers[index + 1] == value + 1):
+            segments.append(numbers[start:index])
+            start = index
+    segments.append(numbers[start:])
+    return [segment for segment in segments if segment]
+
+
+_MERGED_NUMBER = re.compile(r"第\s*[0-9０-９]+\s*[、，,]\s*([0-9]{1,4})\s*[章回節节]")
+
+
+def chapter_gap_report(numbers, label, mode="僅檢查中間缺口", previous_last=None, titles=None):
+    """numbers、titles 照本文順序。打錯、不像章節的號碼（number_anomalies）先照前後章修正或拿掉，
+    另外放在 anomalies：[(索引, 原本的號碼, "typo"|"stray", 應該是幾)]。"""
+    anomalies = number_anomalies(list(numbers))
+    kept = [(index, guess if kind == "typo" else numbers[index])
+            for index in range(len(numbers))
+            for kind, guess in [anomalies.get(index, ("", None))] if kind != "stray"]
+    anomaly_list = [(index, numbers[index], kind, guess) for index, (kind, guess) in sorted(anomalies.items())]
+    if titles:
+        titles = [titles[index] for index, _number in kept]
+    numbers = [number for _index, number in kept] or list(numbers)
     ordered = sorted(set(numbers))
-    start = ordered[0]
-    if mode == "每卷從第1章起算":
-        start = 1
-    elif mode == "同作品跨卷接續" and previous_last is not None and ordered[0] > previous_last:
-        start = previous_last + 1
-    ranges, cursor = [], start
-    for number in ordered:
-        if number > cursor:
-            ranges.append((cursor, number - 1))
-        cursor = number + 1
-    return {"label": label, "missing_ranges": ranges,
-            "duplicates": sorted(n for n, count in Counter(numbers).items() if count > 1),
+    ranges, duplicates, position = [], set(), 0
+    for segment_index, segment in enumerate(_restart_segments(numbers)):
+        segment_titles = titles[position:position + len(segment)] if titles else None
+        position += len(segment)
+        covered = set(segment)
+        # 「第62、3章」一章裡有兩個章號：後面那章也算有
+        for number, title in zip(segment, segment_titles or ()):
+            also = _MERGED_NUMBER.search(title or "")
+            if also:
+                tail = also.group(1)
+                second = int(str(number)[:-len(tail)] + tail) if len(tail) < len(str(number)) else int(tail)
+                if number < second <= number + 9:
+                    covered.add(second)
+        values = sorted(covered)
+        start = values[0]
+        if mode == "每卷從第1章起算":
+            start = 1
+        elif (mode == "同作品跨卷接續" and segment_index == 0 and previous_last is not None
+              and values[0] > previous_last):
+            start = previous_last + 1
+        cursor = start
+        for number in values:
+            if number > cursor:
+                ranges.append((cursor, number - 1))
+            cursor = number + 1
+        duplicates.update(n for n, count in Counter(segment).items() if count > 1
+                          and not (segment_titles and _split_parts(
+                              [title for number, title in zip(segment, segment_titles) if number == n])))
+    return {"label": label, "missing_ranges": ranges, "duplicates": sorted(duplicates),
             "first": ordered[0], "last": ordered[-1], "count": len(ordered),
-            "start_unverified": mode == "僅檢查中間缺口" and ordered[0] > 1}
+            "start_unverified": mode == "僅檢查中間缺口" and ordered[0] > 1, "anomalies": anomaly_list}

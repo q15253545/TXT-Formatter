@@ -1,6 +1,6 @@
 """執行記錄：程式卡死、出錯時事後有跡可查。
 
-記錄檔放在 %LOCALAPPDATA%\\TXTFormatterV3\\logs：
+記錄檔放在 %LOCALAPPDATA%\\TXTFormatter\\logs：
   app.log     一般記錄。啟動環境、每個操作的開始／結束與耗時、未攔截的
               例外（完整 traceback）、Qt 自己的警告。超過 2MB 自動換檔，
               保留 5 份舊檔。
@@ -17,6 +17,7 @@
 記錄只寫在使用者自己的電腦上，不會傳到任何地方。
 """
 
+import contextlib
 import faulthandler
 import functools
 import inspect
@@ -126,6 +127,22 @@ def _heartbeat():
         _fault_stream.flush()
         log.warning("介面停止回應約 %.0f 秒，當時的呼叫堆疊記在 %s", stalled, FAULT_FILE)
     _arm_fault_timer()
+
+
+@contextlib.contextmanager
+def native_dialog():
+    """開原生檔案對話框的期間：Windows 的原生對話框自己跑事件迴圈、不派送 QTimer，
+    心跳會停，使用者慢慢選檔就被當成當機寫進 faults.log。先停掉，關掉後重新計時。"""
+    global _last_beat
+    active = _heartbeat_timer is not None
+    if active:
+        faulthandler.cancel_dump_traceback_later()
+    try:
+        yield
+    finally:
+        if active:
+            _last_beat = time.monotonic()
+            _arm_fault_timer()
 
 
 def set_error_callback(callback):

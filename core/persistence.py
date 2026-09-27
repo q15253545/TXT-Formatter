@@ -7,11 +7,16 @@ from pathlib import Path
 
 # 設定檔放在使用者的應用程式資料夾。TXT_TOOL_DATA_DIR 可以把它改到別處——
 # 測試都用這個指到暫存資料夾，才不會蓋掉使用者真正的規則與介面設定。
-APP_DATA_DIR = (Path(os.environ["TXT_TOOL_DATA_DIR"]) if os.environ.get("TXT_TOOL_DATA_DIR") else Path(
-    os.environ.get("LOCALAPPDATA")
-    or os.environ.get("XDG_CONFIG_HOME")
-    or (Path.home() / ".config")
-) / "TXTFormatterV3")
+_CONFIG_ROOT = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+APP_DATA_DIR = (Path(os.environ["TXT_TOOL_DATA_DIR"]) if os.environ.get("TXT_TOOL_DATA_DIR")
+                else _CONFIG_ROOT / "TXTFormatter")
+# 以前的資料夾名稱：還在、新的又還沒建立，就整個改名過來（規則、介面設定、記錄檔都留著）
+_OLD_DATA_DIR = _CONFIG_ROOT / "TXTFormatterV3"
+if not os.environ.get("TXT_TOOL_DATA_DIR") and _OLD_DATA_DIR.is_dir() and not APP_DATA_DIR.exists():
+    try:
+        _OLD_DATA_DIR.rename(APP_DATA_DIR)
+    except OSError:
+        pass                # 被佔用（例如舊版還開著）：這次先用新資料夾，下次啟動再搬
 RULES_FILE = APP_DATA_DIR / "chapter_rules.json"
 WINDOW_FILE = APP_DATA_DIR / "window.json"
 UI_STATE_FILE = APP_DATA_DIR / "ui_state.json"
@@ -57,8 +62,29 @@ def load_user_chapter_rules():
         if name and pattern and level in (1, 2):
             item = {"name": name, "pattern": pattern, "level": level,
                     "enabled": bool(rule.get("enabled", True))}
+            from .title_blocks import migrate_preset_rule, refresh_block_rule
+            if isinstance(rule.get("blocks"), dict):
+                # 「辨識章節」的組合：照積木重新產生正則（寫法跟著程式更新）；積木壞掉就當一般規則
+                refreshed = refresh_block_rule({**rule, "level": level})
+                if refreshed is not None:
+                    item = refreshed
+                valid.append(item)
+                continue
+            migrated = migrate_preset_rule(rule) if isinstance(rule.get("preset"), str) else None
+            if migrated is not None:
+                # 以前打開的常用格式：換成對應的組合
+                if all(existing.get("pattern") != migrated["pattern"] for existing in valid):
+                    valid.append(migrated)
+                continue
             if isinstance(rule.get("preset"), str):
                 item["preset"] = rule["preset"]
+                # 常用格式的寫法會跟著程式更新；存檔裡的是當時的版本，照代號換成現在的
+                from .user_rules import PRESET_RULES
+                current = next((preset for preset in PRESET_RULES if preset["preset"] == rule["preset"]), None)
+                if current is not None:
+                    item["pattern"] = current["pattern"]
+                else:
+                    del item["preset"]     # 拿掉的常用格式：留下規則本身，當成一般的自訂規則
             valid.append(item)
     return valid
 

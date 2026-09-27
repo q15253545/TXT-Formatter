@@ -18,12 +18,22 @@ _END_MARK_FULL = re.compile(
     rf"|(?P<u2>[部卷篇集])(?P<n2>{_END_NUMBER})"
     rf"|[本全](?P<u3>[部卷篇集章回節节]))"
     rf"{_END_WORDS}$")
+# 卷結尾行中間帶卷名（只認卷級，而且結尾字要單獨一段，例如「第一卷 山路 完」）
+_NAMED_VOLUME_END = re.compile(
+    rf"^[【\[（(〔「『]?\s*(?:第\s*(?P<n1>{_END_NUMBER})\s*(?P<u1>[部卷篇集])|(?P<u2>[部卷篇集])\s*(?P<n2>{_END_NUMBER}))"
+    rf"\s+(?P<name>[^\s【】\[\]（）()]{{1,12}})\s+{_END_WORDS}\s*[】\]）)〕」』]?$")
 _VOLUME_UNITS = set("部卷篇集")
 
 
 def parse_end_mark(text):
     """辨識卷／章結尾行；回傳 {"level": "volume"|"chapter", "number": int|None,
     "unit": 單位字} 或 None。number 為 None 代表「本卷完」這類沒寫編號的寫法。"""
+    named = _NAMED_VOLUME_END.match(text.strip()) if len(text) <= 30 else None
+    if named:
+        number_text = named.group("n1") or named.group("n2")
+        value = chinese_to_arabic(number_text)
+        return {"level": "volume", "number": int(value) if value and float(value).is_integer() else None,
+                "unit": named.group("u1") or named.group("u2"), "name": named.group("name")}
     compact = _END_MARK_NOISE.sub("", text)
     if not compact or len(compact) > 16:
         return None
@@ -37,21 +47,22 @@ def parse_end_mark(text):
         value = chinese_to_arabic(number_text)
         number = int(value) if value and float(value).is_integer() else None
     return {"level": "volume" if unit in _VOLUME_UNITS else "chapter", "number": number, "unit": unit}
-MANUAL_TITLE_REGEX = re.compile(r"^(.*?)\s*\[::\]\s*$", re.IGNORECASE)
-EXCLUDED_TITLE_REGEX = re.compile(r"^(.*?)\s*\[::X\]\s*$", re.IGNORECASE)
+_MARKER_SUFFIXES = (("[::x]", "exclude"), ("[::]", "include"),
+                    ("[::w]", "auto_work"), ("[::t]", "auto_title"))
 
 
 def strip_persistent_title_marker(text):
-    """移除行尾持久標記，回傳（正文、include／exclude／空字串）。"""
-    match = EXCLUDED_TITLE_REGEX.match(text)
-    if match:
-        return match.group(1).rstrip(), "exclude"
-    match = MANUAL_TITLE_REGEX.match(text)
-    if match:
-        return match.group(1).rstrip(), "include"
-    match = re.fullmatch(r"(.*?)\[::(W|T)\]\s*", text, re.DOTALL)
-    if match:
-        return match.group(1).rstrip(), "auto_work" if match.group(2) == "W" else "auto_title"
+    """移除行尾持久標記，回傳（正文、include／exclude／auto_work／auto_title／空字串）。
+
+    只看行尾的固定字串，不用正則（每一行開檔、重掃都會呼叫，正則遇到大量空白會回溯）。
+    大小寫不分（[::w]、[::t] 跟畫面隱藏、匯出移除的規則一致）。"""
+    tail = text.rstrip()
+    if not tail.endswith("]"):
+        return text, ""
+    ending = tail[-5:].casefold()
+    for suffix, kind in _MARKER_SUFFIXES:
+        if ending.endswith(suffix):
+            return tail[:-len(suffix)].rstrip(), kind
     return text, ""
 
 
