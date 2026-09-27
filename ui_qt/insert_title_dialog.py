@@ -20,7 +20,8 @@ class InsertTitleDialog(QDialog):
         self._suggestions = suggestions
         self.result_text = ""
 
-        root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True)
+        root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True,
+                                    intro="在游標所在的位置插入章節標題，編號照前後章推算。")
         root.setSpacing(14)
 
         grid = QGridLayout()

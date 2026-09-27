@@ -91,7 +91,7 @@ class RulesDialog(QDialog):
         # 本文改了，主視窗會呼叫 reload() 換成新的一份。
         self._analyze_document(get_document_lines(), known_rows)
 
-        root, footer = dialog_frame(self)
+        root, footer = dialog_frame(self, intro="自己寫正則辨識章節；本文可疑章節可以勾選後加入目錄。")
         root.setSpacing(10)
 
         self.tabs = QTabWidget()

@@ -1,5 +1,5 @@
 """左側「內容檢查」卡片（工具列「內容檢查」）：掃描無關連內容、作者感言與作品資訊、
-標點校對、繁簡轉換，以及「在本文標示顏色」的兩個開關、顯示內文空格與章節標記的開關。
+標點校對、繁簡轉換，以及只影響畫面的開關：廣告、作者感言與作品資訊的字色，內文空格、章節標記。
 
 字色標示要標哪些類型，照兩個掃描視窗裡（記住的）勾選；顏色的意思寫在檔名列的「說明」裡。
 """
@@ -64,8 +64,9 @@ class ContentPanel(QWidget):
 
         body.addWidget(Divider())
         # 廣告、作者感言分開開關；同一行兩種都是時用廣告的顏色。
-        self.mark_ad_toggle = ToggleSwitch("標示廣告")
-        self.mark_note_toggle = ToggleSwitch("標示作者感言與作品資訊")
+        # 只影響畫面的開關一律叫「顯示…」（用詞表見 UI_RULES.md）
+        self.mark_ad_toggle = ToggleSwitch("顯示無關連內容字色")
+        self.mark_note_toggle = ToggleSwitch("顯示作者感言與作品資訊字色")
         for toggle in (self.mark_ad_toggle, self.mark_note_toggle):
             toggle.toggled.connect(lambda _checked: self.marking_changed.emit())
             body.addWidget(toggle)

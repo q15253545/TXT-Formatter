@@ -29,7 +29,7 @@ class DuplicateChaptersDialog(QDialog):
         self._groups: list = []
         self._checked: set[int] = set()
 
-        root, footer = dialog_frame(self)
+        root, footer = dialog_frame(self, intro="相鄰、章號相同的章節；勾選要合併的，正文併進留下的那一章。")
         root.setSpacing(12)
 
         note = QLabel("相鄰、章號相同的章節：合併後保留第一個標題，兩個標題之間的內容併入同一章。")

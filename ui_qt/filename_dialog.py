@@ -33,7 +33,8 @@ class FilenameDialog(QDialog):
         self._fields = fields
         self.result_ongoing = self.result_completed = self.result_script = None
 
-        root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True)
+        root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True,
+                                    intro="連載中、已完結各一種格式，照書籍資料組成。")
         root.setSpacing(6)
 
         using_completed = status == "已完結"

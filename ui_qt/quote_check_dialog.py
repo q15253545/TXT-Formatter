@@ -21,7 +21,7 @@ from core.quote_check import (
 from . import dialogs, i18n
 from .sortable_table import PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
 from .theme import active_tokens
-from .widgets import Divider, ScopeToggle, dialog_frame, flow_container, size_dialog
+from .widgets import ContextPreview, Divider, ScopeToggle, dialog_frame, flow_container, size_dialog
 
 # 每種問題該怎麼看待，寫在勾選框的提示裡。
 _KIND_TIPS = {
@@ -215,13 +215,10 @@ class QuoteCheckDialog(QDialog):
         self.result_lines: list | None = None
         self.applied_count = 0
 
-        root, footer = dialog_frame(self)
+        root, footer = dialog_frame(self, intro="找出引號沒成對、對話斷行、重複標點；有正確寫法的可以勾選後一次修正。")
         root.setSpacing(12)
 
-        # 「只檢查選取的章節」是範圍，所有工具視窗都放在最上面（跟掃描無關連內容一致）。
-        # 只選了一章時不預設打勾：點目錄是用來跳到那一章看內容的，幾乎隨時都
-        # 有一個被選著；預設只掃那一章的話，掃不到東西會讓人以為整本都沒問題。
-        # 刻意多選兩章以上，才當成「只想處理這幾章」。
+        # 「只檢查選取的章節」是範圍，所有工具視窗都放在最上面（預設關著，見 ScopeToggle）。
         self.scope_check = ScopeToggle("檢查", selected_count if self._selected_ranges else 0)
         self.scope_check.toggled.connect(self._run_scan)
         root.addWidget(self.scope_check)
@@ -285,7 +282,9 @@ class QuoteCheckDialog(QDialog):
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         enable_sorting(self.table)
-        root.addWidget(self.table, 1)
+        # 選到一列：下面顯示那一行加上前後文（拉中間的分隔可以調高度）
+        self.preview = ContextPreview()
+        root.addWidget(self.preview.stacked_under(self.table), 1)
 
         buttons = QDialogButtonBox()
         close_button = buttons.addButton("關閉", QDialogButtonBox.ButtonRole.RejectRole)
@@ -408,6 +407,7 @@ class QuoteCheckDialog(QDialog):
         self.table.blockSignals(False)
         resort(self.table)
         self._update_status()
+        self._update_preview()
 
     def _update_status(self):
         wrapped = getattr(self._all_problems, "wrapped", 0)
@@ -421,9 +421,11 @@ class QuoteCheckDialog(QDialog):
                 text = (f"共 {self._visible_total} 處，太多了只列出 {len(self._visible)} 處"
                         f"（可修正的優先，修正後會列出其餘的），其中 {fixable} 處可以自動修正；"
                         f"已勾選 {len(self._checked)} 處")
-        if wrapped:
+        if wrapped and getattr(self._all_problems, "hard_wrapped", True):
             text += (f"。這本是硬換行（句子被切成好幾行），有 {wrapped} 段跨行的引號沒有列出；"
                      "建議先用排版設定的「整理段落換行」接回去")
+        elif wrapped:
+            text += f"。有 {wrapped} 段話分成好幾行、引號到最後一行才關（每行開頭沒有補引號），這些沒有列出"
         i18n.set_text(self.status_label, text)
         self.fix_button.setEnabled(bool(self._checked))
 
@@ -438,11 +440,23 @@ class QuoteCheckDialog(QDialog):
         self._update_status()
 
     def _on_selection_changed(self):
+        problem = self._update_preview()
+        if problem is not None:
+            self.problemSelected.emit(problem["line"])
+
+    def _update_preview(self):
+        """前後文預覽跟著目前選的那一列（問題那幾行標成修正後的紅字）；沒有選取就藏起來。"""
         rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            return
+        if not rows or not self._raw_lines:
+            self.preview.hide()
+            return None
         problem = self._all_problems[data_index(self.table, rows[0].row())]
-        self.problemSelected.emit(problem["line"])
+        fix = problem["fix"]
+        # problem["line"] 是從 1 起算的行號，fix 的範圍是 raw_lines 的索引（不含 end）
+        row = problem["line"] - 1
+        start, end = (fix["start"], max(fix["start"], fix["end"] - 1)) if fix else (row, row)
+        self.preview.show_rows(self._raw_lines, start, end, active_tokens().diff_text)
+        return problem
 
     def _check_fixable(self):
         self._checked |= {index for index in self._visible if self._all_problems[index]["fix"]}

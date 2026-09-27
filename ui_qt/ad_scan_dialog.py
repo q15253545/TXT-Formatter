@@ -20,11 +20,12 @@ from PySide6.QtWidgets import (
 )
 
 from core.ad_scan import (
-    AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT, REPEAT_MIN_LENGTH,
+    AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, FIX_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT, REPEAT_MIN_LENGTH,
     scan_ad_candidates,
 )
 from . import dialogs, i18n
-from .widgets import Divider, ScopeToggle, dialog_frame, flow_container, size_dialog, slider_with_spin
+from .theme import active_tokens
+from .widgets import ContextPreview, Divider, ScopeToggle, dialog_frame, flow_container, size_dialog, slider_with_spin
 from .sortable_table import (
     PreviewTable,
     CONFIDENCE_ORDER, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns,
@@ -34,7 +35,7 @@ _CONFIDENCE_BY_BUTTON = {"勾選高信心": "高", "勾選中信心": "中", "�
 
 # 只有需要解釋的類型才寫提示；其餘看名字就懂。
 _CATEGORY_TIPS = {
-    "meta": "作者、字數、發表日期與平台、整行的裝飾分隔線，以及論壇轉貼留下的樓層資訊、使用者資料表。\n"
+    "meta": "作者、字數、發表日期與平台、整行的裝飾分隔線。\n"
             "單獨的日期只給「中」信心：日記體小說每章開頭就是日期，不宜預設勾選。",
     "entity": "網頁轉存時沒轉回來的字元碼（&#29368;、&nbsp;、&amp;）。\n"
               "不會刪掉整行，是換回原本的字（章節標題裡的也會換）。",
@@ -43,6 +44,11 @@ _CATEGORY_TIPS = {
 REPEAT_LENGTH_RANGE = (2, 60)
 REPEAT_COUNT_RANGE = (2, 50)
 
+_INTROS = {
+    "ads": "找出網址、QQ／微信、小說來源、論壇轉貼資訊、重複段落這類跟故事無關的內容；勾選後刪除，網頁字元碼換回原字。",
+    "notes": "找出作者的話、作者／字數／發表平台、分隔線；勾選後刪除。",
+}
+
 _MODES = {
     # 模式: (視窗標題, 偵測類型（勾選框）, 沒找到時的說明)
     "ads": ("掃描無關連內容", tuple(key for key in AD_ONLY_CATEGORIES if key != "repeat"), "內容"),
@@ -50,13 +56,33 @@ _MODES = {
 }
 
 
+def _changed_span(before: str, after: str):
+    """換字的候選（網址片段、網頁字元碼）：原本那一行裡被換掉的那一段（起, 迄）。"""
+    left = 0
+    while left < min(len(before), len(after)) and before[left] == after[left]:
+        left += 1
+    right = 0
+    while right < min(len(before), len(after)) - left and before[-1 - right] == after[-1 - right]:
+        right += 1
+    right = max(left, len(before) - right)
+    # 「&amp;」換成「&」時最短的差別只有「amp;」：標成整個字元碼
+    for match in _ENTITY.finditer(before):
+        if match.start() < right and match.end() > left:
+            left, right = min(left, match.start()), max(right, match.end())
+    return left, right
+
+
+_ENTITY = re.compile(r"&#?[0-9A-Za-z]{1,10};")
+
+
 class _CandidatePane(QWidget):
     """一張候選表格＋選取按鈕＋狀態列。掃描無關連內容的兩個分頁、作者感言視窗共用。"""
 
     highlighted = Signal(int, int)
 
-    def __init__(self, second_column: str, parent=None):
+    def __init__(self, second_column: str, lines_source=lambda: [], parent=None):
         super().__init__(parent)
+        self._lines_source = lines_source          # 目前的本文（前後文預覽用）
         self._candidates: list[dict] = []
         self._shown: list[int] = []            # 表格列出的候選（超過上限時只是其中一部分）
         self._selected: set[int] = set()
@@ -87,7 +113,9 @@ class _CandidatePane(QWidget):
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         enable_sorting(self.table)
-        layout.addWidget(self.table, 1)
+        # 選到一列：下面顯示那一段加上前後文（拉中間的分隔可以調高度）
+        self.preview = ContextPreview()
+        layout.addWidget(self.preview.stacked_under(self.table), 1)
         self._empty_text = "沒有找到符合的內容"
 
     @staticmethod
@@ -143,6 +171,7 @@ class _CandidatePane(QWidget):
         self.table.blockSignals(False)
         resort(self.table)
         self.update_status()
+        self._update_preview()
 
     def update_status(self):
         if not self._candidates:
@@ -163,12 +192,32 @@ class _CandidatePane(QWidget):
             self._selected.discard(index)
         self.update_status()
 
-    def _on_selection_changed(self):
+    def _selected_candidate(self):
         rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            return
-        candidate = self._candidates[data_index(self.table, rows[0].row())]
-        self.highlighted.emit(candidate["start"], candidate["end"])
+        return self._candidates[data_index(self.table, rows[0].row())] if rows else None
+
+    def _on_selection_changed(self):
+        candidate = self._update_preview()
+        if candidate is not None:
+            self.highlighted.emit(candidate["start"], candidate["end"])
+
+    def _update_preview(self):
+        """前後文預覽跟著目前選的那一列；沒有選取就藏起來。回傳選到的候選。"""
+        candidate = self._selected_candidate()
+        lines = self._lines_source()
+        if candidate is None or not lines:
+            self.preview.hide()
+            return candidate
+        tokens = active_tokens()
+        # 跟本文字色一樣：作者感言、作品資訊一種顏色，其餘（廣告、重複段落…）廣告的顏色
+        color = (tokens.note_mark_text if set(candidate["types"]) <= set(NOTE_CATEGORIES)
+                 else tokens.ad_mark_text)
+        spans = {}
+        fix = candidate.get("fix")
+        if fix is not None and candidate["start"] == candidate["end"] and candidate["start"] < len(lines):
+            spans[candidate["start"]] = _changed_span(lines[candidate["start"]], fix)
+        self.preview.show_rows(lines, candidate["start"], candidate["end"], color, spans)
+        return candidate
 
     def select_mode(self, button_label: str):
         if button_label == "全選":
@@ -200,13 +249,10 @@ class AdScanDialog(QDialog):
         self.result_lines: list | None = None
         self.result_summary = (0, 0)          # （刪掉幾行, 換回網頁字元碼的行數）
 
-        root, footer = dialog_frame(self)
+        root, footer = dialog_frame(self, intro=_INTROS[mode])
         root.setSpacing(12)
 
-        # 「只掃描選取的章節」是範圍，兩個分頁共用，放在最上面。
-        # 只選了一章時不預設打勾：點目錄是用來跳到那一章看內容的，幾乎隨時都
-        # 有一個被選著；預設只掃那一章的話，掃不到東西會讓人以為整本都沒問題。
-        # 刻意多選兩章以上，才當成「只想處理這幾章」。
+        # 「只掃描選取的章節」是範圍，兩個分頁共用，放在最上面（預設關著，見 ScopeToggle）。
         self.scope_check = ScopeToggle("掃描", selected_count if self._selected_ranges else 0)
         self.scope_check.toggled.connect(self._run_scan)
         root.addWidget(self.scope_check)
@@ -231,7 +277,7 @@ class AdScanDialog(QDialog):
             category_flow.addWidget(checkbox)
         main_layout.addWidget(category_box)
         main_layout.addWidget(Divider())
-        self._main_pane = _CandidatePane("類型")
+        self._main_pane = _CandidatePane("類型", lambda: self._raw_lines)
         self._main_pane.highlighted.connect(self.candidateHighlighted.emit)
         main_layout.addWidget(self._main_pane, 1)
 
@@ -248,7 +294,7 @@ class AdScanDialog(QDialog):
 
         buttons = QDialogButtonBox()
         cancel_button = buttons.addButton("關閉", QDialogButtonBox.ButtonRole.RejectRole)
-        # 網頁字元碼是換字，其他都是刪除：有網頁字元碼的分頁叫「處理」，只會刪除的叫「刪除」
+        # 網頁字元碼、文中的廣告片段是換字，其他都是刪除：會換字的分頁叫「處理」，只會刪除的叫「刪除」
         self.delete_button = buttons.addButton("刪除已勾選項目", QDialogButtonBox.ButtonRole.AcceptRole)
         self.delete_button.setObjectName("primary")
         cancel_button.clicked.connect(self.reject)
@@ -259,7 +305,7 @@ class AdScanDialog(QDialog):
         self._run_scan()
 
     def _update_action_label(self, *_args):
-        replaces = self._current_pane() is self._main_pane and "entity" in self._categories
+        replaces = self._current_pane() is self._main_pane and bool((FIX_CATEGORIES | {"url"}) & set(self._categories))
         i18n.set_text(self.delete_button, "處理已勾選項目" if replaces else "刪除已勾選項目")
 
     def _build_repeat_page(self, repeat_settings) -> QWidget:
@@ -281,7 +327,7 @@ class AdScanDialog(QDialog):
             controls, "至少重複", REPEAT_COUNT_RANGE, min_count, " 次")
         layout.addLayout(controls)
 
-        self._repeat_pane = _CandidatePane("次數")
+        self._repeat_pane = _CandidatePane("次數", lambda: self._raw_lines)
         self._repeat_pane.highlighted.connect(self.candidateHighlighted.emit)
         layout.addWidget(self._repeat_pane, 1)
 

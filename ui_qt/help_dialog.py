@@ -1,5 +1,5 @@
-"""「說明」視窗（檔名列上的問號）：章節標記、本文字色、章節管理的預覽開關、設定檔位置。
-每一節一個粗體標題（跟其他視窗的標題同一種樣式），內文用介面的一般字級。"""
+"""「說明」視窗（檔名列上的問號）：章節標記、本文字色、設定檔。
+每一節一個粗體標題、後面括號寫這一節的範圍；內容放在淺色底的表格裡，跟介面同一個字級。"""
 
 import html
 from pathlib import Path
@@ -7,18 +7,20 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from . import i18n
 from .widgets import Divider, size_dialog
 
 
 class HelpDialog(QDialog):
-    def __init__(self, tokens, marker_guide, data_dir: Path, parent=None):
+    def __init__(self, tokens, marker_guide, data_dir: Path, parent=None, on_restore=None):
         super().__init__(parent)
         self.setWindowTitle("說明")
-        size_dialog(self, 640, 720)
+        size_dialog(self, 640, 640)
         self._data_dir = Path(data_dir)
+        self._tokens = tokens
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 14)
@@ -36,42 +38,36 @@ class HelpDialog(QDialog):
         self._body.setContentsMargins(24, 20, 24, 12)
         self._body.setSpacing(8)
 
-        cell = "padding:3px 16px 3px 0"
         # 標記、路徑也用介面字體（<code> 會換成等寬字，跟旁邊的字對不齊）
-        rows = "".join(
-            f"<tr><td style='{cell}'>{html.escape(mark)}</td>"
-            f"<td style='{cell}'>{name}</td><td style='padding:3px 0'>{detail}</td></tr>"
-            for mark, name, detail in marker_guide)
-        self._section("章節標記",
-                      f"<table>{rows}</table>"
-                      "<p>寫在檔案裡，保存目錄的手動調整。</p>")
-
-        swatches = "".join(
-            f"<tr><td style='{cell}'><span style='color:{color}'>■ {name}</span></td>"
-            f"<td style='padding:3px 0'>{detail}</td></tr>"
+        self._section("章節標記", "由使用者手動標記並寫入本文，便於排版；可設定匯出時移除",
+                      self._table([(f"<span style='color:{tokens.marker_text}'>{html.escape(mark)}</span>", detail)
+                                   for mark, detail in marker_guide]))
+        self._section("本文字色", "僅影響顯示，與正文無關", self._table([
+            (f"<span style='color:{color}'>{name}</span>", detail)
             for color, name, detail in (
-                (tokens.ad_mark_text, "廣告", "網址、發布頁、QQ／微信、小說來源、重複段落"),
-                (tokens.note_mark_text, "作者感言、作品資訊", "作者的話、作者／字數／發表平台、分隔線"),
-                (tokens.marker_text, "不是原文的內容", "顯示中的章節標記、章節管理開關的預覽"),
-            ))
-        self._section("本文字色", f"<table>{swatches}</table><p>只是顯示，不寫進檔案。</p>")
+                (tokens.ad_mark_text, "無關連內容", "網址、發布頁、QQ／微信、小說來源、重複段落、論壇轉貼資訊"),
+                (tokens.note_mark_text, "作者感言與作品資訊", "作者的話、作者／字數／發表平台、分隔線"),
+                (tokens.marker_text, "非原文內容", "顯示中的章節標記、章節管理開關的預覽"),
+            )]))
 
-        toggles = "".join(
-            f"<tr><td style='{cell}'>{name}</td><td style='padding:3px 0'>{detail}</td></tr>"
-            for name, detail in (
-                ("自動合併下行標題", "「第1章」接上下一行的章名"),
-                ("自動合併重複標題", "連續出現兩次的同一章標題只留第一個"),
-                ("自動補齊卷號", "從卷結尾行、章號重新起算推出缺少的卷"),
-                ("自動補齊卷名", "卷結尾行寫的卷名一起補上"),
-            ))
-        self._section("合併標題、補齊卷號與卷名",
-                      f"<table>{toggles}</table><p>開關只預覽，按「套用到本文」才寫入。</p>")
-
+        # 設定檔：路徑本身就是連結（點了打開資料夾），右邊是還原預設
         link = QUrl.fromLocalFile(str(self._data_dir)).toString()
-        self._section("設定檔位置",
-                      f"<p>{html.escape(str(self._data_dir))}　"
-                      f"<a href='{link}' style='color:{tokens.accent}'>開啟資料夾</a></p>",
-                      last=True)
+        path_label = QLabel(f"<a href='{link}' style='color:{tokens.accent}'>{html.escape(str(self._data_dir))}</a>")
+        path_label.setTextFormat(Qt.TextFormat.RichText)
+        path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        path_label.setOpenExternalLinks(False)
+        path_label.linkActivated.connect(self._open_link)
+        i18n.skip(path_label)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        row.addWidget(path_label, 1)
+        self.restore_button = QPushButton("還原預設")
+        self.restore_button.setEnabled(on_restore is not None)
+        if on_restore is not None:
+            self.restore_button.clicked.connect(lambda: on_restore(self))
+        row.addWidget(self.restore_button)
+        self._heading("設定檔", "辨識章節的組合、排版設定、開關與視窗大小")
+        self._body.addLayout(row)
         self._body.addStretch(1)
 
         buttons = QDialogButtonBox()
@@ -85,21 +81,32 @@ class HelpDialog(QDialog):
         button_row.addWidget(buttons)
         outer.addLayout(button_row)
 
-    def _section(self, title: str, body_html: str, last: bool = False):
-        heading = QLabel(title)
+    def _table(self, rows) -> str:
+        """淺色底、沒有框線的兩欄表格；第一欄不換行。"""
+        cells = "".join(
+            f"<tr><td style='padding:6px 12px; white-space:nowrap'>{first}</td>"
+            f"<td style='padding:6px 12px 6px 0'>{second}</td></tr>"
+            for first, second in rows)
+        return (f"<table width='100%' cellspacing='0' cellpadding='0' "
+                f"bgcolor='{self._tokens.surface_hover}'>{cells}</table>")
+
+    def _heading(self, title: str, note: str):
+        heading = QLabel(f"{html.escape(title)}<span style='font-weight:normal; color:{self._tokens.text_muted}'>"
+                         f"（{html.escape(note)}）</span>")
         heading.setObjectName("appTitle")
+        heading.setTextFormat(Qt.TextFormat.RichText)
+        heading.setWordWrap(True)
         self._body.addWidget(heading)
+
+    def _section(self, title: str, note: str, body_html: str):
+        self._heading(title, note)
         body = QLabel(body_html)
         body.setTextFormat(Qt.TextFormat.RichText)
         body.setWordWrap(True)
-        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        body.setOpenExternalLinks(False)
-        body.linkActivated.connect(self._open_link)
         self._body.addWidget(body)
-        if not last:
-            self._body.addSpacing(6)
-            self._body.addWidget(Divider())
-            self._body.addSpacing(6)
+        self._body.addSpacing(6)
+        self._body.addWidget(Divider())
+        self._body.addSpacing(6)
 
     def _open_link(self, url: str):
         self._data_dir.mkdir(parents=True, exist_ok=True)

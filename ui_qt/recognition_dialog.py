@@ -8,19 +8,21 @@
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMenu, QPushButton, QScrollArea, QTableWidget, QTabWidget, QVBoxLayout, QWidget,
+    QMenu, QPushButton, QScrollArea, QSplitter, QTableWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from core.chapter_parse import (
     DEFAULT_TITLE_TAIL_ALLOWED, MAX_TITLE_LENGTH, SPECIAL_LEVELS, SPECIAL_WORDS, build_title_check, heading_word,
-    looks_like_heading, may_have_heading_word, title_tail_groups,
+    looks_like_heading, may_have_heading_word, title_tail_groups, word_key,
 )
 from core.persistence import RULES_FILE, _save_json
 from core.title_blocks import (
     COLUMNS, auto_name, block_rule, blocks_from_sample, confidence, options, template, templates_by_confidence,
 )
 from core.title_markers import strip_persistent_title_marker
-from core.user_rules import match_user_chapter_rule, preset_rule
+from core.user_rules import (
+    SPECIAL_WORD_MAX, match_user_chapter_rule, preset_rule, special_word_rule, special_word_variants,
+)
 from . import dialogs, i18n
 from .sortable_table import PreviewTable, make_item, setup_columns
 from .widgets import ToggleSwitch, dialog_frame, flow_container, size_dialog, slider_with_spin
@@ -28,7 +30,7 @@ from .widgets import ToggleSwitch, dialog_frame, flow_container, size_dialog, sl
 _COLUMN_NAMES = {"frame": "外框", "prefix": "前綴", "number": "數字", "unit": "單位", "sep": "分隔", "title": "章名"}
 _LEVEL_NAMES = {2: "章", 1: "卷"}
 # 內建組合＝自動辨識：前綴、數字…都固定，只有單位可以開關（對到「關掉的字」）
-_BUILTIN_UNITS = {2: ("章", "回", "節", "折", "幕"), 1: ("卷", "部", "篇", "集")}
+_BUILTIN_UNITS = {2: ("章", "回", "節", "折", "幕"), 1: ("卷", "部", "篇", "集", "季")}
 _BUILTIN_NAMES = {2: "第N章", 1: "第N卷"}
 _NUMBER_SAMPLES = {"一二三": "十二", "123": "12", "全形１２": "１２", "壹貳參": "拾貳"}
 _SEP_SHOWN = {"無": "", "空格": " ", ".": ". ", "-": " - "}
@@ -36,11 +38,13 @@ _NAMED_VOLUME = "named_volume"
 _SPECIAL_ROWS = ([(key, label) for key, label, _variants in SPECIAL_WORDS]
                  + [("番外", "番外"), ("外傳", "外傳"), ("終章", "終章"), (_NAMED_VOLUME, "名稱＋篇（青雲篇、上卷）")])
 _LINES_SHOWN = 300
+LEFT_MIN_WIDTH = 200       # combo list: the "+ 新增組合" button and a combo name still fit
+LEFT_DEFAULT_WIDTH = 250
 
 
 def managed_rule(rule: dict) -> bool:
-    """這條規則歸「辨識章節」管（積木組合、名稱＋篇），不在「自訂章節規則」的清單裡。"""
-    return bool(rule.get("blocks")) or rule.get("preset") == _NAMED_VOLUME
+    """這條規則歸「辨識章節」管（積木組合、名稱＋篇、自訂特殊標題），不在「自訂章節規則」的清單裡。"""
+    return bool(rule.get("blocks")) or rule.get("preset") == _NAMED_VOLUME or bool(rule.get("special"))
 
 
 def _builtin_blocks(level: int, disabled: set) -> dict:
@@ -78,11 +82,17 @@ class _LevelPage(QWidget):
         self._updating = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(14)
+        layout.setSpacing(0)
+        # Combo list | blocks: a draggable divider, both sides keep a minimum width (the dialog's minimum
+        # width follows, see RecognitionDialog._fit_minimum_width), so a narrow window never squashes the blocks.
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(14)
+        layout.addWidget(self.splitter)
 
         left_host = QFrame()
         left_host.setObjectName("comboPane")
-        left_host.setFixedWidth(250)
+        left_host.setMinimumWidth(LEFT_MIN_WIDTH)
         left = QVBoxLayout(left_host)
         left.setContentsMargins(0, 0, 14, 0)
         left.setSpacing(8)
@@ -111,9 +121,11 @@ class _LevelPage(QWidget):
         self.combo_list.setObjectName("comboList")
         self.combo_list.currentRowChanged.connect(lambda _row: self.show_current())
         left.addWidget(self.combo_list, 1)
-        layout.addWidget(left_host)
+        self.splitter.addWidget(left_host)
 
-        right = QVBoxLayout()
+        right_host = QWidget()
+        right = QVBoxLayout(right_host)
+        right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(10)
         name_row = QHBoxLayout()
         name_row.setSpacing(8)
@@ -162,7 +174,11 @@ class _LevelPage(QWidget):
         self.lines_table.itemSelectionChanged.connect(self._on_line_selected)
         self.lines_table.hide()
         right.addWidget(self.lines_table)
-        layout.addLayout(right, 1)
+        right_host.setMinimumWidth(right_host.minimumSizeHint().width())
+        self.splitter.addWidget(right_host)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([LEFT_DEFAULT_WIDTH, 10000])
 
         self._count_timer = QTimer(self)
         self._count_timer.setSingleShot(True)
@@ -409,6 +425,8 @@ class _LevelPage(QWidget):
                 parts[column] = "" if option == "沒有" else "過河"
             elif column == "sep":
                 parts[column] = "" if option == "無" else ("␣" if option == "空格" else option)
+            elif column == "prefix" and option == "N-":
+                parts[column] = "2-"          # 卷號-章號：「2-12 過河」
             else:
                 parts[column] = "" if option in ("無", "") else option
         return parts
@@ -515,6 +533,7 @@ class RecognitionDialog(QDialog):
                 self.combos[1 if rule.get("level") == 1 else 2].append(dict(rule, blocks=dict(rule["blocks"])))
             elif rule.get("preset") == _NAMED_VOLUME:
                 self._named_volume = dict(rule)
+        self.custom_specials = [dict(rule) for rule in rules if rule.get("special")]
         self.disabled = set(disabled_words or ())
         self.special_levels = dict(special_levels or {})
         self._tail_custom = "".join(dict.fromkeys(title_tail_custom or ""))
@@ -530,7 +549,7 @@ class RecognitionDialog(QDialog):
         self._rule_lines = None
         self._analyze(get_document_lines(), known_rows)
 
-        root, footer = dialog_frame(self)
+        root, footer = dialog_frame(self, intro="用積木組出章、卷標題的寫法；也可以關掉單位、設定特殊標題是卷或章。")
         root.setSpacing(12)
         self.tabs = QTabWidget()
         self.pages = {level: _LevelPage(self, level) for level in (2, 1)}
@@ -543,7 +562,6 @@ class RecognitionDialog(QDialog):
         length_row.setSpacing(10)
         self.title_length_slider, self.title_length_spin = slider_with_spin(
             length_row, "標題最長", (10, 200), self._max_title_length, " 字")
-        length_row.addStretch(1)
         self.title_length_spin.valueChanged.connect(self._on_check_changed)
         root.addLayout(length_row)
 
@@ -576,6 +594,17 @@ class RecognitionDialog(QDialog):
         for page in self.pages.values():
             page.rebuild_list()
         size_dialog(self, 1000, 820)
+        self._fit_minimum_width()
+        # Custom special counts need the title-length / tail settings, which are built after the special page.
+        self._update_custom_counts()
+
+    def _fit_minimum_width(self):
+        """The pages sit in scroll areas, which don't report their content's width: without this the
+        dialog could be dragged so narrow that the blocks scroll sideways and the layout falls apart."""
+        page_width = max(page.minimumSizeHint().width() for page in self.pages.values())
+        margins = self.layout().contentsMargins()
+        scrollbar = self.style().pixelMetric(self.style().PixelMetric.PM_ScrollBarExtent)
+        self.setMinimumWidth(page_width + scrollbar + margins.left() + margins.right() + 40)
 
     # ------------------------------------------------------------------ 本文
 
@@ -618,6 +647,7 @@ class RecognitionDialog(QDialog):
         for page in self.pages.values():
             page.show_current()
         self._update_special_counts()
+        self._rebuild_custom_specials()
 
     def title_check(self):
         return build_title_check(self.title_tail_allowed(), self._tail_custom, self.title_length_spin.value())
@@ -626,6 +656,7 @@ class RecognitionDialog(QDialog):
         """標題長度、章名結尾改了：組合的收錄數照新的設定重算。"""
         for page in self.pages.values():
             page.show_current()
+        self._update_custom_counts()
 
     # ------------------------------------------------------------------ 特殊標題
 
@@ -658,11 +689,128 @@ class RecognitionDialog(QDialog):
             count.setObjectName("fileLabel")
             self._special_count_labels[key] = count
             grid.addWidget(count, row, 4)
-        grid.setColumnStretch(5, 1)
-        grid.setRowStretch(len(_SPECIAL_ROWS), 1)
+        grid.setColumnStretch(6, 1)
+        self._special_grid = grid
+        self._custom_widgets: list = []
+
+        # 自己新增的特殊標題（「續章」「附錄」…）：照原文顯示，不改寫成第N章
+        heading = QLabel("自訂")
+        heading.setObjectName("appTitle")
+        self._custom_heading_row = len(_SPECIAL_ROWS)
+        grid.addWidget(heading, self._custom_heading_row, 0, 1, 3)
+        self.special_input = QLineEdit()
+        self.special_input.setPlaceholderText(i18n.T("標題開頭的字，例如：續章"))
+        self.special_input.setMaxLength(SPECIAL_WORD_MAX)
+        self.special_input.returnPressed.connect(self._add_custom_special)
+        self.special_add_button = QPushButton("新增")
+        self.special_add_button.clicked.connect(self._add_custom_special)
+        self.special_message = QLabel("")
+        self.special_message.setObjectName("fileLabel")
+        self.special_input_row = QWidget()
+        input_layout = QHBoxLayout(self.special_input_row)
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.setSpacing(8)
+        self.special_input.setFixedWidth(220)
+        input_layout.addWidget(self.special_input)
+        input_layout.addWidget(self.special_add_button)
+        input_layout.addWidget(self.special_message)
+        input_layout.addStretch(1)
+        self.special_add_button.setFixedHeight(self.special_input.sizeHint().height())
+        self._rebuild_custom_specials()
         self._sync_special_levels()
         self._update_special_counts()
         return page
+
+    def _rebuild_custom_specials(self):
+        grid = self._special_grid
+        for widget in self._custom_widgets:
+            grid.removeWidget(widget)
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
+        self._custom_widgets = []
+        self._custom_count_labels = []
+        grid.removeWidget(self.special_input_row)
+        first = self._custom_heading_row + 1
+        for offset, rule in enumerate(self.custom_specials):
+            row = first + offset
+            toggle = ToggleSwitch("", fill=False)
+            toggle.setChecked(rule.get("enabled", True))
+            toggle.clicked.connect(lambda checked, rule=rule: rule.__setitem__("enabled", checked))
+            # show every spelling that is matched (traditional and simplified) so it's clear both count
+            word = rule["special"]
+            label = QLabel("／".join([word] + [item for item in special_word_variants(word) if item != word]))
+            i18n.skip(label)
+            chips = []
+            for column, level in enumerate((1, 2)):
+                chip = QPushButton(_LEVEL_NAMES[level])
+                chip.setObjectName("blockChip")
+                chip.setCheckable(True)
+                chip.setChecked(rule["level"] == level)
+                chip.clicked.connect(lambda _checked=False, rule=rule, level=level: self._on_custom_level(rule, level))
+                chips.append(chip)
+                grid.addWidget(chip, row, 2 + column)
+            count = QLabel("")
+            count.setObjectName("fileLabel")
+            self._custom_count_labels.append((rule, count))
+            remove = QPushButton("移除")
+            remove.setObjectName("inlineLink")
+            remove.clicked.connect(lambda _checked=False, rule=rule: self._remove_custom_special(rule))
+            grid.addWidget(toggle, row, 0)
+            grid.addWidget(label, row, 1)
+            grid.addWidget(count, row, 4)
+            grid.addWidget(remove, row, 5)
+            self._custom_widgets += [toggle, label, *chips, count, remove]
+        input_row = first + len(self.custom_specials)
+        grid.addWidget(self.special_input_row, input_row, 0, 1, 7)
+        for row in range(grid.rowCount()):
+            grid.setRowStretch(row, 0)
+        grid.setRowStretch(input_row + 1, 1)
+        self._update_custom_counts()
+
+    def _update_custom_counts(self):
+        if not hasattr(self, "_tail_toggles"):
+            return          # still inside __init__: the settings the counts depend on don't exist yet
+        for rule, label in getattr(self, "_custom_count_labels", ()):
+            label.setText(i18n.T(self._custom_count_text(rule)))
+
+    def _custom_count_text(self, rule) -> str:
+        check = self.title_check()
+        collected = pending = 0
+        for _row, clean, known in self.rule_lines():
+            if match_user_chapter_rule(clean, [dict(rule, enabled=True)], check) is not None:
+                if known:
+                    collected += 1
+                else:
+                    pending += 1
+        return _count_text(collected, pending)
+
+    def _add_custom_special(self):
+        word = self.special_input.text().strip()
+        if not word:
+            return
+        existing = {variant for rule in self.custom_specials for variant in special_word_variants(rule["special"])}
+        if any(char.isspace() for char in word) or not any(char.isalpha() for char in word):
+            message = "要是文字，不能有空白"
+        elif word_key(word) is not None or any(word == label for _key, label in _SPECIAL_ROWS):
+            message = f"「{word}」是內建的，在上面的清單"
+        elif word in existing:
+            message = f"「{word}」已經加過了"
+        else:
+            self.custom_specials.append(special_word_rule(word))
+            self.special_input.clear()
+            self._rebuild_custom_specials()
+            message = "預設是章（掛在目前的卷底下）；可以改成卷"
+        i18n.set_text(self.special_message, message)
+
+    def _on_custom_level(self, rule, level: int):
+        rule["level"] = level
+        self._rebuild_custom_specials()
+
+    def _remove_custom_special(self, rule):
+        self.custom_specials = [item for item in self.custom_specials if item is not rule]
+        i18n.set_text(self.special_message, "")
+        self._rebuild_custom_specials()
 
     def _special_enabled(self, key: str) -> bool:
         if key == _NAMED_VOLUME:
@@ -792,7 +940,9 @@ class RecognitionDialog(QDialog):
         rules = [dict(rule) for level in (2, 1) for rule in self.combos[level]]
         if self._named_volume is not None:
             rules.append(dict(self._named_volume))
-        return rules
+        # 自訂特殊標題放最前面：「書名 續章3」這種行不要先被別的組合收走
+        return [special_word_rule(rule["special"], rule["level"], rule.get("enabled", True))
+                for rule in self.custom_specials] + rules
 
     def _commit(self):
         rules = [dict(rule) for rule in self._plain] + self.managed_rules()

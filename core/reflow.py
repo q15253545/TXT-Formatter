@@ -176,6 +176,12 @@ def _should_join(lines: list[PhysicalLine], index: int, paragraph_stack: list[st
         return ""
     if TERMINAL.search(left):
         return None
+    # 這一行自己開了對話引號還沒關、又停在字的中間（「他笑道，“你應該知道我」下一行接「的意思……」）：
+    # 就算附近沒有同樣寬度的行可以對照，也是同一段被切斷。停在標點、引號、括號的不算
+    # （「“當當~”」「【……】」是完整的一行；結尾引號打成開頭引號的書，引號永遠關不起來）
+    # 下一行用開頭引號起頭的是另一段對話（作者漏了這一段的結尾引號），不接
+    if _extend_pairs([], left) and (CJK_CHAR.match(left[-1]) or left[-1].isalnum()) and right[0] not in QUOTE_PAIRS:
+        return _join_separator(left, right)
     width = _display_width(left.strip())
     if not 24 <= width <= 180:
         return None

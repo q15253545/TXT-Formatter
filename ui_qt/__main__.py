@@ -1,6 +1,7 @@
 """執行方式：python -m ui_qt"""
 
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QGuiApplication
@@ -33,6 +34,9 @@ def main():
     app_log.start_freeze_watchdog()
     window = MainWindow()
     window.show()
+    # 命令列帶了檔案（「開啟檔案」拖到程式上、還原預設後重開）：直接開起來
+    if len(sys.argv) > 1 and Path(sys.argv[1]).is_file():
+        window.load_file_path(sys.argv[1])
     exit_code = app.exec()
     app_log.log.info("===== 結束 =====（%s）", exit_code)
     sys.exit(exit_code)

@@ -254,21 +254,21 @@ class ChapterPanel(QWidget):
                     clean_groups += 1
                     continue
                 label = html.escape(group["label"]) if group["label"] != "全書" else T("全書")
-                lines = []
+                lines, typos, strays = [], [], []
                 link = f'<a href="{{}}" style="color:{accent};text-decoration:none">{{}}</a>'
                 for entry in group["entries"]:
                     start, end = entry["start"], entry["end"]
                     if entry["kind"] == "dup":
                         lines.append(link.format(f"{index}|{start}|dup", T(f"第 {start} 章重複")))
                         continue
-                    # 打錯、不像章節的章號：已經照前後章算進去（或不算），寫出是哪一行，點了跳過去
+                    # 打錯、不像章節的章號：已經照前後章算進去（或不算），另外一段列出是哪一行，點了跳過去
+                    quoted = html.escape(entry.get("text", ""))
                     if entry["kind"] == "typo":
-                        lines.append(link.format(f"line|{entry['row']}", T(
-                            f"原文第 {entry['row'] + 1} 行寫成第 {start} 章，照前後章當成第 {end} 章（可能打錯）")))
+                        typos.append(link.format(f"line|{entry['row']}", T(
+                            f"第 {entry['row'] + 1} 行「{quoted}」當成第 {end} 章")))
                         continue
                     if entry["kind"] == "stray":
-                        lines.append(link.format(f"line|{entry['row']}", T(
-                            f"原文第 {entry['row'] + 1} 行的第 {start} 章跟前後章接不上，沒算進來（可能不是章節）")))
+                        strays.append(link.format(f"line|{entry['row']}", T(f"第 {entry['row'] + 1} 行「{quoted}」")))
                         continue
                     text = T(f"缺第 {start} 章") if start == end else T(f"缺第 {start}–{end} 章")
                     lines.append(link.format(f"{index}|{start}|gap", text))
@@ -281,8 +281,14 @@ class ChapterPanel(QWidget):
                     if len(found) > 3:
                         lines.append(f'&nbsp;&nbsp;&nbsp;<span style="color:{muted}">'
                                      f'{T(f"↳ 還有 {len(found) - 3} 行沒收錄")}</span>')
-                parts.append(f'<p style="margin-top:8px;margin-bottom:0"><b>{label}</b><br>'
-                             + "<br>".join(f"· {line}" for line in lines) + "</p>")
+                body = "<br>".join(f"· {line}" for line in lines)
+                for title, note, items in ((T("可能打錯的章號"), T("照前後章的章號算進去了"), typos),
+                                           (T("可能不是章節"), T("章號跟前後章接不上，沒有算進檢查"), strays)):
+                    if items:
+                        body += ((("<br>" if body else "") + f'<span style="font-weight:600">{title}</span>'
+                                  f'<span style="color:{muted}">　{note}</span><br>')
+                                 + "<br>".join(f"· {item}" for item in items))
+                parts.append(f'<p style="margin-top:8px;margin-bottom:0"><b>{label}</b><br>{body}</p>')
             if clean_groups and clean_groups < len(report["groups"]):
                 parts.append(f'<p style="margin-top:8px;margin-bottom:0;color:{muted}">'
                              f'{T(f"其餘 {clean_groups} 組章節編號連續。")}</p>')

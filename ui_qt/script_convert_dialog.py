@@ -25,7 +25,7 @@ class ScriptConvertDialog(QDialog):
         keep_on_screen(self)
         self._selected_count = selected_count
 
-        root, footer = dialog_frame(self, enter_submits=True)
+        root, footer = dialog_frame(self, enter_submits=True, intro="本文轉成繁體或簡體，可以只轉選取的章節。")
         root.setSpacing(10)
 
         self.scope_check = ScopeToggle("轉換", selected_count)

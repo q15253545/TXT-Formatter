@@ -4,7 +4,7 @@ import re
 
 from .cn_numerals import chinese_to_arabic
 
-END_MARK_REGEX = re.compile(r"[部卷篇集章回節节折幕][\s]*完(?:本)?[\s】\]）\)]*$", re.IGNORECASE)
+END_MARK_REGEX = re.compile(r"[部卷篇集季章回節节折幕][\s]*完(?:本)?[\s】\]）\)]*$", re.IGNORECASE)
 
 # 卷／章「結尾行」：第一卷終、【第二卷终】、第一章 完、（本卷完）、卷三結束……
 # 先拿掉括號、空白與句末符號再整行比對，所以寫法再怎麼包都認得出來；整行
@@ -14,15 +14,15 @@ _END_MARK_NOISE = re.compile(r"[\s【】\[\]（）()「」『』〔〕《》〈�
 _END_NUMBER = r"[0-9０-９一二兩两三四五六七八九十百千萬万〇零]+"
 _END_WORDS = r"(?:完結|完结|完本|結束|结束|終了|终了|完|終|终)"
 _END_MARK_FULL = re.compile(
-    rf"^(?:第(?P<n1>{_END_NUMBER})(?P<u1>[部卷篇集章回節节折幕])"
+    rf"^(?:第(?P<n1>{_END_NUMBER})(?P<u1>[部卷篇集季章回節节折幕])"
     rf"|(?P<u2>[部卷篇集])(?P<n2>{_END_NUMBER})"
-    rf"|[本全](?P<u3>[部卷篇集章回節节]))"
+    rf"|[本全](?P<u3>[部卷篇集季章回節节]))"
     rf"{_END_WORDS}$")
 # 卷結尾行中間帶卷名（只認卷級，而且結尾字要單獨一段，例如「第一卷 山路 完」）
 _NAMED_VOLUME_END = re.compile(
-    rf"^[【\[（(〔「『]?\s*(?:第\s*(?P<n1>{_END_NUMBER})\s*(?P<u1>[部卷篇集])|(?P<u2>[部卷篇集])\s*(?P<n2>{_END_NUMBER}))"
+    rf"^[【\[（(〔「『]?\s*(?:第\s*(?P<n1>{_END_NUMBER})\s*(?P<u1>[部卷篇集季])|(?P<u2>[部卷篇集])\s*(?P<n2>{_END_NUMBER}))"
     rf"\s+(?P<name>[^\s【】\[\]（）()]{{1,12}})\s+{_END_WORDS}\s*[】\]）)〕」』]?$")
-_VOLUME_UNITS = set("部卷篇集")
+_VOLUME_UNITS = set("部卷篇集季")
 
 
 def parse_end_mark(text):

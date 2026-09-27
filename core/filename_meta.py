@@ -73,7 +73,7 @@ def filename_number(text: str) -> str:
         value = chinese_to_arabic(match.group(0))
         if value > 0:
             return str(int(value)) if float(value).is_integer() else f"{value:g}"
-    return re.sub(r"[卷部篇集章回節节折幕]$", "", re.sub(r"^第", "", text)).strip()
+    return re.sub(r"[卷部篇集季章回節节折幕]$", "", re.sub(r"^第", "", text)).strip()
 
 
 def filename_fields(title, author, status, last_vol, last_ch, extra_count=0, volume_count=0) -> dict:

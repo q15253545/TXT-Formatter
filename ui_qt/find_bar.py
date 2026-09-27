@@ -18,7 +18,7 @@ import time
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton,
     QStyle, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
@@ -39,33 +39,105 @@ MAX_WRAP_PAGES = 200
 # 搜尋最久跑多久（秒）。純文字搜尋不會碰到，正則寫得不好才會。
 SEARCH_DEADLINE = 1.5
 _PREVIEW_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+# A regex search slower than this (seconds) is not rerun automatically after every edit.
+_AUTO_RESEARCH_LIMIT = 0.3
 
-# 常用正則：名稱 → （正則, 說明）。
-SEARCH_PRESETS = {
-    "第…章（最短）": (
-        r"(第.*?章)",
-        "找出從「第」開始，到同一行最近一個「章」結束的內容。",
-    ),
-    "阿拉伯數字章號": (
-        r"(第\d+章)",
-        "找出第1章、第12章等阿拉伯數字章號；不包含中文數字。",
-    ),
-    "章號＋同行標題": (
-        r"(第.*?章\s*.*)",
-        "找出第○章及後方文字；其中 \\s* 也可能涵蓋換行，使用前請留意結果範圍。",
-    ),
-    "章號前文字＋章號": (
-        r"(.*)(第.*?章)",
-        "找出章號前文字及第○章；前段為貪婪比對，同一行有多個章號時通常取最後一個。",
-    ),
-    "a 到 b（最短）": (
-        r"a.*?b",
-        "找出從 a 開始，到同一行最近一個 b 結束的內容；可自行替換 a、b。",
-    ),
-}
-_PRESET_PLACEHOLDER = "請選擇…"
+# Building blocks for the "+" menus next to the inputs (regex mode): (heading, ((label, text, hint), ...)).
+# They are inserted at the caret, so several can be combined. In the text, "‸" is where the caret ends up
+# (a selection is wrapped there) and «X» is a placeholder that gets selected, ready to be typed over.
+REGEX_SNIPPETS = (
+    ("位置", (
+        ("行首", "^", "一行的開頭"),
+        ("行尾", "$", "一行的結尾"),
+        ("換行", r"\n", "兩行之間的換行（跨行時用）"),
+        ("整行", "^.*$", "一整行，不含換行；例如「^.*A.*$」是有 A 的整行"),
+    )),
+    ("文字", (
+        ("任意文字（最短）", ".*?", "同一行裡任意長度的文字，到最近的下一個條件為止"),
+        ("任意文字（最長）", ".*", "同一行裡任意長度的文字，到最遠的下一個條件為止"),
+        ("數字", r"\d+", "一串數字（半形、全形都算）"),
+        ("中文數字", "[一二兩两三四五六七八九十百千萬万零〇]+", "一串中文數字"),
+        ("空白", r"[ \t　]+", "半形、全形空白與 Tab"),
+        ("連續問號", r"\?{2,}", "兩個以上的半形問號（轉存時丟掉的字常變成「??」）"),
+    )),
+    ("組合", (
+        ("A 開頭、B 結尾", "«A».*?B", "從 A 到同一行最近的 B；插入後直接打字換掉 A，再把 B 改掉"),
+        ("A 或 B", "(?:«A»|B)", "A、B 其中一個；插入後直接打字換掉 A，再把 B 改掉"),
+        ("擷取 ( )", "(‸)", "括起來的部分，取代時可以用 $1、$2 代入；有選取文字時把它括起來"),
+        ("出現兩次以上", "{2,}", "前一個字或 ( ) 連續出現兩次以上"),
+        ("符號本身", "\\", "? . * + ( ) [ ] 這些符號有特別意思，前面加 \\ 才是找符號本身"),
+    )),
+    ("章節", (
+        ("第…章", "第.*?章", "從「第」到同一行最近的「章」"),
+        ("章號＋同行標題", "^第.*?章.*$", "一整行的「第○章 標題」"),
+    )),
+)
+REPLACE_SNIPPETS = (
+    ("代入", (
+        ("第 1 組 ( )", "$1", "搜尋時第一個 ( ) 找到的內容"),
+        ("第 2 組 ( )", "$2", "搜尋時第二個 ( ) 找到的內容"),
+        ("整段找到的文字", "$0", "這一筆找到的整段文字"),
+        ("換行", r"\n", "取代成換行"),
+    )),
+)
+_CARET, _PLACEHOLDER = "‸", ("«", "»")
+
+
+def insert_snippet(line_edit: QLineEdit, template: str):
+    """Insert a snippet at the caret (replacing the selection, or wrapping it at "‸")."""
+    selected = line_edit.selectedText()
+    text = template.replace(_CARET, selected) if _CARET in template else template
+    placeholder = None
+    if _PLACEHOLDER[0] in text:
+        before, rest = text.split(_PLACEHOLDER[0], 1)
+        inside, after = rest.split(_PLACEHOLDER[1], 1)
+        placeholder = (len(before), len(inside))
+        text = before + inside + after
+    line_edit.insert(text)
+    start = line_edit.cursorPosition() - len(text)
+    if placeholder is not None:
+        line_edit.setSelection(start + placeholder[0], placeholder[1])
+    elif _CARET in template:
+        line_edit.setCursorPosition(start + template.index(_CARET) + len(selected))
+    line_edit.setFocus()
+
+
+class _SnippetMenu(QMenu):
+    """Clicking an item inserts it and keeps the menu open, so several pieces can be put together in one go."""
+
+    def mouseReleaseEvent(self, event):
+        action = self.activeAction()
+        if action is not None and action.isEnabled() and action.data() is not None:
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+
+def _snippet_menu(parent, line_edit: QLineEdit, groups) -> QMenu:
+    menu = _SnippetMenu(parent)
+    menu.setToolTipsVisible(True)
+    for position, (heading, items) in enumerate(groups):
+        if position:
+            menu.addSeparator()
+        header = menu.addAction(i18n.T(heading))
+        header.setEnabled(False)
+        for label, template, hint in items:
+            shown = template.replace(_CARET, "").replace(_PLACEHOLDER[0], "").replace(_PLACEHOLDER[1], "")
+            action = menu.addAction(f"　{i18n.T(label)}\t{shown}")
+            action.setData(template)
+            action.setToolTip(i18n.T(hint))
+            action.triggered.connect(lambda _checked=False, t=template: insert_snippet(line_edit, t))
+    return menu
 _MARKER_DISPLAY = re.compile(r"[ \t　]*\[::[XxWwTt]?\]")
 
+
+# Many editors write group references as $1 / ${name}; accept those too (not when escaped as \$).
+_DOLLAR_GROUP = re.compile(r"(?<!\\)\$(?:(\d+)|\{(\w+)\})")
+
+
+def _dollar_groups(replacement: str) -> str:
+    """Turn $1 / ${name} into Python group references; an escaped dollar sign stays a plain dollar sign."""
+    return _DOLLAR_GROUP.sub(r"\\g<\1\2>", replacement).replace("\\$", "$")
 
 class _ResultDelegate(QStyledItemDelegate):
     """自己畫結果列：一行、超出寬度就截斷，命中的字加底色。"""
@@ -139,6 +211,10 @@ class FindBar(QWidget):
         self._research_timer.setSingleShot(True)
         self._research_timer.setInterval(250)
         self._research_timer.timeout.connect(self._run_search)
+        self._edit_timer = QTimer(self)
+        self._edit_timer.setSingleShot(True)
+        self._edit_timer.setInterval(250)
+        self._edit_timer.timeout.connect(self._research_after_edit)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -163,7 +239,8 @@ class FindBar(QWidget):
         self.find_input.setPlaceholderText("尋找…")
         self.find_input.textChanged.connect(self._on_text_changed)
         self.find_input.returnPressed.connect(self._on_return_pressed)
-        root.addWidget(self.find_input)
+        self.find_snippet_button = self._snippet_button(self.find_input, REGEX_SNIPPETS, "插入正則寫法")
+        root.addLayout(self._input_row(self.find_input, self.find_snippet_button))
 
         nav_row = QHBoxLayout()
         nav_row.setSpacing(6)
@@ -185,8 +262,9 @@ class FindBar(QWidget):
 
         self.replace_input = QLineEdit()
         self.replace_input.setPlaceholderText("取代為…")
-        self.replace_input.setToolTip("正則模式可以用 \\1、\\2 代入搜尋時擷取的群組")
-        root.addWidget(self.replace_input)
+        self.replace_input.setToolTip("正則模式可以用 \\1、\\2（或 $1、$2）代入搜尋時擷取的群組")
+        self.replace_snippet_button = self._snippet_button(self.replace_input, REPLACE_SNIPPETS, "插入代入的寫法")
+        root.addLayout(self._input_row(self.replace_input, self.replace_snippet_button))
 
         replace_row = QHBoxLayout()
         replace_row.setSpacing(8)
@@ -199,19 +277,6 @@ class FindBar(QWidget):
         root.addLayout(replace_row)
 
         root.addWidget(Divider())
-
-        preset_label = QLabel("常用正則")
-        preset_label.setObjectName("fileLabel")
-        root.addWidget(preset_label)
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItem(_PRESET_PLACEHOLDER)
-        # 說明放在滑鼠停在選項上時的提示。
-        for name, (pattern, explanation) in SEARCH_PRESETS.items():
-            self.preset_combo.addItem(name)
-            self.preset_combo.setItemData(self.preset_combo.count() - 1, f"{pattern}\n{explanation}",
-                                          Qt.ItemDataRole.ToolTipRole)
-        self.preset_combo.activated.connect(self._apply_preset)
-        root.addWidget(self.preset_combo)
 
         self.results_list = QListWidget()
         self.results_list.setObjectName("findResults")
@@ -230,7 +295,8 @@ class FindBar(QWidget):
         self.hint_label.hide()
         root.addWidget(self.hint_label)
 
-        self._icon_buttons = [self.prev_button, self.next_button, self.close_button]
+        self._icon_buttons = [self.prev_button, self.next_button, self.close_button,
+                              self.find_snippet_button, self.replace_snippet_button]
         self._tokens = None
         self._get_text = lambda: ""
         self._on_select = lambda start, end: None
@@ -239,13 +305,34 @@ class FindBar(QWidget):
         self._on_matches_changed = lambda spans, current: None
         self._get_version = lambda: None
         self._on_message = lambda text: None
+        self._get_cursor = lambda: None
+        # How long the last search took: after an edit a fast search is simply rerun, a slow regex waits
+        # until the next "next / previous".
+        self._last_elapsed = 0.0
+
+    def _snippet_button(self, line_edit: QLineEdit, groups, tooltip: str) -> IconButton:
+        button = IconButton("plus", tooltip, size=16)
+        menu = _snippet_menu(self, line_edit, groups)
+        # popup, not exec: nothing waits on the menu (it stays open while snippets are picked)
+        button.clicked.connect(lambda: menu.popup(button.mapToGlobal(button.rect().bottomLeft())))
+        button.setVisible(False)          # only in regex mode
+        return button
+
+    @staticmethod
+    def _input_row(line_edit: QLineEdit, button) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(line_edit, 1)
+        row.addWidget(button)
+        return row
 
     # ------------------------------------------------------------------
 
     def bind(self, get_text, on_select, on_replace_one, on_replace_all_text, on_matches_changed,
-             get_version=None, on_message=None):
+             get_version=None, on_message=None, get_cursor=None):
         """由 MainWindow 注入：怎麼取得目前文字與它的版本、選取一段範圍、
-        取代單筆、用新的整份文字做全部取代、命中清單改變時怎麼畫反白。"""
+        取代單筆、用新的整份文字做全部取代、命中清單改變時怎麼畫反白。
+        get_cursor：本文目前的選取（起, 迄），Python 字元位置；下一個／上一個從這裡開始找。"""
         self._get_text = get_text
         self._on_select = on_select
         self._on_replace_one = on_replace_one
@@ -255,6 +342,8 @@ class FindBar(QWidget):
             self._get_version = get_version
         if on_message is not None:
             self._on_message = on_message
+        if get_cursor is not None:
+            self._get_cursor = get_cursor
 
     def set_theme(self, tokens):
         self._tokens = tokens
@@ -269,8 +358,13 @@ class FindBar(QWidget):
         self.find_input.setFocus()
         self.find_input.selectAll()
 
+    def focus_replace(self):
+        self.replace_input.setFocus()
+        self.replace_input.selectAll()
+
     def refresh(self):
-        self._run_search()
+        """Rerun the search (panel opened, theme changed) without moving the caret."""
+        self._run_search(select=False)
 
     def spans(self) -> list[tuple[int, int]]:
         return [(match.start(), match.end()) for match in self._matches]
@@ -284,14 +378,17 @@ class FindBar(QWidget):
             return None
         if self.regex_button.isChecked():
             # 使用者寫的正則交給 safe_regex：寫法不好時能在期限內停下來，不會卡死介面。
+            # MULTILINE: ^ and $ match at every line, like other editors (the text is a novel, one paragraph per line).
             try:
-                return safe_regex.compile(text)
+                return safe_regex.compile(text, re.MULTILINE)
             except safe_regex.errors as error:
                 self._set_hint(f"正則錯誤：{error}")
                 return None
         return re.compile(re.escape(text))
 
     def _on_regex_toggled(self, checked: bool):
+        self.find_snippet_button.setVisible(checked)
+        self.replace_snippet_button.setVisible(checked)
         hint = "正則模式：按 Enter 或「搜尋」才執行"
         if not safe_regex.HAS_TIMEOUT:
             # 沒有 regex 套件就沒有逾時保護（打包版有附）：先講清楚，寫法不好的正則可能讓程式停住
@@ -300,10 +397,6 @@ class FindBar(QWidget):
         self._run_search()
 
     def _on_text_changed(self, text):
-        # 使用者自己改了搜尋字串，就不再是剛才選的那個常用正則。
-        preset = SEARCH_PRESETS.get(i18n.combo_value(self.preset_combo))
-        if preset is not None and preset[0] != text:
-            self.preset_combo.setCurrentIndex(0)
         if self.regex_button.isChecked():
             # 正則可能很慢，不邊打邊跑；先把舊結果清掉免得誤會。
             self._clear_results()
@@ -312,29 +405,26 @@ class FindBar(QWidget):
         self._research_timer.start()
 
     def _on_return_pressed(self):
-        if self._matches and not self._is_stale():
+        if self._matches and self._source_query == self._query_key():
             self.find_next()
         else:
             self._run_search()
 
-    def _apply_preset(self, index: int):
-        preset = SEARCH_PRESETS.get(i18n.combo_value(self.preset_combo, index))
-        if preset is None:
-            return
-        pattern, _explanation = preset
-        self.regex_button.blockSignals(True)
-        self.regex_button.setChecked(True)
-        self.regex_button.blockSignals(False)
-        self.find_input.setText(pattern)
-        self.find_input.setFocus()
-        self._run_search()
-
     def invalidate(self):
-        """正文變了：先清掉現在的結果與反白，停一下再重新搜尋。"""
-        self._clear_results()
+        """正文變了：位置全部作廢，但結果不清掉——停一下就在新的正文上重找（游標不動），
+        下一個／上一個從游標的位置接著走。很慢的正則不自動重找，等按下一個／上一個再找。"""
         self._source_version = None
-        if self.isVisible() and self.find_input.text() and not self.regex_button.isChecked():
-            self._research_timer.start()
+        self._on_matches_changed([], -1)          # the old positions would highlight the wrong text
+        if not (self.isVisible() and self.find_input.text()):
+            return
+        if self.regex_button.isChecked() and self._last_elapsed > _AUTO_RESEARCH_LIMIT:
+            self._set_hint("本文改過了；按下一個／上一個會重新搜尋")
+            return
+        self._edit_timer.start()
+
+    def _research_after_edit(self):
+        if self.isVisible() and self.find_input.text() and self._source_version != self._get_version():
+            self._run_search(select=False)
 
     def _clear_results(self):
         self._matches = []
@@ -429,18 +519,29 @@ class FindBar(QWidget):
                                                        self._page_skips[-1])
         return True
 
-    def _show_page(self, content: str):
+    def _show_page(self, content: str, select: bool = True):
         """換頁之後：編號、結果清單、本文反白、選取目前這一筆全部重畫。"""
         self._update_label()
         self._update_results_list(content)
         self._on_matches_changed(self.spans(), self._current)
         if self._current >= 0:
-            self._select_current()
+            if select:
+                self._select_current()
+            else:
+                self.results_list.setCurrentRow(self._current)
 
-    def _run_search(self, *, resume_at: int | None = None):
-        """resume_at：取代一筆之後從這個位置接著找下一筆（只接受關鍵字參數，
-        免得按鈕的 clicked(bool) 被當成位置傳進來）。"""
+    def _cursor_start(self):
+        cursor = self._get_cursor()
+        return cursor[0] if cursor else None
+
+    def _run_search(self, *, resume_at: int | None = None, select: bool = True):
+        """resume_at：從這個位置接著找（取代一筆之後、或游標的位置）；沒給就從游標開始。
+        select=False：只更新結果與目前第幾筆，不移動本文的游標（正文改過後重找、切換主題）。
+        只接受關鍵字參數，免得按鈕的 clicked(bool) 被當成位置傳進來。"""
         self._research_timer.stop()
+        self._edit_timer.stop()
+        if resume_at is None:
+            resume_at = self._cursor_start()
         pattern = self._pattern()
         content = self._get_text()
         self._source_version = self._get_version()
@@ -474,13 +575,14 @@ class FindBar(QWidget):
                         self._current = 0
                         break
             elapsed = time.monotonic() - started
+            self._last_elapsed = elapsed
             if self._timed_out:
                 self._set_hint(f"正則執行太久，已停止搜尋；只列出已找到的 {len(self._matches)} 筆")
             elif elapsed > 0.5:
                 self._set_hint(f"這次搜尋花了 {elapsed:.1f} 秒")
             elif not _RISKY_REGEX.search(self.find_input.text()):
                 self._set_hint("")
-        self._show_page(content)
+        self._show_page(content, select)
 
     def _set_hint(self, text: str):
         if text:
@@ -520,8 +622,56 @@ class FindBar(QWidget):
         self._on_matches_changed(self.spans(), self._current)
         self._select_current()
 
+    def _caret_away(self):
+        """The caret isn't on the current match (the user clicked or typed elsewhere): its selection, else None."""
+        cursor = self._get_cursor()
+        if cursor is None:
+            return None
+        if 0 <= self._current < len(self._matches) and self._matches[self._current].span() == tuple(cursor):
+            return None
+        return cursor
+
+    def _go_from_caret(self, forward: bool) -> bool:
+        """下一個／上一個從游標的位置開始（正文改過就先在新的正文上重找）。有處理回傳 True。"""
+        if self._source_version != self._get_version() and self.find_input.text():
+            self._run_search(select=False)
+        cursor = self._caret_away()
+        if cursor is None or not self._matches:
+            return False
+        start = cursor[0]
+        pattern, content = self._pattern(), self._get_text()
+        if pattern is None:
+            return False
+        if forward:
+            # the first match starting at or after the caret (a later page if needed, else wrap around)
+            while True:
+                index = next((i for i, match in enumerate(self._matches) if match.start() >= start), None)
+                if index is not None:
+                    self._current = index
+                    break
+                if not self._load_next_page(pattern, content):
+                    if len(self._page_starts) > 1:
+                        self._load_first_page(pattern, content)
+                    self._current = 0
+                    break
+        else:
+            while True:
+                index = next((i for i in range(len(self._matches) - 1, -1, -1)
+                              if self._matches[i].start() < start), None)
+                if index is not None:
+                    self._current = index
+                    break
+                if not self._load_previous_page(pattern, content):
+                    for _ in range(MAX_WRAP_PAGES):
+                        if not self._load_next_page(pattern, content):
+                            break
+                    self._current = len(self._matches) - 1
+                    break
+        self._show_page(content)
+        return True
+
     def find_next(self):
-        if not self._matches:
+        if self._go_from_caret(True) or not self._matches:
             return
         if self._current + 1 < len(self._matches):
             self._current += 1
@@ -537,7 +687,7 @@ class FindBar(QWidget):
         self._show_page(content)
 
     def find_previous(self):
-        if not self._matches:
+        if self._go_from_caret(False) or not self._matches:
             return
         if self._current > 0:
             self._current -= 1
@@ -570,7 +720,7 @@ class FindBar(QWidget):
         if not self.regex_button.isChecked():
             return replacement
         try:
-            return match.expand(replacement)
+            return match.expand(_dollar_groups(replacement))
         except (IndexError, *safe_regex.errors) as error:
             self._set_hint(f"取代字串錯誤：{error}")
             return None
@@ -607,7 +757,7 @@ class FindBar(QWidget):
             # 直接在整份文字上取代：結果清單有筆數上限，不能拿來當取代依據，
             # 否則「全部取代」會變成「取代前面幾筆」。
             if self.regex_button.isChecked():
-                new_content, count = safe_regex.subn(pattern, replacement, content)
+                new_content, count = safe_regex.subn(pattern, _dollar_groups(replacement), content)
             else:
                 new_content, count = pattern.subn(lambda _m: replacement, content)
         except safe_regex.RegexTimeout:

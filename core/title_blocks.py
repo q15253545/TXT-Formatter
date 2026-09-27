@@ -9,20 +9,22 @@ import re
 FRAME_OPTIONS = ("無", "( )", "【 】", "[ ]")
 _FRAMES = {"( )": ("(（", ")）"), "【 】": ("【〔", "】〕"), "[ ]": ("[［", "]］")}
 
-PREFIX_OPTIONS = {2: ("無", "第", "#", "Chapter", "Ch.", "Section", "章", "回", "節"),
+PREFIX_OPTIONS = {2: ("無", "第", "#", "Chapter", "Ch.", "Section", "章", "回", "節", "N-"),
                   1: ("無", "第", "Volume", "Vol.", "卷", "部", "篇", "集")}
 _PREFIXES = {"第": "第", "#": r"[#＃](?![#＃])", "Chapter": "Chapter", "Ch.": r"Ch(?:ap)?\.?",
              "Section": r"Sec(?:t|tion)?\.?", "Volume": "Volume", "Vol.": r"Vol\.?",
-             "章": "章", "回": "回", "節": "[節节]", "卷": "卷", "部": "部", "篇": "篇", "集": "集"}
+             "章": "章", "回": "回", "節": "[節节]", "卷": "卷", "部": "部", "篇": "篇", "集": "集",
+             # 「2-1 過河」前面的卷（季）號：後面一定要接著數字（「1 - 過河」的 1 是章號）
+             "N-": r"(?P<volume>[0-9０-９]{1,3})\s*[-－—]\s*(?=[0-9０-９])"}
 
 NUMBER_OPTIONS = ("一二三", "123", "全形１２", "壹貳參")
 _NUMBERS = {"一二三": "一二兩两三四五六七八九十百千零〇", "123": "0-9", "全形１２": "０-９",
             "壹貳參": "壹貳贰參叁肆伍陸陆柒捌玖拾佰仟零"}
 _NUMBER_LENGTH = {"一二三": 8, "123": 5, "全形１２": 5, "壹貳參": 8}
 
-UNIT_OPTIONS = {2: ("無", "章", "回", "節", "話", "折", "幕"), 1: ("無", "卷", "部", "篇", "集", "冊")}
+UNIT_OPTIONS = {2: ("無", "章", "回", "節", "話", "折", "幕"), 1: ("無", "卷", "部", "篇", "集", "季", "冊")}
 _UNITS = {"章": "章", "回": "回", "節": "[節节]", "話": "[話话]", "折": "折", "幕": "幕",
-          "卷": "卷", "部": "部", "篇": "篇", "集": "集", "冊": "[冊册]"}
+          "卷": "卷", "部": "部", "篇": "篇", "集": "集", "季": "季", "冊": "[冊册]"}
 
 SEP_OPTIONS = ("無", "空格", "、", ".", "：", "-", "·")
 _SEPS = {"無": "", "空格": r"\s+", "、": r"\s*、\s*", ".": r"\s*[\.．](?![0-9０-９])\s*",
@@ -75,7 +77,12 @@ def compile_blocks(blocks) -> str:
     """積木 → 正則（有 number、title 兩個命名群組，跟自訂規則一樣）。"""
     prefix_re = _group([_PREFIXES[item] for item in blocks["prefix"] if item != "無"], "無" in blocks["prefix"])
     classes = "".join(_NUMBERS[item] for item in blocks["number"])
-    numbers = "|".join(f"[{_NUMBERS[item]}]{{1,{_NUMBER_LENGTH[item]}}}" for item in blocks["number"])
+    groups = [[_NUMBERS[item], _NUMBER_LENGTH[item]] for item in blocks["number"] if item not in _ARABIC]
+    arabic = [item for item in blocks["number"] if item in _ARABIC]
+    if arabic:
+        # 半形、全形都選時合成一種：作者打字時切換輸入法的「06４」「0７０」也算
+        groups.insert(0, ["".join(_NUMBERS[item] for item in arabic), 5])
+    numbers = "|".join(f"[{characters}]{{1,{length}}}" for characters, length in groups)
     # 數字要整串吃完（「123」不能拆成章號 12、章名 3）
     number_re = f"(?P<number>{numbers})(?![{classes}])"
     unit_re = _group([_UNITS[item] for item in blocks["unit"] if item != "無"], "無" in blocks["unit"])
@@ -188,13 +195,18 @@ TEMPLATES = [
                          "title": "要有"}),
     ("bare_number", 2, {"frame": ["無"], "prefix": ["無"], "number": _ARABIC, "unit": ["無"], "sep": ["無"],
                         "title": "沒有"}),
+    ("number_unit", 2, {"frame": ["無"], "prefix": ["無"], "number": _ARABIC, "unit": ["章", "回", "節"],
+                        "sep": ["空格", "、", ".", "：", "-", "·"], "title": "要有"}),
+    ("volume_dash_chapter", 2, {"frame": ["無"], "prefix": ["N-"], "number": _ARABIC, "unit": ["無"],
+                                "sep": ["空格", "、", ".", "：", "·"], "title": "可有可無"}),
 ]
 # 選單上的名稱（跟自動名稱不同的才寫）
 TEMPLATE_LABELS = {"hash_number": "#1 標題", "english_chapter": "Chapter 1", "english_section": "Section 1",
                    "leading_unit_chapter": "章一 標題", "leading_unit_volume": "卷一 標題",
                    "english_volume": "Volume 1", "bracket_number": "(1) 標題、（一）", "dot_number": "1. 標題",
                    "comma_number": "1、標題", "cn_comma_number": "一、標題", "space_number": "1 標題",
-                   "bare_number": "單獨一行的 1、001"}
+                   "bare_number": "單獨一行的 1、001", "number_unit": "1章 標題",
+                   "volume_dash_chapter": "2-1 標題（卷號-章號）"}
 
 
 def template(template_id: str):

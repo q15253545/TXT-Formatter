@@ -29,7 +29,7 @@ from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 from .chapter_parse import (
     CN_NUM_FLOAT_PATTERN, INLINE_SPACE_REGEX,
     CN_NUM_PATTERN, parse_lv1, parse_lv2, parse_special, parse_mixed_volume_chapter_header,
-    is_weak_numbered_title, is_valid_auto_title, strip_title_body,
+    is_weak_numbered_title, is_valid_auto_title, strip_title_body, volume_dash_number,
     preserve_title_separator, original_number_text, resolve_chapter_number, heading_word, heading_words, title_length_limit, too_long_for_title,
     word_key, not_a_heading,
 )
@@ -103,6 +103,9 @@ def format_punctuation_and_dialogue(options: FormatOptions, text: str, dialogue_
                     "auto_work": "[::W]", "auto_title": "[::T]"}.get(marker, "")), dialogue_depth
 
 
+_CHATTER_WORDS = ("打赏", "打賞", "月票", "推荐票", "推薦票", "订阅", "訂閱", "求票", "加更")
+
+
 def find_merge_subtitle(raw_lines, start_index, total, invalid_tail_regex):
     """尋找獨立章號後的拆行章名，回傳清理後章名與其原始行號。"""
     from .reflow import PARAGRAPH_INDENT, DIALOGUE_OR_SENTENCE_REGEX
@@ -129,6 +132,14 @@ def find_merge_subtitle(raw_lines, start_index, total, invalid_tail_regex):
         return "", None
     # 帶有對話引號或句末標點的行幾乎必定是正文；標題極少長這樣。
     if not has_number_prefix and DIALOGUE_OR_SENTENCE_REGEX.search(candidate):
+        return "", None
+    # A repost header ("author  2016-02-08 05:31:58 report views: 1200") or an author / word-count /
+    # publish line right under a bare heading is not its chapter name.
+    # Author chatter asking for tips / votes ("please tip", "monthly votes") isn't a chapter name either.
+    from .ad_scan import looks_like_forum_header, meta_line_kind
+    meta = meta_line_kind(candidate)
+    if (looks_like_forum_header(candidate) or (meta is not None and meta[1] == "高")
+            or any(word in candidate for word in _CHATTER_WORDS)):
         return "", None
 
     # 有明確小節編號的拆行章名可較長；其他格式沿用原本的保守判定。
@@ -313,7 +324,7 @@ def _period_title_fits(state, line_str: str) -> bool:
     return number == 1 and bool(_FIRST_HEAD.match(line_str)) and not re.search(r"[，,]", title)
 
 
-_END_NOTE = re.compile(r"[（(【\[]?\s*本?[部卷篇集章回節节折幕]\s*完本?\s*[）)】\]]?\s*$")
+_END_NOTE = re.compile(r"[（(【\[]?\s*本?[部卷篇集季章回節节折幕]\s*完本?\s*[）)】\]]?\s*$")
 
 
 def _chapter_with_end_note(line_str: str) -> bool:
@@ -377,7 +388,10 @@ def build_chapter_records(ctx: BuildContext, collection_info):
             kind = "chapter"
         number, prefix, number_text, unit = 0, "", None, ""
         if kind == "chapter":
-            if custom:
+            if custom and custom.get("special"):
+                # 自訂特殊標題：編號自成一組（續章1、續章2…），不跟「第N章」一起數
+                number, prefix = custom["number"], custom["special"]
+            elif custom:
                 number = custom["number"]
                 prefix = "第"
             elif mixed:
@@ -389,10 +403,13 @@ def build_chapter_records(ctx: BuildContext, collection_info):
                 number, prefix = stored.get("number", 0), stored.get("prefix", "")
             if chapter and chapter[2] == "番外":
                 prefix = "番外"
+        dash_volume = ((custom or {}).get("volume") or volume_dash_number(source)) if kind == "chapter" else None
         source_kind = ("manual" if marker == "include" or row in ctx.force_lv1_chapters
                        or row in ctx.force_lv2_chapters else "rule" if custom else "auto")
         ctx.chapter_records[node] = {"title": title, "kind": kind, "number": number, "prefix": prefix,
-                                      "source": source_kind, "number_text": number_text, "unit": unit}
+                                      "special": bool(custom and custom.get("special")),
+                                      "source": source_kind, "number_text": number_text, "unit": unit,
+                                      "dash_volume": dash_volume}
     _resolve_record_numbers(ctx)
 
 
@@ -760,12 +777,21 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
             state.absorbed_titles[duplicate] = chosen_raw_idx
     if ch_num and ch_prefix == '第':
         ch_num = resolve_chapter_number(ch_num, original_number_text(chosen_raw, ch_unit), state.last_chapter_number)
-    if apply_format and (merged or not state.opts.keep_number or not state.opts.keep_separator):
+    # 「2-1 過河」＝第 2 卷（季）第 1 章：在第 2 卷底下才寫成「第1章 過河」；卷號對不上（本文沒寫那一卷）
+    # 就照原樣留著，不然卷號會不見
+    dash_volume = (custom_title.get('volume') if custom_title and not forced_level
+                   else volume_dash_number(chosen_raw))
+    keep_dash = bool(dash_volume) and dash_volume != state.current_volume_number
+    if apply_format and not keep_dash and (merged or not state.opts.keep_number or not state.opts.keep_separator):
         chosen_title = ctx.format_custom_title(extra_prefix, ch_prefix, ch_num, ch_unit, ch_body,
                                                 apply_format, original_number_text(chosen_raw, ch_unit))
     else:
         chosen_title = f'{chosen_raw} {ch_body}' if merged else chosen_raw
-    if ch_prefix != '番外':
+    if keep_dash:
+        # 檔名的最新章照作者的寫法「第2-10章」，卷號已經在裡面了
+        state.last_found_ch = f'第{dash_volume}-{int(ch_num)}章' if ch_num else chosen_raw
+        state.last_found_vol = ''
+    elif ch_prefix != '番外':
         # 「第0章」的 0 會被當成「沒有編號」，最新章變成「第章」。只有這種
         # 情況才把原始編號文字傳進去，其餘維持原本的阿拉伯數字寫法（最新章
         # 會用在建議檔名上，「第2章」比「第二章」好排序）。
@@ -812,6 +838,22 @@ def render_special_title(ctx: BuildContext, state: RenderState, apply_format, m_
     record_title(ctx, state, item_id, title, state.processed_render_lines, apply_format, title_raw_idx,
                  manual_marked)
     state.idx += 1
+
+
+def _render_custom_special(ctx: BuildContext, state: RenderState, apply_format, custom_title, line_str, raw_line,
+                           title_raw_idx, manual_marked):
+    """「辨識章節 → 特殊標題」自己新增的字（續章12）：照原文顯示，不改寫成「第N章」。
+    設成卷時後面的章掛在它底下；設成章時跟序章、番外一樣掛在目前的卷底下。"""
+    if custom_title['level'] == 1:
+        whole = ' '.join(part for part in (custom_title['arc'], custom_title['tag'], custom_title['title']) if part)
+        render_volume_title(ctx, state, apply_format, dict(custom_title, number=0, title=whole), 0, None, None,
+                            line_str, raw_line, title_raw_idx, manual_marked)
+        return
+    render_special_title(ctx, state, apply_format, (custom_title['arc'], '', custom_title['tag'], custom_title['title']),
+                         line_str, title_raw_idx, manual_marked)
+    if custom_title['number']:
+        # 有編號的（續章12）是連載的進度：檔名的最新章寫它
+        state.last_found_ch = custom_title['tag']
 
 
 def _merging(ctx: BuildContext, state: RenderState, apply_format) -> bool:
@@ -861,7 +903,7 @@ def _split_short_volumes(ctx: BuildContext) -> bool:
 
 
 # 章節標題前面帶著的卷號（「卷一 山路 第一章 出發」的「卷一」、「第二卷 城裡 第3章」的「第二卷」）
-_PREFIX_VOLUME = re.compile(r"^(?:第\s*(?P<n1>" + CN_NUM_PATTERN + r")\s*(?P<u1>[部卷篇集])"
+_PREFIX_VOLUME = re.compile(r"^(?:第\s*(?P<n1>" + CN_NUM_PATTERN + r")\s*(?P<u1>[部卷篇集季])"
                             r"|(?P<u2>[部卷篇])\s*(?P<n2>" + CN_NUM_PATTERN + r"))(?=[\s（(]|$)")
 
 
@@ -901,6 +943,34 @@ def _prefix_volume_groups(ctx: BuildContext, state: RenderState) -> dict:
     return virtual
 
 
+def _dash_volume_groups(ctx: BuildContext, state: RenderState) -> dict:
+    """「2-1」「2-2」（卷號-章號）的章落在別的卷底下、本文也沒有第 2 卷：照卷號補一卷。
+    單位與數字寫法跟前面真正的卷一樣（「第一季」後面補「第二季」）。"""
+    tree, raw_map, real = ctx.tree, ctx.chapter_raw_map, state.real_volume_numbers
+    written = set(real.values())
+    virtual, current, current_node = {}, None, None
+    for node in sorted(ctx.chapter_records, key=raw_map.get):
+        record = ctx.chapter_records[node]
+        if record['kind'] != 'chapter':
+            continue
+        volume, parent = record.get('dash_volume'), tree.parent(node)
+        if not volume or volume in written:
+            # 中間夾著一般的章、或本文已經寫了這一卷：接下來的另外算
+            current = current_node = None
+            continue
+        if volume != current:
+            written_parent = parse_lv1(tree.item(parent, 'text')) if parent in real else None
+            unit = written_parent[3] if written_parent and written_parent[3] else '卷'
+            arabic = (state.opts.num_style == '阿拉伯數字'
+                      or (state.opts.num_style != '中文數字' and state.arabic_volume_numbers))
+            title = f"第{volume if arabic else arabic_to_chinese(volume)}{unit}"
+            current_node = tree.insert('', 'end', text=title)
+            virtual[current_node] = {'title': title, 'number': volume, 'row': raw_map[node], 'unit': unit}
+            current = volume
+        tree.reparent(node, current_node)
+    return virtual
+
+
 def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
     """補上本文沒寫、但推得出來的卷（只加在目錄樹，不改本文）。
 
@@ -914,6 +984,13 @@ def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
     """
     if not ctx.infer_volumes or state.collection_active:
         return {}
+    dashed = _dash_volume_groups(ctx, state)
+    if dashed:
+        _finish_virtual_volumes(ctx, state, dashed, next(iter(dashed.values()))['unit'])
+        if state.last_found_ch.startswith('第') and '-' in state.last_found_ch and state.last_found_vol:
+            # 最新章在補出來的卷裡：卷號已經在最新卷，章只寫章號
+            state.last_found_ch = '第' + state.last_found_ch.split('-', 1)[1]
+        return dashed
     if not state.real_volume_numbers:
         # 每章前面都帶著卷號的寫法：照前綴分卷（比從卷結尾行、章號重算推測可靠）
         grouped = _prefix_volume_groups(ctx, state)
@@ -928,7 +1005,7 @@ def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
 
     def formal_number(node):
         record = ctx.chapter_records.get(node)
-        if not record or record['kind'] != 'chapter' or record['prefix'] == '番外':
+        if not record or record['kind'] != 'chapter' or record['prefix'] == '番外' or record.get('special'):
             return None
         number = record['number']
         return int(number) if number and number > 0 and float(number).is_integer() else None
@@ -1036,7 +1113,7 @@ def _finish_virtual_volumes(ctx: BuildContext, state: RenderState, virtual: dict
 
     def formal_number(node):
         record = ctx.chapter_records.get(node)
-        if not record or record['kind'] != 'chapter' or record['prefix'] == '番外':
+        if not record or record['kind'] != 'chapter' or record['prefix'] == '番外' or record.get('special'):
             return None
         number = record['number']
         return int(number) if number and number > 0 and float(number).is_integer() else None
@@ -1233,6 +1310,10 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
                 is_lv2 = True
             elif manual_marked and (not m_spec):
                 is_lv2 = True
+            if custom_title and custom_title.get('special') and not forced_level:
+                _render_custom_special(ctx, state, apply_format, custom_title, line_str, raw_line, title_raw_idx,
+                                       manual_marked)
+                continue
             if is_lv1:
                 render_volume_title(ctx, state, apply_format, custom_title, forced_level, m_lv1, m_lv2,
                                     line_str, raw_line, title_raw_idx, manual_marked)

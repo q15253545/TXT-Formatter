@@ -59,6 +59,10 @@ def separator_char(text: str):
     return text[0]
 
 
+_SEPARATOR_LINE = re.compile(r"^\s*([" + re.escape("".join(sorted(_SEPARATOR_CHARS))) + r"])\1{"
+                             + str(SEPARATOR_LENGTH - 1) + r",}\s*$")
+
+
 def separator_styles(lines, line_ranges=None, title_rows=None) -> dict:
     """這本書（或選取的章節）用了哪些分隔線：{符號: 出現幾行}，多的在前。
     給「分隔線不一致」的下拉選單列出可以統一成哪一種。"""
@@ -67,10 +71,8 @@ def separator_styles(lines, line_ranges=None, title_rows=None) -> dict:
         title_rows = {row for row, line in enumerate(lines) if _is_title_row(line)}
     counts = Counter()
     for start, end in _text_segments(len(lines), line_ranges, set(title_rows)):
-        for row in range(start, end):
-            char = separator_char(lines[row])
-            if char is not None:
-                counts[char] += 1
+        # 整本每一行都要看：用 map 讓正則在 C 裡跑（條件跟 separator_char 一樣）
+        counts.update(match.group(1) for match in map(_SEPARATOR_LINE.match, lines[start:end]) if match)
     return dict(counts.most_common())
 
 
@@ -509,26 +511,36 @@ def _refine_unclosed(lines, row: int, kind: str) -> str:
 
 class QuoteScan(list):
     """scan_quote_problems 的結果（照樣是問題清單）。wrapped：整本是硬換行、因此沒有列出的
-    跨行引號有幾段（0＝不是硬換行的書，跨行的引號照常列成「對話中途斷行」）。"""
+    跨行引號有幾段（0＝不是硬換行的書，跨行的引號照常列成「對話中途斷行」）。
+    hard_wrapped：這些段落是照字數切斷的（多半停在句子中間），「整理段落換行」接得回去；
+    False 是沒有縮排的書裡一段話分成好幾行（每行都停在句號、引號），整理段落換行不會接。"""
     wrapped = 0
+    hard_wrapped = False
 
 
 # 引號問題裡至少這麼多、而且過半是「一段被硬換行切成幾行、接起來就成對」，才當成整本硬換行
 HARD_WRAP_MIN_PARAGRAPHS = 50
 
 
+_SENTENCE_ENDS = tuple("。！？!?…”」』～~")
+
+
 def _wrapped_paragraph_rows(lines, segments) -> list:
-    """硬換行的段落：連續幾行都有字、後面的行沒有縮排（是上一行接下來的），
-    而且接起來之後對話引號剛好成對。回傳每一段的行號清單。"""
+    """跨行的段落：連續幾行都有字、後面的行沒有縮排（是上一行接下來的），
+    而且接起來之後對話引號剛好成對——硬換行，或是沒有縮排的書裡一段話分成好幾行
+    （每段開頭沒有再補引號）。回傳每一段的行號清單。"""
     paragraphs = []
     for start, end in segments:
         row = start
         while row < end:
-            if not lines[row].strip():
+            # 空行用 isspace() 看，不用 strip()：整本每一行都會問，不必每次產生新字串
+            line = lines[row]
+            if not line or line.isspace():
                 row += 1
                 continue
             following = row + 1
-            while following < end and lines[following].strip() and lines[following][:1] not in " \t\u3000\xa0":
+            while following < end and lines[following][:1] not in " \t\u3000\xa0" and lines[following] \
+                    and not lines[following].isspace():
                 following += 1
             if following - row > 1:
                 texts = [_strip_indent(lines[index])[1] for index in range(row, following)]
@@ -568,6 +580,9 @@ def scan_quote_problems(lines, line_ranges=None, title_rows=None, separator_targ
     skip_quotes = {row for rows in wrapped_paragraphs for row in rows} if hard_wrapped else set()
     problems = QuoteScan()
     problems.wrapped = len(wrapped_paragraphs) if hard_wrapped else 0
+    if hard_wrapped:
+        inner = [lines[row].rstrip() for rows in wrapped_paragraphs for row in rows[:-1]]
+        problems.hard_wrapped = sum(not text.endswith(_SENTENCE_ENDS) for text in inner) * 2 >= len(inner)
     for row in sorted(segment_of):
         line = lines[row]
         segment_start, segment_end = segment_of[row]

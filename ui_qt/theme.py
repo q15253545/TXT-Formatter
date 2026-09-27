@@ -1,7 +1,7 @@
 """色彩 token 與樣式表產生。
 
-淺色／深色兩份配色都是從使用者提供的介面設計圖（/theme/light.png、
-/theme/dark.png）逐一取色訂出來的，藍色強調色兩個模式共用同一組數值。
+淺色／深色兩份配色都是從使用者提供的介面設計圖逐一取色訂出來的，
+藍色強調色兩個模式共用同一組數值。
 UI 元件一律讀 token、不直接寫死色碼，切換主題只是換一份表再重新套用
 樣式表。大量留白、柔和圓角、以底色深淺區分層次而不是明顯的框線，這個
 方向維持不變。
@@ -151,8 +151,7 @@ DARK = Tokens(
     control_text="#EDE4DB",
 )
 
-# 純黑：參考起點中文網夜間模式（theme/black-v3）；互動與選取改灰階、不用彩色，主要按鈕調暗成中灰
-# （theme/black-blue-v2 方案 D，使用者 2026-09-26 確認）
+# 純黑：參考閱讀 App 的夜間模式；互動與選取是灰階、不用彩色，主要按鈕調暗成中灰（使用者選定的灰階方案）
 BLACK = Tokens(
     name="black", label="純黑", is_dark=True,
     bg="#0A0A0A", surface="#151515", surface_hover="#2E2E2E", surface_active="#333333", border="#262626",
@@ -237,6 +236,9 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
 
     #fileLabel {{
         font-size: 12px;
+        color: {t.text_muted};
+    }}
+    #dialogIntro {{
         color: {t.text_muted};
     }}
 
@@ -542,10 +544,14 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         background: {t.checked_border};
         border: none;
     }}
+    /* each column's piece of the example title sits in its own box, so the row reads as a preview */
     QLabel#blockExample {{
         font-size: 18px;
         color: {t.text};
         padding: 4px 0;
+        margin: 2px 0;
+        background: {t.surface};
+        border: 1px solid {t.border};
         border-radius: 6px;
     }}
     QLabel#blockExample[empty="true"] {{
@@ -729,6 +735,14 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     QPushButton#inlineLink:hover {{
         color: {t.icon_hover};
         text-decoration: underline;
+    }}
+
+    /* 工具視窗表格下面的前後文預覽：跟表格同一種框 */
+    QTextEdit#contextPreview {{
+        background: {t.surface};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+        padding: 6px 8px;
     }}
 
     QTableWidget {{

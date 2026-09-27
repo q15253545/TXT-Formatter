@@ -16,7 +16,7 @@ class WordCountDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("章節字數")
         size_dialog(self, 760, 600)
-        root, footer = dialog_frame(self)
+        root, footer = dialog_frame(self, intro="全書與每一章的字數，標出沒有正文、偏短、偏長的章。")
         root.setSpacing(12)
 
         self.summary_label = QLabel("")

@@ -6,12 +6,13 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetricsF, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen,
+    QColor, QFont, QFontMetricsF, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen, QTextCharFormat,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QMenu, QPlainTextEdit,
     QPushButton, QScrollArea,
-    QSizePolicy, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
+    QSizePolicy, QSplitter, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import i18n, icons
@@ -134,14 +135,14 @@ class CompactToggle(ToggleSwitch):
 class ScopeToggle(CompactToggle):
     """工具視窗最上面的「只○○選取的 N 章」（掃描、校對、繁簡轉換共用）。
 
-    只選了一章時不預設打勾：點目錄通常只是跳到那一章看內容，預設只處理那一章的話，
-    找不到東西會讓人以為整本都沒問題；刻意選兩章以上才當成只想處理這幾章。"""
+    每次打開都是關著（整本）：目錄的選取多半只是跳到那幾章看內容，預設只處理選取的章節，
+    找不到東西會讓人以為整本都沒問題。使用者自己打開才只處理選取的。"""
 
     def __init__(self, verb: str, count: int = 0, parent=None):
         super().__init__("", parent)
         self._verb = verb
         self.set_count(count)
-        self.setChecked(count >= 2)
+        self.setChecked(False)
 
     def set_count(self, count: int):
         """count＝0：目錄沒有選取，不能開。"""
@@ -565,12 +566,13 @@ class _EnterStaysLocal(QObject):
                 and event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier))
 
 
-def dialog_frame(dialog, margins=(20, 18, 20, 14), enter_submits: bool = False):
+def dialog_frame(dialog, margins=(20, 18, 20, 14), enter_submits: bool = False, intro: str = ""):
     """功能視窗的版面：上面放內容，最下面一條貫穿整個視窗的分隔線，線下面是按鈕列
     （跟側邊卡片置底的按鈕同一種做法）。回傳（內容用的 QVBoxLayout, 按鈕列用的 QHBoxLayout）。
 
     enter_submits：只有簡單的確認視窗（新增章節、匯出檔名…）在輸入框按 Enter 等於按主要按鈕；
-    工具視窗的 Enter 只做那一欄的事（見 _EnterStaysLocal）。"""
+    工具視窗的 Enter 只做那一欄的事（見 _EnterStaysLocal）。
+    intro：內容最上面一行灰字，一句話說明這個視窗做什麼（不重複視窗標題）。"""
     if not enter_submits:
         guard = _EnterStaysLocal(dialog)
         dialog.installEventFilter(guard)
@@ -582,6 +584,11 @@ def dialog_frame(dialog, margins=(20, 18, 20, 14), enter_submits: bool = False):
     left, top, right, bottom = margins
     body.setContentsMargins(left, top, right, bottom)
     body.setSpacing(12)
+    if intro:
+        label = QLabel(intro)
+        label.setObjectName("dialogIntro")
+        label.setWordWrap(True)
+        body.addWidget(label)
     outer.addWidget(body_host, 1)
     outer.addWidget(Divider())
     footer = QHBoxLayout()
@@ -1155,3 +1162,86 @@ class LanguageToggle(QWidget):
             painter.setPen(color)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
         painter.end()
+
+
+class ContextPreview(QTextEdit):
+    """工具視窗表格下面的「前後文」：選到的那幾行加上前後幾行，找到的部分照本文的字色標出來，
+    比對得出跟正文的差別。沒有選取時藏起來。"""
+
+    CONTEXT = 3           # 前後各幾行（空行不算）
+    MAX_BODY = 20         # 選到的段落太長時只列頭尾
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("contextPreview")
+        self.setReadOnly(True)
+        self.setMinimumHeight(90)
+        self.hide()
+
+    def stacked_under(self, table) -> QWidget:
+        """表格在上、預覽在下，中間的分隔可以拖動調整高度。"""
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(10)
+        splitter.addWidget(table)
+        splitter.addWidget(self)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        return splitter
+
+    def show_rows(self, lines, start: int, end: int, color: str, spans=None):
+        """lines 的 start～end 行（含）用 color 標出，前後各帶 CONTEXT 行。
+        spans＝{行號: (起, 迄)}：那一行只標這一段（網址片段、網頁字元碼），其餘照正文。"""
+        start, end = max(0, start), min(len(lines) - 1, end)
+        if start > end:
+            self.hide()
+            return
+        spans = spans or {}
+
+        def neighbours(rows):
+            found = []
+            for row in rows:
+                if lines[row].strip():
+                    found.append(row)
+                    if len(found) == self.CONTEXT:
+                        break
+            return found
+
+        before = neighbours(range(start - 1, -1, -1))[::-1]
+        after = neighbours(range(end + 1, len(lines)))
+        body = list(range(start, end + 1))
+        skipped = 0
+        if len(body) > self.MAX_BODY:
+            skipped = len(body) - self.MAX_BODY
+            body = body[:self.MAX_BODY - 5] + [None] + body[-5:]
+        tokens = active_tokens()
+        plain, marked, faint = QTextCharFormat(), QTextCharFormat(), QTextCharFormat()
+        plain.setForeground(QColor(tokens.text))
+        marked.setForeground(QColor(color))
+        faint.setForeground(QColor(tokens.text_muted))
+        self.clear()
+        cursor = QTextCursor(self.document())
+        first = True
+        for row, is_body in [(row, False) for row in before] + [(row, True) for row in body] +                 [(row, False) for row in after]:
+            if not first:
+                cursor.insertBlock()
+            first = False
+            if row is None:
+                cursor.insertText(i18n.T(f"……（中間 {skipped} 行）……"), faint)
+                continue
+            text = lines[row]
+            if not is_body:
+                cursor.insertText(text, plain)
+            elif row in spans:
+                left, right = spans[row]
+                cursor.insertText(text[:left], plain)
+                cursor.insertText(text[left:right], marked)
+                cursor.insertText(text[right:], plain)
+            else:
+                cursor.insertText(text, marked)
+        self.moveCursor(QTextCursor.MoveOperation.Start)
+        self.show()
+        # 捲到選到的那幾行
+        block = self.document().findBlockByNumber(len(before))
+        self.setTextCursor(QTextCursor(block))
+        self.ensureCursorVisible()

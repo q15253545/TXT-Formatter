@@ -18,10 +18,11 @@ import threading
 import difflib
 import os
 import re
+import sys
 from collections import Counter
 
 from PySide6.QtCore import (
-    QByteArray, QEvent, QObject, QRect, QRegularExpression, QTimer, Qt, QUrl, Signal,
+    QByteArray, QEvent, QObject, QProcess, QRect, QRegularExpression, QTimer, Qt, QUrl, Signal,
 )
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QFont, QGuiApplication, QKeySequence, QShortcut,
@@ -42,11 +43,14 @@ from core.chapter_parse import (
     parse_mixed_volume_chapter_header, render_chapter_number_like,
 )
 from core.ad_scan import (
-    AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT, REPEAT_MIN_LENGTH, scan_ad_candidates,
+    AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, FIX_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT, REPEAT_MIN_LENGTH, scan_ad_candidates,
 )
 from core.quote_check import QUOTE_PROBLEM_LABELS
 from core.user_rules import PRESET_RULES, pop_timed_out_rules, preset_match
-from core.collection import chapter_gap_report, group_formal_chapters, missed_tail_chapters, scan_chapter_candidates
+from core.collection import (
+    chapter_gap_report, group_formal_chapters, missed_middle_chapters, missed_tail_chapters, missed_volumes,
+    scan_chapter_candidates,
+)
 from core.encoding import detect_line_ending, smart_detect_encoding, strip_stray_bom
 from core.file_io import read_text, read_text_lossy, write_text_atomic
 from core.filename_meta import (
@@ -62,7 +66,8 @@ from core.word_count import chapter_word_counts
 from core.structure_builder import BuildContext, build_document_structure
 from core.insert_suggestions import get_insert_suggestions
 from core.persistence import (
-    APP_DATA_DIR, RULES_FILE, _save_json, load_ui_state, load_user_chapter_rules, load_window_state, save_ui_state,
+    APP_DATA_DIR, RULES_FILE, UI_STATE_FILE, WINDOW_FILE, _save_json, load_ui_state, load_user_chapter_rules,
+    load_window_state, save_ui_state,
     save_window_state,
 )
 from core.title_blocks import TEMPLATE_LABELS, TEMPLATES, block_rule, template
@@ -116,13 +121,15 @@ MAX_HIGHLIGHT_SPANS = 800
 # 四種行尾標記的意義。說明框要列給使用者看，所以文字放在這裡集中管理，
 # 不要散在各個提示字串裡（core/title_markers.py 是判讀它們的地方）。
 MARKER_GUIDE = [
-    ("[::]", "手動加入目錄", "指定該行為章節標題"),
-    ("[::X]", "排除於目錄", "保留正文，不列入目錄"),
-    ("[::W]", "作品標題", "多作品合集中各作品的標題"),
-    ("[::T]", "特殊標題", "序章、後記等無編號的標題"),
+    ("[::]", "手動加入目錄，這一行是章節標題"),
+    ("[::X]", "保留正文，手動排除於目錄"),
+    ("[::W]", "手動設為作品標題（多作品合集的各部作品）"),
+    ("[::T]", "手動設為特殊標題（序章、後記這類沒有編號的標題）"),
 ]
 
 MIN_WINDOW_WIDTH = 680
+# 章節管理的預覽開關：狀態列說明的結尾
+_PREVIEW_NOTE = "（預覽，按「套用到本文」才寫入）"
 
 
 class _LayoutWatcher(QObject):
@@ -299,7 +306,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TXT 排版工具")
+        # 英文名稱：繁簡切換時不用跟著換（設定檔資料夾也叫 TXTFormatter）
+        self.setWindowTitle("TXT Formatter")
         self.setWindowIcon(icons.make_app_icon())
         # 視窗大小依螢幕決定，不寫死：直立螢幕在 200% 縮放下，
         # 程式看到的可用寬度只有 720，硬塞 1360 會有一半在畫面外。
@@ -505,9 +513,10 @@ class MainWindow(QMainWindow):
             lambda on: self._show_status("顯示內文空格：半形 ·、全形 □、Tab →，行尾多餘的空白標紅"
                                          if on else "不顯示內文空格"))
         self.content_panel.mark_ad_toggle.clicked.connect(
-            lambda on: self._show_status("本文用顏色標出廣告" if on else "不再標出廣告"))
+            lambda on: self._show_status("已顯示無關連內容字色（顏色定義見說明）" if on else "已隱藏無關連內容字色"))
         self.content_panel.mark_note_toggle.clicked.connect(
-            lambda on: self._show_status("本文用顏色標出作者感言與作品資訊" if on else "不再標出作者感言與作品資訊"))
+            lambda on: self._show_status("已顯示作者感言與作品資訊字色（顏色定義見說明）" if on
+                                         else "已隱藏作者感言與作品資訊字色"))
         side_layout.addWidget(self.content_panel)
         self.content_panel.hide()
 
@@ -540,13 +549,14 @@ class MainWindow(QMainWindow):
             on_matches_changed=self._find_on_matches_changed,
             get_version=self._text_version_now,
             on_message=self._show_status,
+            get_cursor=self._find_cursor,
         )
         side_layout.addWidget(self.find_bar)
         self.find_bar.hide()
 
         # 不寫死最小寬度：讓卡片最窄就是「剛好裝得下面板內容」，寫死的數字
-        # 一旦比內容窄，拉到最小時下拉框、按鈕就會超出卡片。
-        self.side_card.setMaximumWidth(360)
+        # 一旦比內容窄，拉到最小時下拉框、按鈕就會超出卡片。No maximum either: once the TOC card is at its
+        # minimum, QSplitter keeps pushing and the text card gives up the width.
         self.side_card.hide()
         splitter.addWidget(self.side_card)
 
@@ -601,6 +611,7 @@ class MainWindow(QMainWindow):
         self.toc_hint.hide()
         self._toc_hint_template = None
         self._toc_hint_format = None
+        self._toc_hint_key = self._toc_hint_result = None
         self._toc_hint_timer = QTimer(self)
         self._toc_hint_timer.setSingleShot(True)
         self._toc_hint_timer.setInterval(0)
@@ -700,6 +711,7 @@ class MainWindow(QMainWindow):
         self.editor.cursorPositionChanged.connect(self._update_cursor_position_label)
 
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self.toggle_find_bar)
+        QShortcut(QKeySequence("Ctrl+H"), self, activated=self.open_replace)
         QShortcut(QKeySequence("F5"), self, activated=self.rescan_toc)
         # 視窗層級的快捷鍵：焦點在目錄樹（剛做完右鍵選單操作）時按 Ctrl+Z 也要
         # 能復原。焦點在本文時，本文編輯器會自己攔下這兩組按鍵（見
@@ -1074,6 +1086,9 @@ class MainWindow(QMainWindow):
             event.ignore()
             self._show_status("轉換進行中，完成後再關閉")
             return
+        if getattr(self, "_restarting", False):
+            event.accept()
+            return
         if not self._confirm_discard_changes():
             event.ignore()
             return
@@ -1220,10 +1235,17 @@ class MainWindow(QMainWindow):
             return
         with native_dialog():
             path, _ = QFileDialog.getOpenFileName(
-                self, i18n.T("開啟 TXT 檔案"), "", i18n.T("文字檔 (*.txt);;所有檔案 (*)"))
+                self, i18n.T("開啟 TXT 檔案"), self._remembered_dir("last_open_dir"),
+                i18n.T("文字檔 (*.txt);;所有檔案 (*)"))
         if not path:
             return
+        self._ui_state["last_open_dir"] = os.path.dirname(path)
         self.load_file_path(path)
+
+    def _remembered_dir(self, key: str) -> str:
+        """上次開檔／匯出的資料夾；已經不在了（隨身碟拔掉、改名）就不用。"""
+        folder = self._ui_state.get(key)
+        return folder if isinstance(folder, str) and folder and os.path.isdir(folder) else ""
 
     @action
     def _open_dropped_file(self, path: str):
@@ -1682,8 +1704,14 @@ class MainWindow(QMainWindow):
         if not content.strip():
             return False
         default_name = self._suggest_export_filename()
+        # 上次匯出的資料夾；還沒匯出過就放在原檔旁邊
+        folder = (self._remembered_dir("last_export_dir")
+                  or (os.path.dirname(self.input_file) if self.input_file else "")
+                  or self._remembered_dir("last_open_dir"))
         with native_dialog():
-            path, _ = QFileDialog.getSaveFileName(self, i18n.T("另存新檔"), default_name, i18n.T("文字檔 (*.txt)"))
+            path, _ = QFileDialog.getSaveFileName(self, i18n.T("另存新檔"),
+                                                  os.path.join(folder, default_name) if folder else default_name,
+                                                  i18n.T("文字檔 (*.txt)"))
         if not path:
             return False
         stripped = 0
@@ -1691,10 +1719,12 @@ class MainWindow(QMainWindow):
             content, stripped = strip_export_markers(content)
         try:
             # 寫暫存檔、成功才取代目標檔：中途失敗時原本的檔案不會被清空。
-            write_text_atomic(path, content)
+            # 加 BOM：沒有 BOM 的 UTF-8，Windows 檔案總管的預覽、舊版記事本會當成系統編碼（Big5）顯示成亂碼
+            write_text_atomic(path, content, encoding="utf-8-sig")
         except (OSError, UnicodeError) as error:
             dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{path}\n\n{error}\n\n原本的檔案沒有被更動。")
             return False
+        self._ui_state["last_export_dir"] = os.path.dirname(path)
         if stripped:
             # 寫出去的內容跟編輯器裡的不一樣（少了標記），所以這次不算「已存檔」：
             # 關閉前還是會提醒一次，要留住目錄狀態的話可以再存一份沒移除的。
@@ -1987,37 +2017,71 @@ class MainWindow(QMainWindow):
 
     def _update_toc_hint(self):
         """目錄卡片上面的提示，按一下把漏掉的章節收進來：
-        目錄是空的或只有幾項——本文裡最多的一種常用寫法（高信心的可疑章節至少 3 行、目錄項數的五倍），
+        目錄沒有卷——本文有連號的「卷一 卷名」（不帶「第」），加成組合；
+        目錄是空的或太稀——本文裡最多的一種常用寫法（高信心的可疑章節至少 3 行、目錄章數的五倍），
         加成辨識章節的組合；
         後半本換了寫法——最後一章之後的常用寫法章號接著往下數，一樣加成組合；接不上號、但後面還有
-        一大段、裡面有同一種寫法的可疑章節（「2-1」這種沒有內建組合的），打開可疑章節。"""
+        一大段、裡面有同一種寫法的可疑章節（「2-1」這種沒有內建組合的），打開可疑章節；
+        書中間換了寫法——目錄章號缺的那一段在本文是另一種常用寫法，加成組合。"""
         self._toc_hint_template = None
         self._toc_hint_format = None
         if not any(line.strip() for line in self.raw_lines):
             self.toc_hint.hide()
             return
-        text = None
-        # 目錄只有幾項（整本其實是另一種寫法，只認到零星幾個「第N章」）：看整本最多的常用寫法
-        if len(self.chapter_raw_map) <= 5:
-            counts = Counter(candidate["format"] for candidate in
-                             scan_chapter_candidates(self.raw_lines, set(self.chapter_raw_map.values()),
-                                                     self.max_title_length)
-                             if candidate["confidence"] == "高" and candidate["format"].startswith("preset:"))
-            template_ids = {key for key, _level, _blocks in TEMPLATES}
-            found = next(((fmt.split(":", 1)[1], count) for fmt, count in counts.most_common()
-                          if fmt.split(":", 1)[1] in template_ids
-                          and count >= max(3, 5 * len(self.chapter_raw_map))), None)
-            if found is not None:
-                self._toc_hint_template = found[0]
-                text = f"本文有 {found[1]} 行是「{TEMPLATE_LABELS[found[0]]}」這種寫法"
-        if text is None and self.chapter_raw_map:
-            text = self._toc_tail_hint()
+        # 行數、目錄項數、辨識規則都沒變（打字、改字）：沿用上次的判斷，不用再掃
+        key = (self.input_file, len(self.raw_lines), len(self.chapter_raw_map), self.max_title_length,
+               tuple(rule.get("pattern") for rule in self.user_chapter_rules))
+        if key != self._toc_hint_key:
+            self._toc_hint_key, self._toc_hint_result = key, self._find_toc_hint()
+        text, self._toc_hint_template, self._toc_hint_format = self._toc_hint_result
         if text is None:
             self.toc_hint.hide()
             return
         i18n.set_text(self.toc_hint_label, text)
         i18n.set_text(self.toc_hint_button, "查看可疑章節" if self._toc_hint_format else "加入辨識章節")
         self.toc_hint.show()
+
+    def _find_toc_hint(self):
+        """（提示文字, 要加的內建組合, 要看的可疑章節格式）；沒有要提示的回傳 (None, None, None)。"""
+        known = set(self.chapter_raw_map.values())
+        kinds = Counter(record.get("kind") for record in self.chapter_records.values())
+        # 目錄是空的或太稀（只認到零星幾個「第N章」，整本其實是另一種寫法）：看整本最多的常用寫法。
+        # 平常的書每章幾十到一兩百行，不用整本掃（開檔時快取還沒算好，整本掃會卡）
+        if len(known) <= 5 or len(self.raw_lines) > 400 * len(known):
+            counts = Counter(candidate["format"] for candidate in
+                             scan_chapter_candidates(self.raw_lines, known, self.max_title_length)
+                             if candidate["confidence"] == "高" and candidate["format"].startswith("preset:"))
+            template_ids = {key for key, level, _blocks in TEMPLATES if level == 2}
+            found = next(((fmt.split(":", 1)[1], count) for fmt, count in counts.most_common()
+                          if fmt.split(":", 1)[1] in template_ids
+                          and count >= max(3, 5 * kinds.get("chapter", 0))), None)
+            if found is not None:
+                return f"本文有 {found[1]} 行是「{TEMPLATE_LABELS[found[0]]}」這種寫法", found[0], None
+        # 章都收到了再看卷：目錄一個卷都沒有，本文卻有「卷一 卷名」這種不帶「第」的卷，卷號連號
+        if not kinds.get("volume"):
+            count = missed_volumes(self.raw_lines, known)
+            if count:
+                return (f"本文有 {count} 行是「{TEMPLATE_LABELS['leading_unit_volume']}」這種寫法",
+                        "leading_unit_volume", None)
+        if self.chapter_raw_map:
+            hint = self._toc_tail_hint()
+            if hint[0] is None:
+                hint = self._toc_middle_hint()
+            return hint
+        return None, None, None
+
+    def _toc_middle_hint(self):
+        """目錄中間缺的章是另一種寫法（core.collection.missed_middle_chapters）。"""
+        chapters = sorted((row, self.chapter_records.get(item, {}).get("number"))
+                          for item, row in self.chapter_raw_map.items()
+                          if self.chapter_records.get(item, {}).get("kind") == "chapter")
+        missed = missed_middle_chapters(self.raw_lines, chapters, self.max_title_length)
+        if missed is None:
+            return None, None, None
+        after = missed["after"]
+        name = f"第{int(after) if float(after).is_integer() else after}章"
+        return (f"目錄在{name}之後少的 {missed['count']} 章是「{TEMPLATE_LABELS[missed['key']]}」這種寫法",
+                missed["key"], None)
 
     def _toc_tail_hint(self):
         """最後一個目錄項目之後漏掉的章節（core.collection.missed_tail_chapters）。"""
@@ -2027,15 +2091,14 @@ class MainWindow(QMainWindow):
                           if self.chapter_records.get(item, {}).get("kind") == "chapter")
         missed = missed_tail_chapters(self.raw_lines, chapters, last_row, self.max_title_length)
         if missed is None:
-            return None
+            return None, None, None
         last_number = chapters[-1][1]
         name = (f"第{int(last_number) if float(last_number).is_integer() else last_number}章"
                 if isinstance(last_number, (int, float)) else "最後一章")
         if missed["kind"] == "template":
-            self._toc_hint_template = missed["key"]
-            return f"目錄到{name}為止，後面有 {missed['count']} 行是「{TEMPLATE_LABELS[missed['key']]}」這種寫法"
-        self._toc_hint_format = missed["format"]
-        return f"目錄到{name}為止，後面還有 {missed['count']} 行像章節標題"
+            return (f"目錄到{name}為止，後面有 {missed['count']} 行是「{TEMPLATE_LABELS[missed['key']]}」這種寫法",
+                    missed["key"], None)
+        return f"目錄到{name}為止，後面還有 {missed['count']} 行像章節標題", None, missed["format"]
 
     @action
     def _accept_toc_hint(self):
@@ -2175,18 +2238,44 @@ class MainWindow(QMainWindow):
 
     def _on_strip_markers_toggled(self, on: bool):
         self._strip_markers_on_export = on
-        self._show_status("匯出時會移除章節標記" if on else "匯出時保留章節標記")
+        self._show_status("匯出時會移除章節標記（章節標記定義見說明）" if on else "匯出時保留章節標記")
 
     def _on_markers_toggled(self, shown: bool):
         """切換只影響顯示，一個字都不會動到。"""
         self._show_title_markers = shown
         self._refresh_title_formats()
-        self._show_status("已顯示章節標記" if shown else "已隱藏章節標記")
+        self._show_status("已顯示章節標記（章節標記定義見說明）" if shown else "已隱藏章節標記")
+
+    def restore_defaults(self, parent=None):
+        """說明視窗的「還原預設」：刪掉設定檔（組合規則、介面狀態、視窗大小），重新開啟程式；
+        開著的檔案一起帶過去。一項一項改回預設很容易漏，重開最保險。"""
+        if not dialogs.confirm(parent or self, "還原預設",
+                               "辨識章節的組合、排版設定、開關、視窗大小都會還原成預設，程式會重新開啟。"):
+            return
+        if not self._confirm_discard_changes():
+            return
+        for path in (RULES_FILE, UI_STATE_FILE, WINDOW_FILE):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                app_log.log.warning("還原預設：刪不掉 %s", path, exc_info=True)
+        if getattr(sys, "frozen", False):
+            program, arguments = sys.executable, []
+        else:
+            program, arguments = sys.executable, ["-m", "ui_qt"]
+        if self.input_file:
+            arguments.append(self.input_file)
+        QProcess.startDetached(program, arguments, os.getcwd())
+        # 關閉時不再把目前的設定寫回去（剛刪掉的檔案會又出現）
+        self._restarting = True
+        if parent is not None:
+            parent.reject()
+        self.close()
 
     def _show_marker_help(self):
         """檔名列的問號（說明）：章節標記、本文字色、自動補齊卷號／卷名、設定檔位置。"""
-        dialog = HelpDialog(self.tokens, [(mark, i18n.T(name), i18n.T(detail)) for mark, name, detail in MARKER_GUIDE],
-                            APP_DATA_DIR, self)
+        dialog = HelpDialog(self.tokens, [(mark, i18n.T(detail)) for mark, detail in MARKER_GUIDE],
+                            APP_DATA_DIR, self, on_restore=self.restore_defaults)
         dialog.exec()
         dialog.deleteLater()
 
@@ -2352,7 +2441,8 @@ class MainWindow(QMainWindow):
             entries.append({"kind": "dup", "start": number, "end": number, "row": rows[1] if len(rows) > 1 else 0,
                             "found": []})
         for row, number, kind, guess in result.get("anomaly_rows", []):
-            entries.append({"kind": kind, "start": int(number), "end": guess, "row": row, "found": []})
+            entries.append({"kind": kind, "start": int(number), "end": guess, "row": row, "found": [],
+                            "text": self.raw_lines[row].strip()[:16] if 0 <= row < len(self.raw_lines) else ""})
         return sorted(entries, key=lambda entry: entry["row"])
 
     def _group_end_row(self, nodes) -> int:
@@ -2466,7 +2556,6 @@ class MainWindow(QMainWindow):
             return
         self._update_minimum_width(settle=True)
         side = max(self._side_width, self.side_card.minimumSizeHint().width())
-        side = min(side, self.side_card.maximumWidth())
         margins = self.splitter.parentWidget().layout().contentsMargins()
         available = max(self.splitter.width(), self.minimumWidth() - margins.left() - margins.right())
         editor = max(self.editor_card.minimumSizeHint().width(), available - side - tree - 2 * handle)
@@ -2594,7 +2683,7 @@ class MainWindow(QMainWindow):
         """高信心廣告候選；同一份文字只掃一次（掃描本身在大檔要好幾秒）。"""
         if self._ad_scan_version != self._text_version:
             self._ad_scan_cache = [candidate for candidate in scan_ad_candidates(
-                self.raw_lines, set(AD_CATEGORY_LABELS) - {"entity"},
+                self.raw_lines, set(AD_CATEGORY_LABELS) - FIX_CATEGORIES,
                 title_rows=set(self.chapter_raw_map.values()))
                                    if candidate["confidence"] == "高"]
             self._ad_scan_version = self._text_version
@@ -2764,6 +2853,15 @@ class MainWindow(QMainWindow):
             self.find_bar.refresh()
             self.find_bar.focus_input()
 
+    def open_replace(self):
+        """Ctrl+H: open find & replace (never closes it) with the caret in the replace box."""
+        if not self.raw_lines:
+            return
+        if not self.find_bar.isVisible():
+            self._set_active_side_panel(self.find_bar)
+            self.find_bar.refresh()
+        self.find_bar.focus_replace()
+
     def close_find_bar(self):
         if self.find_bar.isVisible():
             self._set_active_side_panel(None)
@@ -2772,6 +2870,11 @@ class MainWindow(QMainWindow):
     # 尋找列算出來的是 Python 字元位置，游標吃的是 Qt（UTF-16）位置：
     # 本文只要出現過一個 emoji 或擴充漢字，後面每個位置就會差一格，取代會
     # 改到前一個字。所有進出游標的位置都經過這裡換算。
+
+    def _find_cursor(self):
+        cursor = self.editor.textCursor()
+        positions = self._positions()
+        return positions.to_python(cursor.selectionStart()), positions.to_python(cursor.selectionEnd())
 
     def _find_on_select(self, start: int, end: int):
         positions = self._positions()
@@ -3098,14 +3201,14 @@ class MainWindow(QMainWindow):
     def _on_merge_titles_toggled(self, on: bool):
         self._merge_titles = on
         self._rebuild_preview_toc()
-        self._show_status("已開啟自動合併下行標題：只有章號的標題接上下一行的章名（預覽，"
-                          "按「套用到本文」才寫進去）" if on else "已關閉自動合併下行標題")
+        self._show_status("已開啟自動合併下行標題：「第1章」接上下一行的章名" + _PREVIEW_NOTE
+                          if on else "已關閉自動合併下行標題")
 
     def _on_skip_duplicates_toggled(self, on: bool):
         self._skip_duplicate_titles = on
         self._rebuild_preview_toc()
-        self._show_status("已開啟自動合併重複標題：同一章的標題重複出現、中間不到 100 字時只留第一個（預覽，"
-                          "按「套用到本文」才刪掉重複的那一行）" if on else "已關閉自動合併重複標題")
+        self._show_status("已開啟自動合併重複標題：連續出現兩次的同一章標題只留第一個" + _PREVIEW_NOTE
+                          if on else "已關閉自動合併重複標題")
 
     def _rebuild_preview_toc(self):
         if self.raw_lines and any(line.strip() for line in self.raw_lines):
@@ -3115,13 +3218,13 @@ class MainWindow(QMainWindow):
     def _on_infer_volumes_toggled(self, on: bool):
         self._infer_volumes = on
         self._rebuild_preview_toc()
-        self._show_status("已開啟自動補齊卷號：目錄補上推算出來的卷（預覽，按「套用到本文」才寫進去）"
+        self._show_status("已開啟自動補齊卷號：從卷結尾行、章號重新起算推出缺少的卷" + _PREVIEW_NOTE
                           if on else "已關閉自動補齊卷號")
 
     def _on_infer_volume_names_toggled(self, on: bool):
         self._infer_volume_names = on
         self._rebuild_preview_toc()
-        self._show_status("已開啟自動補齊卷名：補上的卷帶卷名，每章前面的卷拆成卷標題（預覽）"
+        self._show_status("已開啟自動補齊卷名：卷結尾行寫的卷名一起補上" + _PREVIEW_NOTE
                           if on else "已關閉自動補齊卷名")
 
     def _on_marking_changed(self):
@@ -3164,7 +3267,7 @@ class MainWindow(QMainWindow):
                 auto_titles=dict(self.auto_titles), force_lv1_chapters=set(self.force_lv1_chapters),
                 force_lv2_chapters=set(self.force_lv2_chapters), ignored_chapters=set(self.ignored_chapters))
         # 網頁字元碼只是換字，不是廣告：不標廣告色
-        ad_categories = (self._saved_ad_categories() - {"entity"}) | {"repeat"} if "ad" in kinds else set()
+        ad_categories = (self._saved_ad_categories() - FIX_CATEGORIES) | {"repeat"} if "ad" in kinds else set()
         note_categories = self._saved_note_categories() if "note" in kinds else set()
         min_length, min_count = self._saved_repeat_settings()
         self._mark_scan_running = True

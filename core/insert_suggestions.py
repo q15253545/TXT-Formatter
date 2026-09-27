@@ -3,8 +3,8 @@
 from .title_markers import strip_manual_title_marker
 from .chapter_parse import parse_lv1, parse_lv2, parse_special, suggest_number, render_chapter_number_like
 
-INSERTABLE_KINDS = ("章", "部", "卷", "篇", "集", "前言", "序章", "楔子", "後記", "自訂標題")
-NUMERIC_KINDS = {"章", "部", "卷", "篇", "集"}
+INSERTABLE_KINDS = ("章", "部", "卷", "篇", "集", "季", "前言", "序章", "楔子", "後記", "自訂標題")
+NUMERIC_KINDS = {"章", "部", "卷", "篇", "集", "季"}
 
 
 def get_structure_records(raw_lines, recognized_indices):
@@ -71,7 +71,7 @@ def get_insert_suggestions(raw_lines, recognized_indices, insert_index):
     chapter_reference = (next_ch or same_group_prev or {}).get("reference", "第1章")
     suggestions["章"] = {"number": chapter_number, "reference": chapter_reference}
 
-    for unit in ("部", "卷", "篇", "集"):
+    for unit in ("部", "卷", "篇", "集", "季"):
         volumes = [record for record in records if record["level"] == 1 and record["unit"] == unit]
         prev_vol = next((record for record in reversed(volumes) if record["index"] < insert_index), None)
         next_vol = next((record for record in volumes if record["index"] >= insert_index), None)
@@ -85,8 +85,8 @@ def get_insert_suggestions(raw_lines, recognized_indices, insert_index):
         default_kind = "前言"
     elif next_ch or prev_ch:
         default_kind = "章"
-    elif any(unit in suggestions for unit in ("部", "卷", "篇", "集")):
-        default_kind = next(unit for unit in ("部", "卷", "篇", "集") if unit in suggestions)
+    elif any(unit in suggestions for unit in ("部", "卷", "篇", "集", "季")):
+        default_kind = next(unit for unit in ("部", "卷", "篇", "集", "季") if unit in suggestions)
     else:
         default_kind = "章"
     return suggestions, default_kind

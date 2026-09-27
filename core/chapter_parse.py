@@ -4,6 +4,7 @@ import re
 import unicodedata
 from functools import lru_cache
 
+from . import title_blocks
 from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 
 CN_NUM_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零]+"
@@ -27,11 +28,21 @@ def is_noise_prefix(text: str) -> bool:
     return bool(text) and text.strip().casefold() in NOISE_TITLE_PREFIXES
 
 
+_NOISE_LEAD = re.compile(r"^\s*(?:" + "|".join(sorted(map(re.escape, NOISE_TITLE_PREFIXES), key=len, reverse=True))
+                         + r")[\s:：、·\-—]+(?=\S)", re.IGNORECASE)
+
+
+def strip_noise_lead(text: str):
+    """「正文 001 山路」「VIP章節：12. 城裡」：開頭的雜訊前綴拿掉後剩下的；沒有前綴回傳 None。"""
+    match = _NOISE_LEAD.match(text) if text else None
+    return text[match.end():] if match else None
+
+
 def _clean_arc(arc: str) -> str:
     """「第N章」前面的篇名：是雜訊前綴就當成沒有。"""
     return "" if is_noise_prefix(arc) else arc
 ARC_PATTERN = rf"(?:(?P<arc>[^，。！？：；\.,!?;”’\n\(\)\[\]]{{1,15}}){SEP})?"
-VOL_PATTERN = rf"(?:(?P<volume>第{CN_NUM_PATTERN}\s*[部卷篇集]){SEP})?"
+VOL_PATTERN = rf"(?:(?P<volume>第{CN_NUM_PATTERN}\s*[部卷篇集季]){SEP})?"
 
 # 關鍵字後面必須是行尾、空白、分隔符號或括號，不能直接接著文字：
 # 否則「序幕拉開了」「簡介一下我自己」「後記得……」這種句子都會被當成
@@ -46,7 +57,7 @@ COMBO_SPECIAL_REGEX = re.compile(
 
 LV1_A_REGEX = re.compile(
     r"^[\s【\[\(-]*" + ARC_PATTERN +
-    r"(?:(?P<prefix>第)\s*(?P<number>" + CN_NUM_PATTERN + r")\s*(?P<unit>[部卷篇集])|(?P<leading_unit>[部卷篇集])\s*(?P<trailing_number>" + CN_NUM_PATTERN + r"))"
+    r"(?:(?P<prefix>第)\s*(?P<number>" + CN_NUM_PATTERN + r")\s*(?P<unit>[部卷篇集季])|(?P<leading_unit>[部卷篇集])\s*(?P<trailing_number>" + CN_NUM_PATTERN + r"))"
     r"[\s】\]\)-]*(?P<title>.*)$", re.IGNORECASE)
 
 # 外傳／終章同樣要有分隔，但多允許一個「之」：「外傳之青梅竹馬」是常見寫法，
@@ -84,9 +95,28 @@ WEAK_PLAIN_TITLE_REGEX = re.compile(
 )
 
 
+# 「2-1」「2-3 過河」：前面是卷（季）號、後面才是章號。不先認出來的話會被當成「第2章」、章名「1」
+VOLUME_DASH_CHAPTER_REGEX = re.compile(
+    r"^\s*(?P<volume>[0-9０-９]{1,3})\s*[-－—]\s*(?P<number>[0-9０-９]{1,4})(?![0-9０-９])"
+    r"(?:(?:\s*[:：、.．·]\s*|\s+)(?P<title>\S.*?))?\s*$")
+
+
+def volume_dash_number(text):
+    """「2-1 過河」的卷號 2；不是這種寫法回傳 None。"""
+    match = VOLUME_DASH_CHAPTER_REGEX.match(text) if text and ("-" in text or "－" in text or "—" in text) else None
+    return int(chinese_to_arabic(match.group("volume"))) if match else None
+
+
 @lru_cache(maxsize=1 << 18)
 def parse_weak_numbered_title(text):
     """共用弱格式解析器：供次行章名合併與稀有章節掃描使用。"""
+    dash = VOLUME_DASH_CHAPTER_REGEX.match(text)
+    if dash:
+        number = chinese_to_arabic(dash.group("number"))
+        if number <= 0 or not chinese_to_arabic(dash.group("volume")):
+            return None
+        return {"number": int(number), "number_text": dash.group("number"), "body": (dash.group("title") or "").strip(),
+                "volume": int(chinese_to_arabic(dash.group("volume"))), "style": "卷-章", "style_key": "卷-章"}
     for style, regex in (
         ("井號", WEAK_HASH_TITLE_REGEX),
         ("括號", WEAK_BRACKET_TITLE_REGEX),
@@ -124,6 +154,8 @@ def weak_candidate_to_user_rule(candidate):
     number = r"(?P<number>" + SUBTITLE_NUMBER_PATTERN + r")"
     title = r"(?P<title>.+?)"
     style_key = candidate.get("style_key", candidate.get("style", "一般"))
+    if style_key == "卷-章":
+        return title_blocks.block_rule(title_blocks.template("volume_dash_chapter")[1], 2)
     if style_key == "井號":
         pattern = (r"^\s*[#＃]\s*" + number
                    + r"\s*(?:[\.．,，、:：\-—]+\s*)?" + title + r"\s*$")
@@ -151,6 +183,10 @@ def weak_candidate_to_user_rule(candidate):
 _OCR_ZERO = re.compile(r"(?<=第)(\s*)([0-9][0-9oO]*[oO][0-9oO]*)(?=\s*[章回節节])")
 
 
+_LEADING_CHAPTER = re.compile(rf"^\s*第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})\s*(?P<unit>[章回節节折幕])"
+                             r"[\s:：、·\-—]*(?P<title>.*)$")
+
+
 def parse_lv2(line):
     # 自動辨識只收正規格式（第N章／回／節…、番外）；英文 Chapter N 是「自訂章節規則」的常用格式。
     # COMBO_LV2_NUM_REGEX 給連續編號、保留標題間隔這些「已經確定是標題」之後的處理使用。
@@ -160,6 +196,13 @@ def parse_lv2(line):
         match = regex.match(line)
         if match:
             fields = match.groupdict(default="")
+            if fields["arc"] and prefix == "第":
+                # 「第572章 番外之二：第一章 山路」：前面那段本身就是同一種單位的章號，這一章是第 572 章，
+                # 後面的「第一章」是章名的一部分（「第一章 第二節」這種章加節照舊當成節）
+                outer = _LEADING_CHAPTER.match(line)
+                if outer and outer.group("unit") == fields.get("unit"):
+                    return ("", "", "第", chinese_to_arabic(outer.group("number")), outer.group("unit"),
+                            outer.group("title"))
             return (_clean_arc(fields["arc"]), fields["volume"], prefix,
                     chinese_to_arabic(fields["number"]) if fields["number"] else 0.0,
                     fields.get("unit", "章"), fields["title"])
@@ -185,7 +228,8 @@ def parse_lv1(line):
     return None
 
 
-MAX_TITLE_LENGTH = 45
+# 預設的標題長度上限：整批 738 本、30 萬章裡 99.9% 在 34 字以內；更長的「第N章 章名」另外放寬（long_formal_title）
+MAX_TITLE_LENGTH = 40
 CLOSING_QUOTE_TAIL_REGEX = re.compile(r"[”’」』]\s*$")
 
 
@@ -349,7 +393,8 @@ def looks_like_heading(text: str, max_length: int = MAX_TITLE_LENGTH) -> bool:
 CHAPTER_WORDS = (("章", "第N章", ("章",)), ("回", "第N回", ("回",)), ("節", "第N節", ("節", "节")),
                  ("折", "第N折", ("折",)), ("幕", "第N幕", ("幕",)), ("番外", "番外", ("番外",)))
 VOLUME_WORDS = (("卷", "第N卷", ("卷",)), ("部", "第N部", ("部",)), ("篇", "第N篇", ("篇",)),
-                ("集", "第N集", ("集",)), ("外傳", "外傳", ("外傳", "外传")), ("終章", "終章", ("終章", "终章")))
+                ("集", "第N集", ("集",)), ("季", "第N季", ("季",)),
+                ("外傳", "外傳", ("外傳", "外传")), ("終章", "終章", ("終章", "终章")))
 SPECIAL_WORDS = (("序章", "序章", ("序章",)), ("序言", "序言", ("序言",)), ("序", "序", ("序",)),
                  ("前言", "前言", ("前言",)), ("楔子", "楔子", ("楔子",)), ("引子", "引子", ("引子",)),
                  ("簡介", "簡介", ("簡介", "简介", "內容簡介", "内容简介", "人物簡介", "人物简介")),
@@ -362,7 +407,7 @@ _WORD_KEY = {variant: key for key, _label, variants in CHAPTER_WORDS + VOLUME_WO
              for variant in variants}
 # heading_word 認得的標題一定有這些字：章、卷的單位前面要有「第」，不用「第」的只有番外、外傳、終章
 # 與特殊標題。沒有的行不用跑整套標題正則（大檔的正文幾乎都是這種）。
-_NUMBERED_UNITS = {"章", "回", "節", "折", "幕", "卷", "部", "篇", "集"}
+_NUMBERED_UNITS = {"章", "回", "節", "折", "幕", "卷", "部", "篇", "集", "季"}
 _WORD_HINT_REGEX = re.compile("|".join(sorted(
     map(re.escape, {"第"} | {variant for key, _label, variants in CHAPTER_WORDS + VOLUME_WORDS + SPECIAL_WORDS
                              if key not in _NUMBERED_UNITS for variant in variants}),
@@ -376,15 +421,20 @@ _END_SENTENCE = re.compile(r"(?:到此|至此)(?:结束|結束|完结|完結|终
 _NOTE_TITLE_WORDS = re.compile(r"请假|請假|月票|求票|推荐票|推薦票|保底|感言|订阅|訂閱|^总结|^總結")
 
 
-# 單位字跟後面的字合起來是一個詞：「第二部分，是…」「第一集團軍」不是卷，
-# 「第三回合」「第一節課」「第二節自習課」「第一節晚自習」是正文的句子開頭，不是章節
+# 單位字跟後面的字合起來是一個詞：「第二部分，是…」「第一集團軍」「第三季度」不是卷，
+# 「第三回合」「第一節課」「第二節自習課」「第一節晚自習」「第五節車廂」是正文的句子開頭，不是章節
 _UNIT_WORD = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*"
-                        r"(?:部[分门門队隊长長落位]|集[团團中合体體]|篇幅|卷[入起子轴軸]|回合"
-                        r"|[节節](?:[一-鿿]{0,2}[课課]|晚自[习習]))")
+                        r"(?:部[分门門队隊长長落位]|集[团團中合体體]|篇幅|卷[入起子轴軸]|季[度节節末赛賽]|回合"
+                        r"|[节節](?:[一-鿿]{0,2}[课課]|晚自[习習]|[车車][厢廂]))")
+
+
+# 單位後面直接接只會出現在句子中間的詞、後面還有逗號：「第三章會晚一點，先去山路」「第一章就寫好了，…」
+_SENTENCE_AFTER_UNIT = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*[章回節节]"
+                                  r"(?:會|会|就|的時候|的时候|已經|已经)[^，,]{0,15}[，,]")
 
 
 def not_a_heading(text: str) -> bool:
-    if _PS_PREFIX.match(text) or _END_SENTENCE.search(text) or _UNIT_WORD.match(text):
+    if _PS_PREFIX.match(text) or _END_SENTENCE.search(text) or _UNIT_WORD.match(text)             or _SENTENCE_AFTER_UNIT.match(text):
         return True
     volume = parse_lv1(text)
     if volume and not parse_lv2(text):
@@ -519,7 +569,7 @@ def locate_chapter_number(text):
 
 
 ARABIC_NUMBER_REGEX = re.compile(r"[0-9０-９]+(?:[.．]\d+)?")
-ARABIC_TITLE_REGEX = re.compile(r"第\s*[0-9０-９]+\s*[部卷篇集章回節节折幕]")
+ARABIC_TITLE_REGEX = re.compile(r"第\s*[0-9０-９]+\s*[部卷篇集季章回節节折幕]")
 
 
 def uses_arabic_numerals(text):
@@ -705,7 +755,7 @@ def clean_merged_subtitle(text):
 # 「卷一」這種寫法只在「自動補齊卷號＋卷名」都開著時才拆（short_volume=True）；
 # 平常照原本的做法，整行當一章。卷名與章號之間可以沒有空白（「第四卷风流第729节」）。
 MIXED_VOLUME_CHAPTER_REGEX = re.compile(
-    r"^\s*(?P<vraw>第\s*(?P<vnum1>" + CN_NUM_PATTERN + r")\s*(?P<vunit1>[部卷篇集])"
+    r"^\s*(?P<vraw>第\s*(?P<vnum1>" + CN_NUM_PATTERN + r")\s*(?P<vunit1>[部卷篇集季])"
     r"|(?P<vunit2>[部卷篇])\s*(?P<vnum2>" + CN_NUM_PATTERN + r")(?=[\s（(]))"
     r"\s*(?P<vnote>[（(][^（）()]{1,6}[）)])?\s*"
     r"(?P<vbody>.{0,30}?)\s*"
@@ -715,7 +765,7 @@ MIXED_VOLUME_CHAPTER_REGEX = re.compile(
 
 
 _MIXED_PAREN_REGEX = re.compile(
-    r"^\s*(?P<vraw>第\s*(?P<vnum>" + CN_NUM_PATTERN + r")\s*(?P<vunit>[部卷篇集]))\s*"
+    r"^\s*(?P<vraw>第\s*(?P<vnum>" + CN_NUM_PATTERN + r")\s*(?P<vunit>[部卷篇集季]))\s*"
     r"[（(]\s*(?P<cnum>" + CN_NUM_PATTERN + r")\s*[、.．]\s*(?P<cbody>[^（）()]{1,30})[）)]\s*$")
 _WHOLE_BRACKET = re.compile(r"^\s*[【\[]\s*(.+?)\s*[】\]]\s*$")
 

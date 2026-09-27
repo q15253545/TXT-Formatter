@@ -63,6 +63,12 @@ def load_user_chapter_rules():
             item = {"name": name, "pattern": pattern, "level": level,
                     "enabled": bool(rule.get("enabled", True))}
             from .title_blocks import migrate_preset_rule, refresh_block_rule
+            special = rule.get("special")
+            if isinstance(special, str) and special.strip():
+                # 自訂特殊標題：照那個字重新產生正則（寫法跟著程式更新）
+                from .user_rules import special_word_rule
+                valid.append(special_word_rule(special, level, bool(rule.get("enabled", True))))
+                continue
             if isinstance(rule.get("blocks"), dict):
                 # 「辨識章節」的組合：照積木重新產生正則（寫法跟著程式更新）；積木壞掉就當一般規則
                 refreshed = refresh_block_rule({**rule, "level": level})

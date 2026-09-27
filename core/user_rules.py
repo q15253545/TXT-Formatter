@@ -4,7 +4,7 @@ import re
 from functools import lru_cache
 
 from . import safe_regex
-from .chapter_parse import too_long_for_title
+from .chapter_parse import strip_noise_lead, too_long_for_title
 from .cn_numerals import chinese_to_arabic
 
 # 純數字這類弱格式（#1、1.、1、、(1)…）不自動辨識：正文的條列、對話裡的數字長得一模一樣，
@@ -53,6 +53,13 @@ PRESET_RULES = [
     {"preset": "english_section", "name": "英文 Section N", "example": "Section 1、Sec.12",
      "pattern": r"^(?:Section|Sect|Sec)\.?\s*(?P<number>[0-9]{1,4})"
                 r"(?:[\s:：.\-—]+(?P<title>\S.{0,60}?))?\s*$"},
+    # 少了「第」的「12章 標題」：單位後面一定要有分隔才接章名，「3章節」「10回合」這種不算
+    {"preset": "number_unit", "name": "數字＋章", "example": "12章 標題、12章、標題",
+     "pattern": rf"^{_NUMBER}\s*[章回節节](?:[ \t　]+|\s*[、:：.．\-—·]\s*){_TITLE}$"},
+    # 「2-1」「2-3 過河」：卷（季）號-章號。章號是後面那個，卷號另外記著（本文沒寫那一卷時要補）
+    {"preset": "volume_dash_chapter", "name": "卷號-章號", "example": "2-1、2-3 標題",
+     "pattern": r"^(?P<volume>[0-9０-９]{1,3})\s*[-－—]\s*(?P<number>[0-9０-９]{1,4})(?![0-9０-９])"
+                rf"(?:(?:[ \t　]+|\s*[、:：.．·]\s*){_TITLE})?$"},
     # 編號後面一定要有分隔，才不會把「章三十萬字」這種句子當成章。
     {"preset": "leading_unit_chapter", "name": "不帶「第」的章號", "example": "章一 風起、回三：歸來",
      "pattern": r"^[【\[\(（]?\s*[章回節节]\s*"
@@ -65,11 +72,11 @@ PRESET_RULES = [
 _ARABIC = "0-9０-９"
 _CHINESE_NUMBER = "一二兩两三四五六七八九十百千零〇"
 _SEPARATORS = "：:、，,.．。\\-—─～~|｜/／"
-_VOLUME_UNITS_IN_SAMPLE = "卷部篇集"
+_VOLUME_UNITS_IN_SAMPLE = "卷部篇集季"
 _CLOSING = "】\\]）\\)》>」』〕"
 # 編號後面依序是：單位（章／話／節…）、收尾括號、分隔符、章名，後三者都可有可無。
 # 章節單位白名單：編號後面緊接這些字才是單位，其餘都是章名（「第1章山河」的單位只有「章」）。
-_UNITS_IN_SAMPLE = "章回節节折幕卷部篇集話话"
+_UNITS_IN_SAMPLE = "章回節节折幕卷部篇集季話话"
 _FORMAL_SAMPLE = re.compile(
     rf"第\s*(?P<number>[{_ARABIC}]+|[{_CHINESE_NUMBER}]+)\s*(?P<unit>[{_UNITS_IN_SAMPLE}])")
 _SAMPLE_REST = re.compile(
@@ -163,6 +170,37 @@ def preset_rule(preset_id):
     raise KeyError(preset_id)
 
 
+# 使用者自訂的特殊標題（「辨識章節 → 特殊標題」新增的字，例如「續章」）：跟序章、番外一樣照原文顯示，
+# 不改寫成「第N章」。可以帶編號（「續章12」）、章名，前面可以有一段名稱加空白（「書名 續章3」）；
+# 字後面要接編號、分隔或行尾，「續章寫得好」這種句子不算。簡繁兩種寫法都認（有 OpenCC 時）。
+SPECIAL_WORD_MAX = 8
+_SPECIAL_NUMBER = r"[0-9０-９]{1,5}|[一二兩两三四五六七八九十百千零〇]{1,8}"
+_SPECIAL_SEPARATOR = r"[\s:：、．.·\-—_]"
+
+
+def special_word_variants(word: str) -> list:
+    from .script_convert import SCRIPT_SIMP, SCRIPT_TRAD, convert_script
+    word = word.strip()
+    variants = {word, convert_script(word, SCRIPT_TRAD), convert_script(word, SCRIPT_SIMP)}
+    return sorted((variant for variant in variants if variant), key=lambda item: (-len(item), item))
+
+
+def special_word_rule(word: str, level: int = 2, enabled: bool = True) -> dict:
+    """一條自訂特殊標題的規則（存進規則清單，special 欄位記著那個字）。"""
+    from .title_blocks import GENERATED_PATTERNS
+    word = word.strip()
+    alternatives = "|".join(re.escape(variant) for variant in special_word_variants(word))
+    # 行首的「?」是轉存時丟掉的表情符號；「續章155/156」「續章335,336」一行兩章，章號用第一個
+    pattern = (r"^[\s【\[(（?]*(?:(?P<arc>[^\s，。！？：；,.!?;]{1,15})\s+)?(?P<word>" + alternatives + r")"
+               r"(?:\s*(?P<number>" + _SPECIAL_NUMBER + r")(?P<more>(?:[/／,，、]\s*(?:" + _SPECIAL_NUMBER + r"))*))?"
+               r"\s*[】\]）)]?"
+               r"(?=$|" + _SPECIAL_SEPARATOR + r"|[（(【\[「『])"
+               r"(?:" + _SPECIAL_SEPARATOR + r"*(?P<title>\S.*?))?\s*$")
+    GENERATED_PATTERNS.add(pattern)
+    return {"name": word, "pattern": pattern, "level": 1 if level == 1 else 2, "enabled": bool(enabled),
+            "special": word}
+
+
 # 巢狀量詞（(a+)+、(.*)* …）在比對失敗時會呈指數成長，是正則卡死的典型寫法。
 # 尋找面板與自訂章節規則共用這個判斷。
 RISKY_REGEX = re.compile(r"\([^)]*[+*][^)]*\)\s*[+*]")
@@ -202,11 +240,14 @@ def preset_match(text):
     （「本文可疑章節」每次開都要把整本每一行比一遍）；內建格式都是安全的正則，直接用 re。"""
     if not text or len(text) > _MAX_RULE_TEXT:
         return None
-    for preset_id, pattern, rule in _PRESET_COMPILED:
-        match = pattern.fullmatch(text)
-        result = _rule_result(match, rule, text) if match else None
-        if result:
-            return preset_id, result
+    for candidate in (text, strip_noise_lead(text)):
+        if not candidate:
+            continue
+        for preset_id, pattern, rule in _PRESET_COMPILED:
+            match = pattern.fullmatch(candidate)
+            result = _rule_result(match, rule, candidate) if match else None
+            if result:
+                return preset_id, result
     return None
 
 
@@ -230,6 +271,13 @@ _MAX_RULE_TEXT = 180
 def _rule_result(match, rule, text):
     """比對成功之後：取出章號與標題，章號不合理或什麼都沒有就不算。"""
     groups = match.groupdict()
+    if rule.get("special"):
+        number_text = (groups.get("number") or "").strip()
+        return {"rule": rule["name"], "level": int(rule["level"]),
+                "number": int(chinese_to_arabic(number_text)) if number_text else 0,
+                "title": (groups.get("title") or "").strip(), "special": rule["special"],
+                "arc": (groups.get("arc") or "").strip(),
+                "tag": groups["word"] + number_text + (groups.get("more") or "")}
     number_text = (groups.get("number") or "").strip()
     number = chinese_to_arabic(number_text) if number_text else 0
     # 規則裡有 title 群組就用它（可以是空的，例如只有章號的「純數字獨立一行」）；
@@ -239,17 +287,32 @@ def _rule_result(match, rule, text):
         return None
     if not title and not number_text:
         return None
-    return {"rule": rule["name"], "level": int(rule["level"]),
-            "number": int(number) if number else 0, "title": title}
+    result = {"rule": rule["name"], "level": int(rule["level"]),
+              "number": int(number) if number else 0, "title": title}
+    volume = chinese_to_arabic(groups["volume"]) if groups.get("volume") else 0
+    if volume > 0 and float(volume).is_integer():
+        result["volume"] = int(volume)
+    return result
 
 
 def match_user_chapter_rule(text, rules, title_check=None):
     """套用使用者規則；規則仍受獨立行、長度與有效擷取內容限制。
-    title_check（「標題結尾」「標題長度」的設定）只管常用格式與積木組合：使用者自己寫的正則照寫法，不另外擋。"""
+    title_check（「標題結尾」「標題長度」的設定）只管常用格式與積木組合：使用者自己寫的正則照寫法，不另外擋。
+    開頭多了「正文」這種雜訊前綴的（「正文 001 山路」），常用格式與積木組合拿掉前綴再比一次。"""
+    result = _match_rules(text, rules, title_check, False)
+    if result is None:
+        rest = strip_noise_lead(text)
+        if rest:
+            result = _match_rules(rest, rules, title_check, True)
+    return result
+
+
+def _match_rules(text, rules, title_check, built_in_only):
     if not text or len(text) > _MAX_RULE_TEXT:
         return None
     for rule in rules:
-        if not rule.get("enabled", True):
+        if not rule.get("enabled", True) or (built_in_only and not (rule.get("preset") or rule.get("blocks")
+                                                                    or rule.get("special"))):
             continue
         pattern_text = rule.get("pattern", "")
         if pattern_text in _TIMED_OUT_PATTERNS:
@@ -263,7 +326,7 @@ def match_user_chapter_rule(text, rules, title_check=None):
         except (KeyError, *safe_regex.errors):
             continue
         result = _rule_result(match, rule, text) if match else None
-        if result and (rule.get("preset") or rule.get("blocks")) and title_check is not None and (
+        if result and (rule.get("preset") or rule.get("blocks") or rule.get("special")) and title_check is not None and (
                 too_long_for_title(text, getattr(title_check, "max_length", len(text)))
                 or (title_check.search(text) and not _CLOSING_QUOTE_TAIL.search(text))):
             continue
