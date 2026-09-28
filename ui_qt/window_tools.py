@@ -659,7 +659,15 @@ class ToolWindowsMixin:
         return lines
 
     def _jump_to_document_end(self, end: bool):
-        """目錄右下角的到最前面／到最後面：目錄捲到頭，本文的游標也到開頭／最後一個字。"""
+        """目錄右下角的到最前面／到最後面：目錄捲到頭並選到第一個／最後一個項目，
+        本文的游標也到開頭／最後一個字。"""
+        target = self.tree.topLevelItem(0)
+        if end and target is not None:
+            target = self.tree.topLevelItem(self.tree.topLevelItemCount() - 1)
+            while target.childCount() and target.isExpanded():
+                target = target.child(target.childCount() - 1)
+        if target is not None:
+            self.tree.setCurrentItem(target)
         if end:
             self.tree.scrollToBottom()
         else:

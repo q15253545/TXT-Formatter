@@ -27,5 +27,6 @@ pending/
 txtissue/
 adtemplate/
 doc-demo/
+anon-cases/
 *.png
 !docs/**/*.png
