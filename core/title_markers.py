@@ -75,12 +75,8 @@ EXPORT_MARKER_REGEX = re.compile(
 def strip_export_markers(text):
     """移除全文的行尾持久標記，回傳（移除後的文字、移除了幾個）。
 
-    匯出給別人看的成品時用。拿掉之後，人工指定的章節、標註為非章節的設定
+    匯出給別人看的成品時用。拿掉之後，人工指定的章節、移出目錄的設定
     都會跟著消失——那些狀態就是靠這些標記存在檔案裡的。"""
     return EXPORT_MARKER_REGEX.subn("", text)
 
 
-def strip_manual_title_marker(text):
-    """相容既有呼叫：只有 [::] 代表人工加入目錄。"""
-    clean, marker = strip_persistent_title_marker(text)
-    return clean, marker == "include"

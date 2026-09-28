@@ -1,7 +1,7 @@
 """「排版設定」卡片（工具列「排版設定」）：排版開關、下拉與套用按鈕。
 
 開關狀態存在面板自己身上；呼叫端只在套用格式時用 current_options() 讀一次。
-「合併下行標題」在章節管理（預覽＋套用到本文），不在這裡。
+「合併下行標題」在章節管理（預覽＋套用到本文），不在這裡；只排選取的章在目錄右鍵。
 """
 
 from PySide6.QtCore import Signal
@@ -13,31 +13,43 @@ from core.format_options import FormatOptions
 from . import i18n, icons
 from .widgets import Divider, IconButton, PanelScroll, ToggleSwitch, make_card_header
 
-# 順序照排版時想事情的順序：空行 → 段落 → 縮排 → 對話。
 _CHECKBOX_FIELDS = [
-    ("remove_extra_empty", "刪除所有空行"),
-    ("add_empty", "章節間插入空行"),
-    ("format_title", "標題前後插入空行"),
-    ("add_paragraph_empty", "段落間插入空行"),
     ("reflow_paragraphs", "整理段落換行"),
     ("remove_extra_spaces", "刪除多餘空格"),
-    ("auto_indent", "增加縮排"),
-    ("remove_indent", "去除縮排"),
     ("format_dialogue", "對話框引號格式化"),
 ]
 
 # 開關不放滑鼠提示：切換之後在狀態列說一句這個開關會做什麼。
 OPTION_STATUS = {
-    "remove_extra_empty": "排版時刪掉所有空行",
-    "add_empty": "排版時在每一章的標題前面空兩行，章與章之間隔開",
-    "format_title": "排版時在標題前後各留一行空行",
-    "add_paragraph_empty": "排版時在段落之間插入一行空行",
     "reflow_paragraphs": "排版時把固定字數斷開的段落接回同一行",
     "remove_extra_spaces": "排版時刪掉行尾與中文字之間的空白，中英數之間的空格保留",
-    "auto_indent": "排版時每段開頭加兩個全形空格",
-    "remove_indent": "排版時去掉每段開頭的空白",
     "format_dialogue": "排版時把對話的引號統一成「」『』",
 }
+
+# 空行、縮排用下拉直接寫出結果：分成幾個開關的話，有些組合會互相打架（兩種縮排同時開、
+# 段落間空行卻沒刪掉原本的空行），也看不出幾個開關合起來是什麼樣子。
+# 選項 → 要打開的排版欄位（沒列的都是關）；第一個是「不改」。
+PARAGRAPH_CHOICES = {"保留原樣": {}, "不空行": {"remove_extra_empty": True},
+                     "空一行": {"remove_extra_empty": True, "add_paragraph_empty": True}}
+TITLE_SPACING_CHOICES = {"不另加": {}, "前後各一行": {"format_title": True},
+                         "前兩行、後一行": {"add_empty": True, "format_title": True}}
+INDENT_CHOICES = {"保留原樣": {}, "兩個全形空格": {"auto_indent": True},
+                  "四個半形空格": {"auto_indent": True, "halfwidth_indent": True}, "不縮排": {"remove_indent": True}}
+
+
+def paragraph_choice(options: FormatOptions) -> str:
+    return "空一行" if options.add_paragraph_empty else "不空行" if options.remove_extra_empty else "保留原樣"
+
+
+def title_spacing_choice(options: FormatOptions) -> str:
+    return "前兩行、後一行" if options.add_empty else "前後各一行" if options.format_title else "不另加"
+
+
+def indent_choice(options: FormatOptions) -> str:
+    if options.auto_indent:
+        return "四個半形空格" if options.halfwidth_indent else "兩個全形空格"
+    return "不縮排" if options.remove_indent else "保留原樣"
+
 
 NUM_STYLE_CHOICES = ["保留原文", "中文數字", "阿拉伯數字"]
 SEP_STYLE_CHOICES = ["保留原文", "半形空格", "全形空格", "冒號"]
@@ -48,13 +60,18 @@ DIGIT_CHOICES = ["不轉換", "轉全形", "轉半形"]
 def describe_options(options: FormatOptions) -> list:
     """目前會生效的排版項目，用來寫在確認視窗裡。
 
-    使用者按「套用格式到選取章節」時看不到格式選項面板（它在另一張卡片上），
+    從目錄右鍵「套用格式到這幾章」時不一定看得到排版設定卡片，
     所以要把即將套用的項目列出來，不能只說「要套用格式嗎」。"""
     items = [label for field, label in _CHECKBOX_FIELDS if getattr(options, field)]
+    for label, choice, unchanged in (("段落之間", paragraph_choice(options), "保留原樣"),
+                                     ("標題前後", title_spacing_choice(options), "不另加"),
+                                     ("段首縮排", indent_choice(options), "保留原樣")):
+        if choice != unchanged:
+            items.append(f"{label}：{choice}")
     if options.num_style != "保留原文":
         items.append(f"章節編號：{options.num_style}")
     if options.sep_style != "保留原文":
-        items.append(f"編號與標題間隔：{options.sep_style}")
+        items.append(f"編號間隔：{options.sep_style}")
     if options.normalize_punct:
         items.append("標點符號：轉全形")
     elif options.halfwidth_punct:
@@ -68,7 +85,6 @@ def describe_options(options: FormatOptions) -> list:
 
 class OptionsPanel(QWidget):
     apply_requested = Signal()
-    apply_selected_requested = Signal()
     # 使用者切換了某個開關：（開關名稱, 開或關, 一句說明）→ 主視窗顯示在狀態列
     option_toggled = Signal(str, bool, str)
     save_one_click_requested = Signal()
@@ -119,25 +135,31 @@ class OptionsPanel(QWidget):
 
         punct_default = "轉全形" if initial.normalize_punct else "轉半形" if initial.halfwidth_punct else "不轉換"
         digit_default = "轉全形" if initial.fullwidth_digits else "轉半形" if initial.halfwidth_digits else "不轉換"
-        self.num_style_combo = self._add_combo(combos, 0, "章節編號", NUM_STYLE_CHOICES, initial.num_style)
-        self.sep_style_combo = self._add_combo(combos, 1, "編號與標題間隔", SEP_STYLE_CHOICES, initial.sep_style)
-        self.punct_combo = self._add_combo(combos, 2, "標點符號", PUNCT_CHOICES, punct_default)
-        self.digit_combo = self._add_combo(combos, 3, "數字", DIGIT_CHOICES, digit_default)
+        # 標籤最多四個字：標籤欄寬是最長的標籤，太長會把每個下拉都擠窄
+        self.paragraph_combo = self._add_combo(combos, 0, "段落之間", list(PARAGRAPH_CHOICES),
+                                               paragraph_choice(initial))
+        self.title_spacing_combo = self._add_combo(combos, 1, "標題前後", list(TITLE_SPACING_CHOICES),
+                                                   title_spacing_choice(initial))
+        self.indent_combo = self._add_combo(combos, 2, "段首縮排", list(INDENT_CHOICES), indent_choice(initial))
+        self.num_style_combo = self._add_combo(combos, 3, "章節編號", NUM_STYLE_CHOICES, initial.num_style)
+        self.sep_style_combo = self._add_combo(combos, 4, "編號間隔", SEP_STYLE_CHOICES, initial.sep_style)
+        self.punct_combo = self._add_combo(combos, 5, "標點符號", PUNCT_CHOICES, punct_default)
+        self.digit_combo = self._add_combo(combos, 6, "數字", DIGIT_CHOICES, digit_default)
 
         body.addStretch(1)
 
-        # 底部三顆按鈕固定在捲動區外面、不跟著捲動，上面一條分隔線跟選項分開：
-        # 存成一鍵排版的組合、只排目錄選取的章、排整份。
+        # 底部按鈕固定在捲動區外面、不跟著捲動，上面一條分隔線跟選項分開：
+        # 存成一鍵排版的組合（不改本文，跟下面的套用再用一條線隔開）、排整份。
         root.addWidget(Divider())
         footer = QVBoxLayout()
         footer.setContentsMargins(16, 12, 16, 14)
         footer.setSpacing(8)
-        self.save_one_click_button = QPushButton("套用到一鍵排版")
+        self.save_one_click_button = QPushButton("保存到一鍵排版")
         self.save_one_click_button.clicked.connect(self.save_one_click_requested.emit)
         footer.addWidget(self.save_one_click_button)
-        self.apply_selected_button = QPushButton("套用格式到選取章節")
-        self.apply_selected_button.clicked.connect(self.apply_selected_requested.emit)
-        footer.addWidget(self.apply_selected_button)
+        footer.addSpacing(4)
+        footer.addWidget(Divider())
+        footer.addSpacing(4)
         self.apply_button = QPushButton("套用格式到全文")
         self.apply_button.setObjectName("primary")
         self.apply_button.setIcon(icons.make_icon("check", "#FFFFFF", 16))
@@ -163,6 +185,10 @@ class OptionsPanel(QWidget):
         punct = i18n.combo_value(self.punct_combo)
         digit = i18n.combo_value(self.digit_combo)
         values = {field: checkbox.isChecked() for field, checkbox in self._checkboxes.items()}
+        for combo, choices in ((self.paragraph_combo, PARAGRAPH_CHOICES),
+                               (self.title_spacing_combo, TITLE_SPACING_CHOICES),
+                               (self.indent_combo, INDENT_CHOICES)):
+            values.update(choices.get(i18n.combo_value(combo), {}))
         return FormatOptions(
             **values,
             normalize_punct=(punct == "轉全形"),
@@ -192,6 +218,9 @@ class OptionsPanel(QWidget):
         """目前的勾選與下拉，存成可以寫進 JSON 的樣子（下次開程式時還原）。"""
         return {
             "checks": {field: checkbox.isChecked() for field, checkbox in self._checkboxes.items()},
+            "paragraph": i18n.combo_value(self.paragraph_combo),
+            "title_spacing": i18n.combo_value(self.title_spacing_combo),
+            "indent": i18n.combo_value(self.indent_combo),
             "num_style": i18n.combo_value(self.num_style_combo),
             "sep_style": i18n.combo_value(self.sep_style_combo),
             "punct": i18n.combo_value(self.punct_combo),
@@ -204,7 +233,10 @@ class OptionsPanel(QWidget):
         for field, checked in checks.items():
             if field in self._checkboxes:
                 self._checkboxes[field].setChecked(bool(checked))
-        for key, combo, choices in (("num_style", self.num_style_combo, NUM_STYLE_CHOICES),
+        for key, combo, choices in (("paragraph", self.paragraph_combo, list(PARAGRAPH_CHOICES)),
+                                    ("title_spacing", self.title_spacing_combo, list(TITLE_SPACING_CHOICES)),
+                                    ("indent", self.indent_combo, list(INDENT_CHOICES)),
+                                    ("num_style", self.num_style_combo, NUM_STYLE_CHOICES),
                                     ("sep_style", self.sep_style_combo, SEP_STYLE_CHOICES),
                                     ("punct", self.punct_combo, PUNCT_CHOICES),
                                     ("digit", self.digit_combo, DIGIT_CHOICES)):
@@ -216,5 +248,6 @@ class OptionsPanel(QWidget):
         避免看起來像「這些勾選也是一鍵排版套用的」而造成誤解。"""
         for checkbox in self._checkboxes.values():
             checkbox.setChecked(False)
-        for combo in (self.num_style_combo, self.sep_style_combo, self.punct_combo, self.digit_combo):
+        for combo in (self.paragraph_combo, self.title_spacing_combo, self.indent_combo, self.num_style_combo,
+                      self.sep_style_combo, self.punct_combo, self.digit_combo):
             combo.setCurrentIndex(0)

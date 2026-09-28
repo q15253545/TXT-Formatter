@@ -1,7 +1,6 @@
 """色彩 token 與樣式表產生。
 
-淺色／深色兩份配色都是從使用者提供的介面設計圖逐一取色訂出來的，
-藍色強調色兩個模式共用同一組數值。
+五種主題（簡約藍、簡約白、淺棕色、深色、純黑）各是一份 token；配色的角色見下面的「配色邏輯」。
 UI 元件一律讀 token、不直接寫死色碼，切換主題只是換一份表再重新套用
 樣式表。大量留白、柔和圓角、以底色深淺區分層次而不是明顯的框線，這個
 方向維持不變。
@@ -91,7 +90,7 @@ SIMPLE_BLUE = Tokens(
     control_text="#243044",
 )
 
-# 簡約白：參考 ChatGPT（theme\light-v1）
+# 簡約白：白底、黑灰色的字與按鈕，只用灰階
 SIMPLE_WHITE = Tokens(
     name="simple_white", label="簡約白", is_dark=False,
     bg="#F9F9F9", surface="#FFFFFF", surface_hover="#F3F3F3", surface_active="#ECECEC", border="#E5E5E5",
@@ -111,7 +110,7 @@ SIMPLE_WHITE = Tokens(
     control_text="#5D5D5D",
 )
 
-# 淺棕色：參考 TextFlow 咖啡杯模式；除了主要按鈕、勾選框與反白以外都是駝色系（theme\sepia-v3）
+# 淺棕色：米色紙張的閱讀感；除了主要按鈕、勾選框與反白以外都是駝色系
 LIGHT_BROWN = Tokens(
     name="light_brown", label="淺棕色", is_dark=False,
     bg="#F1E7D2", surface="#FBF4E4", surface_hover="#F6EDDA", surface_active="#EADDC5", border="#E4DCC9",
@@ -131,7 +130,7 @@ LIGHT_BROWN = Tokens(
     control_text="#4A4130",
 )
 
-# 深色（暖炭）：參考使用者提供的暖色炭黑設計圖（theme\dark-final）
+# 深色（暖炭）：偏暖的炭黑底、磚紅色的互動色
 DARK = Tokens(
     name="dark", label="深色", is_dark=True,
     bg="#1C1714", surface="#261F1B", surface_hover="#302824", surface_active="#3A312C", border="#3A322D",
@@ -174,8 +173,6 @@ BLACK = Tokens(
 # 選單上的順序：淺色系、分隔線、深色系
 THEMES = {tokens.name: tokens for tokens in (SIMPLE_WHITE, SIMPLE_BLUE, LIGHT_BROWN, DARK, BLACK)}
 DEFAULT_THEME = SIMPLE_BLUE.name
-# 舊設定的「淺色」＝簡約藍
-LIGHT = SIMPLE_BLUE
 
 
 def theme_tokens(name: str | None) -> Tokens:
@@ -203,7 +200,7 @@ def blend(color: str, base: str, amount: float) -> str:
 
 
 def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path: str = "",
-                     check_path: str = "", chevron_up_path: str = "") -> str:
+                     check_path: str = "", chevron_up_path: str = "", minus_path: str = "") -> str:
     """chevron_*_path 是目錄樹展開／收合箭頭的暫存 PNG 路徑（見 icons.icon_file_path）。
 
     Qt 的 QSS 有個容易踩到的坑：只要對 ::branch 定義任何一條規則，整個
@@ -807,6 +804,16 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         background: {t.accent};
         border-color: {t.accent};
         image: url({check_path});
+    }}
+    /* 區塊標題本身是勾選框（偵測類型、檢查項目）：字跟 #appTitle 一樣，部分勾選畫「－」 */
+    QCheckBox#groupCheck {{
+        font-size: 15px;
+        font-weight: 600;
+    }}
+    QCheckBox::indicator:indeterminate {{
+        background: {t.accent};
+        border-color: {t.accent};
+        image: url({minus_path});
     }}
 
     QComboBox {{

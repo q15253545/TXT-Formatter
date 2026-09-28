@@ -1,7 +1,8 @@
 """左側「內容檢查」卡片（工具列「內容檢查」）：掃描無關連內容、作者感言與作品資訊、
-標點校對、繁簡轉換，以及只影響畫面的開關：廣告、作者感言與作品資訊的字色，內文空格、章節標記。
+標點校對、章節字數、繁簡轉換，以及只影響畫面的開關：本文字色、內文空格。
 
-字色標示要標哪些類型，照兩個掃描視窗裡（記住的）勾選；顏色的意思寫在檔名列的「說明」裡。
+本文字色一個開關同時標廣告與作者感言、作品資訊；要標哪些類型照兩個掃描視窗裡（記住的）勾選，
+想只看其中一種，把另一個視窗的類型都取消就好。顏色的意思寫在檔名列的「說明」裡。
 """
 
 from PySide6.QtCore import Qt, Signal
@@ -25,9 +26,7 @@ class ContentPanel(QWidget):
     quote_check_requested = Signal()
     word_count_requested = Signal()
     script_convert_requested = Signal()
-    marking_changed = Signal()          # 兩個字色標示開關任一個變了
-    show_markers_toggled = Signal(bool)
-    strip_markers_toggled = Signal(bool)
+    marking_changed = Signal()          # 本文字色開關變了
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -63,25 +62,12 @@ class ContentPanel(QWidget):
             body.addWidget(button)
 
         body.addWidget(Divider())
-        # 廣告、作者感言分開開關；同一行兩種都是時用廣告的顏色。
-        # 只影響畫面的開關一律叫「顯示…」（用詞表見 UI_RULES.md）
-        self.mark_ad_toggle = ToggleSwitch("顯示無關連內容字色")
-        self.mark_note_toggle = ToggleSwitch("顯示作者感言與作品資訊字色")
-        for toggle in (self.mark_ad_toggle, self.mark_note_toggle):
-            toggle.toggled.connect(lambda _checked: self.marking_changed.emit())
-            body.addWidget(toggle)
-
-        # 顯示內文空格；
-        # 章節標記（[::] 這類，寫在檔案裡保存目錄的手動調整）：顯示與否、匯出時要不要拿掉
-        body.addWidget(Divider())
+        # 只影響畫面的開關一律叫「顯示…」（用詞表見 UI_RULES.md）。同一行兩種都是時用廣告的顏色。
+        self.mark_toggle = ToggleSwitch("顯示本文字色")
+        self.mark_toggle.toggled.connect(lambda _checked: self.marking_changed.emit())
+        body.addWidget(self.mark_toggle)
         self.show_whitespace_toggle = ToggleSwitch("顯示內文空格")
         body.addWidget(self.show_whitespace_toggle)
-        self.show_markers_toggle = ToggleSwitch("顯示章節標記")
-        self.show_markers_toggle.toggled.connect(self.show_markers_toggled.emit)
-        body.addWidget(self.show_markers_toggle)
-        self.strip_markers_toggle = ToggleSwitch("匯出時移除章節標記")
-        self.strip_markers_toggle.toggled.connect(self.strip_markers_toggled.emit)
-        body.addWidget(self.strip_markers_toggle)
         body.addStretch(1)
 
     def button(self, signal_name: str) -> HoverIconButton:
@@ -97,17 +83,11 @@ class ContentPanel(QWidget):
             button.setEnabled(enabled)
 
     def marking(self) -> set:
-        """目前要標示哪些："ad"、"note"。"""
-        kinds = set()
-        if self.mark_ad_toggle.isChecked():
-            kinds.add("ad")
-        if self.mark_note_toggle.isChecked():
-            kinds.add("note")
-        return kinds
+        """目前要標示哪些："ad"、"note"（一個開關，兩種一起）。"""
+        return {"ad", "note"} if self.mark_toggle.isChecked() else set()
 
     def set_marking(self, kinds):
         """程式自己設定（還原上次狀態）時不送出 marking_changed。"""
-        for toggle, kind in ((self.mark_ad_toggle, "ad"), (self.mark_note_toggle, "note")):
-            toggle.blockSignals(True)
-            toggle.setChecked(kind in kinds)
-            toggle.blockSignals(False)
+        self.mark_toggle.blockSignals(True)
+        self.mark_toggle.setChecked(bool(kinds))
+        self.mark_toggle.blockSignals(False)

@@ -13,12 +13,11 @@ from core.script_convert import (
     BODY_SCRIPT_CHOICES, BODY_SCRIPT_SAMPLE_SOURCE, BODY_SCRIPT_SAMPLES,
 )
 from . import i18n
-from .widgets import CompactToggle, ScopeToggle, dialog_frame, keep_on_screen
+from .widgets import ScopeToggle, dialog_frame, keep_on_screen
 
 
 class ScriptConvertDialog(QDialog):
-    def __init__(self, parent=None, selected_count: int = 0, mode: str | None = None,
-                 convert_metadata: bool = True):
+    def __init__(self, parent=None, selected_count: int = 0, mode: str | None = None):
         super().__init__(parent)
         self.setWindowTitle("繁簡轉換")
         self.setMinimumWidth(460)
@@ -50,10 +49,6 @@ class ScriptConvertDialog(QDialog):
         i18n.skip(self.sample_label)   # 範例本身是被轉換的內容，不跟著介面切換
         root.addWidget(self.sample_label)
 
-        self.title_check = CompactToggle("一併轉換書名與作者欄位")
-        self.title_check.setChecked(convert_metadata)
-        root.addWidget(self.title_check)
-
         buttons = QDialogButtonBox()
         cancel_button = buttons.addButton("取消", QDialogButtonBox.ButtonRole.RejectRole)
         convert_button = buttons.addButton("開始轉換", QDialogButtonBox.ButtonRole.AcceptRole)
@@ -74,6 +69,3 @@ class ScriptConvertDialog(QDialog):
 
     def selected_only(self) -> bool:
         return self.scope_check.isChecked()
-
-    def convert_metadata(self) -> bool:
-        return self.title_check.isChecked()

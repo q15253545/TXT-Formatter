@@ -17,7 +17,7 @@ def write_text_atomic(path: str, text: str, encoding: str = "utf-8"):
     handle, temporary = tempfile.mkstemp(dir=directory, prefix=".txt-tool-", suffix=".tmp")
     try:
         # 文字模式（newline 用預設值）：Windows 上換行仍然輸出成 CRLF，
-        # 跟原本直接 open(path, "w") 的結果一致。
+        # 跟一般用 open(path, "w") 寫出來的檔案一樣。
         with os.fdopen(handle, "w", encoding=encoding) as target:
             target.write(text)
             target.flush()

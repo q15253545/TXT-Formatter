@@ -212,8 +212,14 @@ def parse_lv2(line):
     return None
 
 
+# A chapter number before the volume word: 「卷六 山路 第532章 第五季」 is a chapter titled 第五季
+_CHAPTER_IN_ARC = re.compile(r"第\s*" + CN_NUM_PATTERN + r"\s*[章回節节折幕]")
+
+
 def parse_lv1(line):
     m = LV1_A_REGEX.match(line)
+    if m and m.group("arc") and _CHAPTER_IN_ARC.search(m.group("arc")):
+        return None
     # 只收「第N卷／部／篇／集」：不帶「第」的「集三千寵愛於一身」會被當成卷，那種寫法是
     # 「自訂章節規則」的常用格式（要求編號後面有分隔）。LV1_A_REGEX 的另一種語序給連續編號用。
     if m and m.group("number"):
@@ -222,7 +228,7 @@ def parse_lv1(line):
                 fields["unit"], fields["title"])
 
     m = LV1_B_REGEX.match(line)
-    if m:
+    if m and not (m.group("arc") and _CHAPTER_IN_ARC.search(m.group("arc"))):
         fields = m.groupdict(default="")
         return (_clean_arc(fields["arc"]), "", 0.0, fields["unit"], fields["title"])
     return None
@@ -433,8 +439,15 @@ _SENTENCE_AFTER_UNIT = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两
                                   r"(?:會|会|就|的時候|的时候|已經|已经)[^，,]{0,15}[，,]")
 
 
+# 季 is also a surname: 「第一季點頭，道：…」 is a character named 第一季. A season heading is written
+# 「第一季」「第一季 山路」「第一季：山路」, never with the text glued to the unit
+_GLUED_SEASON = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*季"
+                           r"(?![完終终結结])[一-鿿A-Za-z]")
+
+
 def not_a_heading(text: str) -> bool:
-    if _PS_PREFIX.match(text) or _END_SENTENCE.search(text) or _UNIT_WORD.match(text)             or _SENTENCE_AFTER_UNIT.match(text):
+    if _PS_PREFIX.match(text) or _END_SENTENCE.search(text) or _UNIT_WORD.match(text) \
+            or _SENTENCE_AFTER_UNIT.match(text) or _GLUED_SEASON.match(text):
         return True
     volume = parse_lv1(text)
     if volume and not parse_lv2(text):
@@ -752,8 +765,8 @@ def clean_merged_subtitle(text):
 
 # 卷的寫法兩種：「第一卷」或「卷一」（每章標題前面都帶著卷，例如「卷一 山路 第一章 出發」）；
 # 卷號後面可以有一段括號附註（「卷十二（终卷） 歸途 第一章 …」）。
-# 「卷一」這種寫法只在「自動補齊卷號＋卷名」都開著時才拆（short_volume=True）；
-# 平常照原本的做法，整行當一章。卷名與章號之間可以沒有空白（「第四卷风流第729节」）。
+# 「卷一」這種寫法只在「自動補齊卷號與卷名」開著時才拆（short_volume=True）；
+# 平常整行當一章。卷名與章號之間可以沒有空白（「第四卷风流第729节」）。
 MIXED_VOLUME_CHAPTER_REGEX = re.compile(
     r"^\s*(?P<vraw>第\s*(?P<vnum1>" + CN_NUM_PATTERN + r")\s*(?P<vunit1>[部卷篇集季])"
     r"|(?P<vunit2>[部卷篇])\s*(?P<vnum2>" + CN_NUM_PATTERN + r")(?=[\s（(]))"

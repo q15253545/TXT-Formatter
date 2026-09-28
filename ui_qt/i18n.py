@@ -21,7 +21,7 @@
 
 from PySide6.QtCore import QLibraryInfo, QTranslator, Qt
 from PySide6.QtWidgets import (
-    QAbstractButton, QComboBox, QLabel, QLineEdit, QMenu, QPlainTextEdit, QTableWidget,
+    QAbstractButton, QComboBox, QLabel, QLineEdit, QMenu, QPlainTextEdit, QTableWidget, QTabWidget,
     QTextEdit, QWidget,
 )
 
@@ -186,6 +186,10 @@ def _translate_widget(widget: QWidget):
         _translate_combo(widget)
     if isinstance(widget, QTableWidget):
         _translate_table_headers(widget)
+    if isinstance(widget, QTabWidget):
+        for index in range(widget.count()):
+            _swap(widget, f"tab{index}", lambda index=index: widget.tabText(index),
+                  lambda text, index=index: widget.setTabText(index, text))
     if isinstance(widget, QMenu):
         _translate_actions(widget)
 

@@ -772,7 +772,7 @@ class RecognitionDialog(QDialog):
         if not hasattr(self, "_tail_toggles"):
             return          # still inside __init__: the settings the counts depend on don't exist yet
         for rule, label in getattr(self, "_custom_count_labels", ()):
-            label.setText(i18n.T(self._custom_count_text(rule)))
+            i18n.set_text(label, self._custom_count_text(rule))
 
     def _custom_count_text(self, rule) -> str:
         check = self.title_check()

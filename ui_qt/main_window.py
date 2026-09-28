@@ -1,4 +1,5 @@
-"""PySide6 主視窗：開檔／編輯／存檔／目錄樹／格式選項／搜尋取代／復原重做。
+"""PySide6 主視窗：畫面、開檔／存檔、目錄樹、排版、搜尋取代、復原重做。工具視窗、右鍵操作、介面狀態
+在 window_tools／window_toc_edit／window_state（mixin）。
 
 章節辨識與排版邏輯完全交給 core.structure_builder，這裡只負責畫面與把使用者
 的操作轉成呼叫 core 純函式的參數。
@@ -6,7 +7,7 @@
 復原／重做刻意不用 QPlainTextEdit 內建的 QTextDocument undo：忽略集合、
 強制卷／章層級、自動標題快取這些「章節結構」狀態跟正文是綁在一起的，
 只復原文字、不復原這些狀態，會讓目錄跟正文對不起來（點右鍵選單的操作
-之後按 Ctrl+Z，文字復原了但目錄還停在操作後的樣子）。所以改成
+之後按 Ctrl+Z，文字復原了但目錄還停在操作後的樣子）。所以是
 整份文字＋結構狀態一起存成快照（見 _checkpoint_document／
 _restore_document_step），輸入文字時用計時器合併成一步，不是每個按鍵
 存一份。
@@ -14,38 +15,27 @@ _restore_document_step），輸入文字時用計時器合併成一步，不是�
 
 import bisect
 import dataclasses
-import threading
-import difflib
 import os
-import re
 import sys
+import time
 from collections import Counter
 
-from PySide6.QtCore import (
-    QByteArray, QEvent, QObject, QProcess, QRect, QRegularExpression, QTimer, Qt, QUrl, Signal,
-)
+from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
 from PySide6.QtGui import (
-    QAction, QColor, QDesktopServices, QFont, QGuiApplication, QKeySequence, QShortcut,
-    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextFormat,
+    QAction, QColor, QDesktopServices, QFont, QKeySequence, QShortcut, QTextBlockFormat, QTextCharFormat,
+    QTextCursor, QTextFormat,
 )
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTextEdit, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPlainTextEdit,
+    QPushButton, QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core.cn_numerals import chinese_to_arabic
 from core.chapter_parse import (
-    CN_NUM_FLOAT_PATTERN, DEFAULT_TITLE_TAIL_ALLOWED, MAX_TITLE_LENGTH, SPECIAL_LEVELS, build_title_check, chapter_unit_signature,
-    heading_number,
-    compact_number_ranges,
-    compact_toc_label, extract_author_from_intro, locate_chapter_number, looks_like_auto_chapter,
-    parse_mixed_volume_chapter_header, render_chapter_number_like,
+    DEFAULT_TITLE_TAIL_ALLOWED, MAX_TITLE_LENGTH, build_title_check, heading_number, compact_number_ranges,
+    extract_author_from_intro,
 )
-from core.ad_scan import (
-    AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, FIX_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT, REPEAT_MIN_LENGTH, scan_ad_candidates,
-)
-from core.quote_check import QUOTE_PROBLEM_LABELS
+from core.ad_scan import AD_CATEGORY_LABELS, FIX_CATEGORIES, scan_ad_candidates
 from core.user_rules import PRESET_RULES, pop_timed_out_rules, preset_match
 from core.collection import (
     chapter_gap_report, group_formal_chapters, missed_middle_chapters, missed_tail_chapters, missed_volumes,
@@ -55,246 +45,49 @@ from core.encoding import detect_line_ending, smart_detect_encoding, strip_stray
 from core.file_io import read_text, read_text_lossy, write_text_atomic
 from core.filename_meta import (
     DEFAULT_COMPLETED_TEMPLATE, DEFAULT_ONGOING_TEMPLATE, build_smart_filename, extract_filename_metadata,
-    filename_fields, filename_template_for, upgrade_template,
+    filename_fields, filename_template_for,
 )
 from core.format_options import FormatOptions
-from core.script_convert import (
-    SCRIPT_SIMP, SCRIPT_TRAD, convert_body_text, convert_script, opencc_available,
-)
-from core.scan_cache import clear_line_caches, freeze_line_caches, warm_line_caches
-from core.word_count import chapter_word_counts
+from core.script_convert import SCRIPT_SIMP, SCRIPT_TRAD, convert_script
+from core.scan_cache import WARM_PHASES, clear_line_caches, freeze_line_caches
 from core.structure_builder import BuildContext, build_document_structure
-from core.insert_suggestions import get_insert_suggestions
 from core.persistence import (
     APP_DATA_DIR, RULES_FILE, UI_STATE_FILE, WINDOW_FILE, _save_json, load_ui_state, load_user_chapter_rules,
-    load_window_state, save_ui_state,
-    save_window_state,
+    save_ui_state, save_window_state,
 )
 from core.title_blocks import TEMPLATE_LABELS, TEMPLATES, block_rule, template
 from core.title_markers import strip_export_markers, strip_persistent_title_marker
 
-from . import app_log, dialogs, i18n, icons, toc_ops
+from . import app_log, dialogs, i18n, icons
 from .app_log import action, log, native_dialog, timed
-from .ad_scan_dialog import AdScanDialog
 from .help_dialog import HelpDialog
 from .content_panel import ContentPanel
-from .duplicate_chapters_dialog import DuplicateChaptersDialog
 from .chapter_panel import ChapterPanel
 from .find_bar import FindBar
 from .filename_dialog import FilenameDialog
-from .insert_title_dialog import InsertTitleDialog
 from .metadata_bar import ENCODING_CODECS, MetadataBar
 from .options_panel import OptionsPanel, describe_options
-from .quote_check_dialog import QuoteCheckDialog
-from .script_convert_dialog import ScriptConvertDialog
-from .recognition_dialog import RecognitionDialog
-from .rules_dialog import RulesDialog
-from .word_count_dialog import WordCountDialog
 from .text_positions import PositionMap
 from .theme import DARK, DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
-    AppWidgetPolisher, Card, ClickableLabel, Editor, IconButton, IconTextButton, LanguageToggle,
-    ElidedLabel, ThemeButton, VDivider,
-    make_card_header,
+    AppWidgetPolisher, Card, ClickableLabel, Editor, IconButton, IconTextButton, LanguageToggle, ElidedLabel,
+    ThemeButton, VDivider, make_card_header,
 )
 from . import __version__
-
-MAX_HISTORY_STEPS = 30
-# 復原歷史每步都保存一份完整正文，必須設上限才不會把記憶體吃光。
-MAX_HISTORY_CHARS = 30_000_000
-# 但無論文件多大，至少保留這麼多步，否則「復原」會形同失效。
-MIN_HISTORY_STEPS = 3
-# 輸入時多久沒有新的按鍵才視為一次「停頓」、存成一個復原步驟；
-# 不是每個按鍵都存一份，那樣復原歷史會被打字過程灌爆。
-TYPING_CHECKPOINT_DELAY_MS = 450
-
-DEFAULT_STRUCTURE_MODE = "自動判斷"
-
-# 本文字級縮放：基準跟 theme.py 樣式表 * 規則的 font-size 一致。
-EDITOR_BASE_FONT_PX = 14
-EDITOR_ZOOM_MIN = 50
-EDITOR_ZOOM_MAX = 300
-
-# 本文裡最多同時畫幾個搜尋反白；超過就只畫目前這一筆。
-MAX_HIGHLIGHT_SPANS = 800
-
-# 四種行尾標記的意義。說明框要列給使用者看，所以文字放在這裡集中管理，
-# 不要散在各個提示字串裡（core/title_markers.py 是判讀它們的地方）。
-MARKER_GUIDE = [
-    ("[::]", "手動加入目錄，這一行是章節標題"),
-    ("[::X]", "保留正文，手動排除於目錄"),
-    ("[::W]", "手動設為作品標題（多作品合集的各部作品）"),
-    ("[::T]", "手動設為特殊標題（序章、後記這類沒有編號的標題）"),
-]
-
-MIN_WINDOW_WIDTH = 680
-# 章節管理的預覽開關：狀態列說明的結尾
-_PREVIEW_NOTE = "（預覽，按「套用到本文」才寫入）"
+from .window_common import (
+    DEFAULT_STRUCTURE_MODE, EDITOR_BASE_FONT_PX, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, MARKER_GUIDE,
+    MARK_SCAN_DELAY_MS, MAX_HIGHLIGHT_SPANS, MAX_HISTORY_CHARS, MAX_HISTORY_STEPS, MIN_HISTORY_STEPS,
+    MIN_WINDOW_WIDTH, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
+    WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals,
+    _NUMBER_WITHOUT_UNIT, _ToolDialogWatcher, _chapter_line_mapper, _diff_line_mapper, _format_line_mapper,
+    _line_opcodes, _settle, _tree_depth, short_toc_label,
+)
+from .window_state import WindowStateMixin
+from .window_tools import ToolWindowsMixin
+from .window_toc_edit import TocEditMixin
 
 
-class _LayoutWatcher(QObject):
-    """盯著幾個元件的 LayoutRequest（內容的大小變了），合併成一次呼叫 callback。"""
-
-    def __init__(self, callback, parent):
-        super().__init__(parent)
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(0)
-        self._timer.timeout.connect(callback)
-
-    def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.LayoutRequest:
-            self._timer.start()
-        return False
-
-
-def _settle(widget):
-    """量最小寬度之前先套好樣式、排好版面：還沒顯示過的卡片（例如開檔時自動打開上次的功能卡片）
-    沒套樣式表的字型與內距，量出來會比實際需要的窄，卡片就被壓到切掉。"""
-    widget.ensurePolished()
-    for child in widget.findChildren(QWidget):
-        child.ensurePolished()
-    layout = widget.layout()
-    if layout is not None:
-        layout.invalidate()
-        layout.activate()
-# 視窗預設大小的上限；實際大小還會被螢幕可用區域夾住（見 _fit_to_screen）。
-DEFAULT_WINDOW_SIZE = (1360, 860)
-WARM_START_DELAY_MS = 500
-WARM_CHUNK_LINES = 600
-# 工具列縮成「只有圖示」的門檻。兩個數字不一樣是為了留遲滯：在邊界附近
-# 拖動視窗時才不會一直來回切換。
-COMPACT_TOOLBAR_WIDTH = 1290
-FULL_TOOLBAR_WIDTH = 1350
-_NUMBER_WITHOUT_UNIT = re.compile(r"^第\s*(" + CN_NUM_FLOAT_PATTERN + r")[\s　]+\S")
-PENDING_LINE_MAP_LIMIT = 32     # 行號位移累積幾次就折成一張表（見 _push_line_map）
-
-
-# 行尾持久標記（連同前面的空白），畫面上要隱藏；規則與 core.title_markers 一致。
-_MARKER_REGEX = QRegularExpression(r"\s*\[::[XxWwTt]?\]\s*$")
-
-# 「第十二章」「第3.5回」「第二卷」這類編號開頭。
-_HEADING_NUMBER_REGEX = re.compile(r"^第\s*" + CN_NUM_FLOAT_PATTERN + r"\s*[章回節节折幕卷集篇部]")
-
-
-def _line_opcodes(old: list, new: list) -> list:
-    """difflib 的 opcodes，但先跳過頭尾相同的行：打字、刪幾行廣告通常只動到中間一小段，
-    整份十幾萬行交給 SequenceMatcher 要 0.15 秒，停下來存一步復原時會頓一下。
-    autojunk 要開著（預設）：小說大量空行會讓比對退化成平方時間。"""
-    limit = min(len(old), len(new))
-    start = 0
-    while start < limit and old[start] == new[start]:
-        start += 1
-    end_old, end_new = len(old), len(new)
-    while end_old > start and end_new > start and old[end_old - 1] == new[end_new - 1]:
-        end_old -= 1
-        end_new -= 1
-    opcodes = [("equal", 0, start, 0, start)] if start else []
-    middle = difflib.SequenceMatcher(None, old[start:end_old], new[start:end_new]).get_opcodes()
-    opcodes += [(tag, a + start, b + start, c + start, d + start) for tag, a, b, c, d in middle]
-    if end_old < len(old):
-        opcodes.append(("equal", end_old, len(old), end_new, len(new)))
-    return opcodes
-
-
-def _diff_line_mapper(opcodes):
-    """由 difflib 的比對結果產生「舊行號 → 新行號」的換算函式。
-
-    沒變的行照位移換算；被刪掉或整段改寫的行，對應到那段改動之前的最後
-    一行——目錄選取回復時就會自然落在前一個章節。"""
-    def map_line(index: int) -> int:
-        for tag, a, b, c, d in opcodes:
-            if a <= index < b:
-                if tag == "equal" or (tag == "replace" and b - a == d - c):
-                    return c + (index - a)
-                return c - 1
-        return index
-    return map_line
-
-
-def _chapter_line_mapper(old_to_new: dict):
-    """排版後整份文字重排，只能靠「每個章節標題從哪一行搬到哪一行」換算；
-    其他行對應到它前面最近的章節標題。"""
-    keys = sorted(old_to_new)
-
-    def map_line(index: int) -> int:
-        if index in old_to_new:
-            return old_to_new[index]
-        position = bisect.bisect_right(keys, index) - 1
-        return old_to_new[keys[position]] if position >= 0 else index
-    return map_line
-
-
-def _format_line_mapper(old_lines: list, new_lines: list, old_to_new: dict):
-    """排版前後的行號換算（游標、畫面用）：先對到同一章的標題，再數「這一章裡第幾個
-    非空行」——排版主要是增減空行與縮排，非空行的順序不變（整理段落換行會接行，就停在
-    接過去的那一行附近）。"""
-    keys = sorted(old_to_new)
-    new_titles = sorted(old_to_new.values())
-
-    def map_line(index: int) -> int:
-        position = bisect.bisect_right(keys, index) - 1
-        if position < 0:
-            return min(index, len(new_lines) - 1)
-        old_title = keys[position]
-        target = sum(1 for row in range(old_title + 1, min(index, len(old_lines) - 1) + 1) if old_lines[row].strip())
-        row = old_to_new[old_title]
-        following = bisect.bisect_right(new_titles, row)
-        end = new_titles[following] if following < len(new_titles) else len(new_lines)
-        while target and row + 1 < end:
-            row += 1
-            if new_lines[row].strip():
-                target -= 1
-        return row
-    return map_line
-
-
-def short_toc_label(full_label: str) -> str:
-    """目錄「簡稱」模式的顯示文字：只留章號，例如「第7章 收获的季节」→「第7章」。
-
-    core.compact_toc_label 只會拿掉章號前面重複的書名／卷名；一般單本小說
-    的目錄本來就沒有那段前綴，切換後什麼都不會變。所以簡稱模式再進一步
-    只保留章號——一眼看出編號是否連續、有沒有重複的章節。抓不到章號的
-    標題（序章、番外、後記…）維持原樣。
-    """
-    compact = compact_toc_label(full_label)
-    match = _HEADING_NUMBER_REGEX.match(compact)
-    return re.sub(r"\s+", "", match.group(0)) if match else compact
-
-
-class _ToolDialogWatcher(QObject):
-    """工具對話框被切回來（重新成為作用中視窗）時，請主視窗檢查本文有沒有
-    改過；改過就讓對話框用新的本文重算。"""
-
-    def __init__(self, window):
-        super().__init__(window)
-        self._window = window
-
-    def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.WindowActivate:
-            self._window._refresh_tool_dialog(watched)
-        return False
-
-
-# 字色標示：本文停止變動這麼久之後才重掃
-MARK_SCAN_DELAY_MS = 800
-
-
-class _MarkScanSignals(QObject):
-    """背景執行緒掃完後，透過這個訊號回到主執行緒（跨執行緒會自動排隊）。"""
-    finished = Signal(int, object, object, object)     # 本文版本、廣告行、作者感言行、目錄（沒重建是 None）
-
-
-def _tree_depth(item) -> int:
-    """目錄節點的深度：最上層是 0。"""
-    depth = 0
-    while item.parent() is not None:
-        item = item.parent()
-        depth += 1
-    return depth
-
-
-class MainWindow(QMainWindow):
+class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     @property
     def tokens(self):
         """目前主題的配色。"""
@@ -321,7 +114,6 @@ class MainWindow(QMainWindow):
         self.auto_titles: dict = {}
         self.force_lv1_chapters: set = set()
         self.force_lv2_chapters: set = set()
-        self.ignored_chapters: set = set()
         self.structure_mode = DEFAULT_STRUCTURE_MODE
         # 標題結尾允許字元（自訂章節規則 → 標題結尾）
         self.title_tail_allowed = DEFAULT_TITLE_TAIL_ALLOWED
@@ -330,15 +122,14 @@ class MainWindow(QMainWindow):
         self.special_levels = {}                    # 「辨識章節」改成卷或章的特殊標題（只記跟預設不同的）
         self._side_width = 0                        # 功能卡片最後的寬度：關掉再打開時照這個寬度
         self.max_title_length = MAX_TITLE_LENGTH    # 「辨識格式 → 標題長度」
-        self._skip_duplicate_titles = False         # 「自動合併重複標題」（預覽）
         self.filename_ongoing = DEFAULT_ONGOING_TEMPLATE     # 匯出檔名格式（連載中／未指定）
         self.filename_completed = DEFAULT_COMPLETED_TEMPLATE  # 匯出檔名格式（已完結）
         self.filename_script = SCRIPT_TRAD                    # 匯出檔名轉繁體／簡體；跟著介面繁簡切換
         self.absorbed_titles: dict = {}             # 重複標題的預覽：重複那一行 → 保留的標題行
         self.absorbed_title_items: set = set()
-        self._infer_volumes = False     # 章節管理的「自動補齊卷號」開關
-        self._infer_volume_names = False  # 「自動補齊卷名」（卷號開著才有作用）
-        self._merge_titles = False      # 「自動合併下行標題」（預覽，套用到本文才寫進去）
+        self._infer_volumes = False     # 章節管理的「自動補齊卷號與卷名」開關
+        self._auto_apply_preview = False  # 「自動套用到一鍵排版」：一鍵排版前先把章節管理的預覽寫進本文
+        self._merge_titles = False      # 「自動合併標題」：下行章名＋重複標題（預覽，套用到本文才寫進去）
         # 合併下行標題的預覽：標題行號 → (章名所在行號, 章名)；目錄上對應的項目
         self.merged_titles: dict = {}
         self.merged_title_items: set = set()
@@ -416,6 +207,8 @@ class MainWindow(QMainWindow):
         self._mark_scan_pending = False
         self._warm_lines = None
         self._warm_position = 0
+        self._warm_phase = 0                # index into WARM_PHASES; phase 0 is what the scan windows need
+        self._warm_waiters: list = []      # run once phase 0 of the idle-time cache warming is done
         self._warm_timer = QTimer(self)
         self._warm_timer.setSingleShot(True)
         self._warm_timer.timeout.connect(self._warm_step)
@@ -492,7 +285,6 @@ class MainWindow(QMainWindow):
         side_layout.setContentsMargins(0, 0, 0, 0)
         self.options_panel = OptionsPanel(self.format_options)
         self.options_panel.apply_requested.connect(self.apply_formatting)
-        self.options_panel.apply_selected_requested.connect(self.format_selected_chapters)
         self.options_panel.option_toggled.connect(self._on_format_option_toggled)
         self.options_panel.save_one_click_requested.connect(self.save_one_click_options)
         self.options_panel.closed.connect(lambda: self._set_active_side_panel(None))
@@ -512,26 +304,22 @@ class MainWindow(QMainWindow):
         self.content_panel.show_whitespace_toggle.clicked.connect(
             lambda on: self._show_status("顯示內文空格：半形 ·、全形 □、Tab →，行尾多餘的空白標紅"
                                          if on else "不顯示內文空格"))
-        self.content_panel.mark_ad_toggle.clicked.connect(
-            lambda on: self._show_status("已顯示無關連內容字色（顏色定義見說明）" if on else "已隱藏無關連內容字色"))
-        self.content_panel.mark_note_toggle.clicked.connect(
-            lambda on: self._show_status("已顯示作者感言與作品資訊字色（顏色定義見說明）" if on
-                                         else "已隱藏作者感言與作品資訊字色"))
+        self.content_panel.mark_toggle.clicked.connect(
+            lambda on: self._show_status("已顯示本文字色：無關連內容、作者感言與作品資訊（顏色定義見說明）"
+                                         if on else "已隱藏本文字色"))
         side_layout.addWidget(self.content_panel)
         self.content_panel.hide()
 
         self.chapter_panel = ChapterPanel()
         self.chapter_panel.closed.connect(lambda: self._set_active_side_panel(None))
         self.chapter_panel.recognition_requested.connect(self.open_recognition_dialog)
-        self.chapter_panel.insert_requested.connect(self.open_insert_title_dialog)
         self.chapter_panel.rules_requested.connect(self.open_rules_dialog)
         self.chapter_panel.merge_duplicates_requested.connect(self.open_duplicate_chapters_dialog)
         self.chapter_panel.check_missing_requested.connect(self.check_missing_chapters)
         self.chapter_panel.missing_mode_changed.connect(self._refresh_missing_report)
         self.chapter_panel.merge_titles_toggled.connect(self._on_merge_titles_toggled)
-        self.chapter_panel.skip_duplicates_toggled.connect(self._on_skip_duplicates_toggled)
         self.chapter_panel.infer_volumes_toggled.connect(self._on_infer_volumes_toggled)
-        self.chapter_panel.infer_volume_names_toggled.connect(self._on_infer_volume_names_toggled)
+        self.chapter_panel.auto_apply_preview_toggled.connect(self._on_auto_apply_preview_toggled)
         self.chapter_panel.apply_volumes_requested.connect(self.apply_toc_preview)
         self.chapter_panel.report_link_activated.connect(self._on_missing_report_link)
         self.chapter_panel.report_closed.connect(self._on_missing_report_closed)
@@ -639,11 +427,10 @@ class MainWindow(QMainWindow):
         editor_header_layout.addWidget(self.breadcrumb_label, 1)
         editor_header_layout.addSpacing(6)
         editor_layout.addWidget(editor_header)
-        # 章節標記平常藏起來（1px 透明字），但它們是真的寫在檔案裡的：顯示與否、
-        # 匯出時要不要拿掉，兩個開關放在「內容檢查」卡片；說明按鈕在檔名列。
-        self.marker_button = self.content_panel.show_markers_toggle
+        # 章節標記平常藏起來（1px 透明字），但它們是真的寫在檔案裡的：顯示與否在「章節管理」卡片，
+        # 匯出時要不要拿掉在匯出設定；說明按鈕在檔名列。
+        self.marker_button = self.chapter_panel.show_markers_toggle
         self.marker_button.toggled.connect(self._on_markers_toggled)
-        self.content_panel.strip_markers_toggled.connect(self._on_strip_markers_toggled)
         self.marker_help_button = self.metadata_bar.help_button
         self.marker_help_button.clicked.connect(self._show_marker_help)
         self._icon_buttons.append(self.marker_help_button)
@@ -771,7 +558,7 @@ class MainWindow(QMainWindow):
             self.language_toggle.setToolTip("需要安裝 OpenCC 才能切換簡體介面")
         self.language_toggle.toggled.connect(self._on_language_toggled)
         layout.addWidget(self.language_toggle)
-        # 匯出 TXT 旁邊的箭頭打開匯出檔名設定；兩顆靠在一起，像同一顆按鈕分成兩半
+        # 匯出 TXT 旁邊的箭頭打開匯出設定；兩顆靠在一起，像同一顆按鈕分成兩半
         save_group = QHBoxLayout()
         save_group.setSpacing(2)
         self.save_button = self._add_text_button(
@@ -865,8 +652,9 @@ class MainWindow(QMainWindow):
         chevron_open = icons.icon_file_path("chevron-down", tokens.icon, 12)
         check_mark = icons.icon_file_path("check", tokens.accent_text, 13)
         chevron_up = icons.icon_file_path("chevron-up", tokens.icon, 12)
+        minus_mark = icons.icon_file_path("minus", tokens.accent_text, 13)
         QApplication.instance().setStyleSheet(
-            build_stylesheet(tokens, chevron_closed, chevron_open, check_mark, chevron_up))
+            build_stylesheet(tokens, chevron_closed, chevron_open, check_mark, chevron_up, minus_mark))
         for button in self._icon_buttons:
             button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
         # 滑鼠移上去時圖示跟文字（樣式表）一起變成 icon_hover；不能按的時候
@@ -922,119 +710,9 @@ class MainWindow(QMainWindow):
             self.find_bar.refresh()
 
     # ------------------------------------------------------------------
-    # 開檔／存檔
+    # 關閉視窗、換檔前確認未匯出的修改
     # ------------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # 視窗大小、多螢幕與顯示比例
-    # ------------------------------------------------------------------
-
-    def _restore_window_geometry(self):
-        """還原上次的大小與位置；沒有紀錄就依螢幕可用區域決定。"""
-        state = load_window_state()
-        if state is not None:
-            self.setGeometry(state["x"], state["y"], state["width"], state["height"])
-            self._start_maximized = state["maximized"]
-        else:
-            screen = QGuiApplication.primaryScreen()
-            available = screen.availableGeometry() if screen else QRect(0, 0, *DEFAULT_WINDOW_SIZE)
-            width = min(DEFAULT_WINDOW_SIZE[0], int(available.width() * 0.9))
-            height = min(DEFAULT_WINDOW_SIZE[1], int(available.height() * 0.9))
-            self.resize(width, height)
-            self.move(available.center().x() - width // 2, available.center().y() - height // 2)
-            self._start_maximized = False
-
-    def _current_screen(self):
-        handle = self.windowHandle()
-        return (handle.screen() if handle is not None else None) or QGuiApplication.primaryScreen()
-
-    def _fit_to_screen(self):
-        """把視窗夾回目前螢幕的可用範圍。
-
-        直立螢幕、換螢幕、改顯示比例之後，原本的大小可能比整個桌面還大，
-        視窗就會有一部分在畫面外而且拉不回來。"""
-        screen = self._current_screen()
-        if screen is None or self.isMaximized() or self.isFullScreen():
-            return
-        available = screen.availableGeometry()
-        width = min(self.width(), available.width())
-        height = min(self.height(), available.height())
-        x = min(max(self.x(), available.left()), available.right() - width + 1)
-        y = min(max(self.y(), available.top()), available.bottom() - height + 1)
-        if (width, height) != (self.width(), self.height()):
-            self.resize(width, height)
-        if (x, y) != (self.x(), self.y()):
-            self.move(x, y)
-
-    def _on_screen_changed(self, _screen=None):
-        """換螢幕或顯示比例改變：圖示要照新的比例重畫，視窗要夾回可用範圍。"""
-        screen = self._current_screen()
-        icons.set_device_scale(screen.devicePixelRatio() if screen else None)
-        self._connect_screen_signals(screen)
-        self._apply_theme()
-        self._fit_to_screen()
-        self._update_toolbar_compact()
-
-    def _connect_screen_signals(self, screen):
-        """只接目前這一台螢幕的訊號，換螢幕時把舊的斷掉。"""
-        previous = getattr(self, "_watched_screen", None)
-        if previous is screen:
-            return
-        if previous is not None:
-            for signal in (previous.geometryChanged, previous.availableGeometryChanged,
-                           previous.logicalDotsPerInchChanged, previous.physicalDotsPerInchChanged):
-                try:
-                    signal.disconnect(self._on_screen_metrics_changed)
-                except (RuntimeError, TypeError):
-                    pass
-        self._watched_screen = screen
-        if screen is not None:
-            for signal in (screen.geometryChanged, screen.availableGeometryChanged,
-                           screen.logicalDotsPerInchChanged, screen.physicalDotsPerInchChanged):
-                signal.connect(self._on_screen_metrics_changed)
-
-    def _on_screen_metrics_changed(self, *_args):
-        self._on_screen_changed()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if getattr(self, "_screen_watch_ready", False):
-            return
-        self._screen_watch_ready = True
-        handle = self.windowHandle()
-        if handle is not None:
-            handle.screenChanged.connect(self._on_screen_changed)
-        self._on_screen_changed()
-        if getattr(self, "_start_maximized", False):
-            self.showMaximized()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_toolbar_compact()
-
-    def _update_toolbar_compact(self):
-        """視窗太窄時，工具列上有文字的按鈕改成只顯示圖示。
-
-        整排按鈕不會換行也不會縮，有文字時最小寬度約 1250；只顯示圖示時約 780，
-        縮放比較大的小螢幕（800 寬）也放得下。"""
-        width = self.width()
-        compact = self._toolbar_compact
-        if not compact and width < COMPACT_TOOLBAR_WIDTH:
-            compact = True
-        elif compact and width > FULL_TOOLBAR_WIDTH:
-            compact = False
-        if compact == self._toolbar_compact:
-            return
-        self._toolbar_compact = compact
-        # 只顯示圖示時間距、左右留白也收一點：要能塞進 800 寬的視窗
-        layout = self.open_button.parentWidget().layout()
-        layout.setSpacing(4 if compact else 8)
-        margin = 8 if compact else 20
-        layout.setContentsMargins(margin, 0, margin, 0)
-        for button in (self.open_button, self.one_click_button, self.format_toggle_button,
-                       self.chapter_toggle_button, self.content_toggle_button, self.find_toggle_button,
-                       self.save_button):
-            button.set_compact(compact)
 
     def _confirm_discard_changes(self) -> bool:
         """換掉目前這份正文之前先問過：可以先匯出、直接捨棄或取消。
@@ -1099,135 +777,9 @@ class MainWindow(QMainWindow):
         event.accept()
 
     # ------------------------------------------------------------------
-    # 記住上次的介面狀態
+    # 開檔
     # ------------------------------------------------------------------
 
-    def _collect_ui_state(self) -> dict:
-        """關閉前的介面狀態。只記「怎麼用這個程式」的偏好，不記跟某個檔案
-        綁在一起的東西（編碼、結構、選取的章節…）。"""
-        side_panel = ("options" if self.options_panel.isVisible() else
-                      "chapter" if self.chapter_panel.isVisible() else
-                      "content" if self.content_panel.isVisible() else None)
-        state = dict(self._ui_state)      # 各對話框的勾選已經記在這裡
-        state.update({
-            "theme": self.theme_name,
-            "simplified": self.language_toggle.is_simplified(),
-            "editor_zoom": self._editor_zoom,
-            "show_title_markers": self.marker_button.isChecked(),
-            "strip_markers_on_export": self._strip_markers_on_export,
-            "show_whitespace": self.content_panel.show_whitespace_toggle.isChecked(),
-            "metadata_expanded": self.metadata_bar.toggle_button.isChecked(),
-            "side_panel": side_panel if self.raw_lines and any(self.raw_lines) else
-            (self._pending_side_panel or side_panel),
-            "splitter": bytes(self.splitter.saveState().toHex()).decode("ascii"),
-            "side_width": self.side_card.width() if self.side_card.isVisible() else self._side_width,
-            "toc_compact_mode": self.toc_compact_mode,
-            "format_options": self.options_panel.options_state(),
-            "missing_mode": self.chapter_panel.missing_mode(),
-            "title_tail_allowed": self.title_tail_allowed,
-            "title_tail_custom": self.title_tail_custom,
-            "find_regex": self.find_bar.regex_button.isChecked(),
-            "mark_colors": sorted(self.content_panel.marking()),
-            "infer_volumes": self._infer_volumes,
-            "infer_volume_names": self._infer_volume_names,
-            "merge_titles": self._merge_titles,
-            "skip_duplicate_titles": self._skip_duplicate_titles,
-            "disabled_words": sorted(self.disabled_words),
-            "special_levels": dict(self.special_levels),
-            "max_title_length": self.max_title_length,
-            "filename_ongoing": self.filename_ongoing,
-            "filename_completed": self.filename_completed,
-        })
-        return state
-
-    def _restore_ui_state(self):
-        """把上次的介面狀態套回來。每一項都獨立檢查，存檔裡缺的或壞的就用預設值。"""
-        state = self._ui_state
-        # 更早的設定只記「dark_mode」：深色就對應到深色主題。
-        name = state.get("theme")
-        if name not in THEMES:
-            name = DARK.name if state.get("dark_mode") else None
-        if name and name != self.theme_name:
-            self.set_theme(name)
-        if state.get("simplified") and i18n.available():
-            self.language_toggle.set_simplified(True)
-            self._on_language_toggled(True)
-        zoom = state.get("editor_zoom")
-        if isinstance(zoom, int) and EDITOR_ZOOM_MIN <= zoom <= EDITOR_ZOOM_MAX and zoom != 100:
-            self._editor_zoom = zoom
-            self._apply_editor_style()
-            self.zoom_label.setText(f"{zoom}%")
-        self._strip_markers_on_export = bool(state.get("strip_markers_on_export", True))
-        self.content_panel.strip_markers_toggle.blockSignals(True)
-        self.content_panel.strip_markers_toggle.setChecked(self._strip_markers_on_export)
-        self.content_panel.strip_markers_toggle.blockSignals(False)
-        if state.get("show_title_markers"):
-            self.marker_button.setChecked(True)
-        if state.get("show_whitespace"):
-            self.content_panel.show_whitespace_toggle.setChecked(True)
-        if state.get("metadata_expanded"):
-            self.metadata_bar.toggle_button.setChecked(True)
-        self.toc_compact_mode = bool(state.get("toc_compact_mode"))
-        self.toc_compact_button.setChecked(self.toc_compact_mode)
-        if isinstance(state.get("format_options"), dict):
-            self.options_panel.restore_options_state(state["format_options"])
-        mode = state.get("missing_mode")
-        if isinstance(mode, str) and self.chapter_panel.missing_mode_combo.findText(mode) >= 0:
-            i18n.set_combo_value(self.chapter_panel.missing_mode_combo, mode)
-        if isinstance(state.get("title_tail_custom"), str):
-            self.title_tail_custom = state["title_tail_custom"]
-        tail = state.get("title_tail_allowed")
-        if isinstance(tail, str):
-            self.title_tail_allowed = tail
-        elif isinstance(state.get("allowed_tail_chars"), str):
-            # 舊設定「標題結尾例外字元」：在預設之外多放行的字
-            self.title_tail_allowed = DEFAULT_TITLE_TAIL_ALLOWED + state["allowed_tail_chars"]
-        splitter = state.get("splitter")
-        if isinstance(splitter, str) and splitter:
-            try:
-                self.splitter.restoreState(QByteArray.fromHex(splitter.encode("ascii")))
-            except (ValueError, UnicodeError):
-                pass
-        if isinstance(state.get("side_width"), int):
-            self._side_width = max(0, state["side_width"])
-        if state.get("find_regex"):
-            self.find_bar.regex_button.setChecked(True)
-        # 左側面板要等有檔案才能開（沒有檔案時那些按鈕是停用的）。
-        if state.get("side_panel") in ("options", "chapter", "content"):
-            self._pending_side_panel = state["side_panel"]
-        self._infer_volumes = bool(state.get("infer_volumes"))
-        self._infer_volume_names = bool(state.get("infer_volume_names"))
-        self.chapter_panel.set_infer_volumes(self._infer_volumes, self._infer_volume_names)
-        self._merge_titles = bool(state.get("merge_titles"))
-        self.chapter_panel.set_merge_titles(self._merge_titles)
-        self._skip_duplicate_titles = bool(state.get("skip_duplicate_titles"))
-        self.chapter_panel.set_skip_duplicates(self._skip_duplicate_titles)
-        if isinstance(state.get("disabled_words"), list):
-            self.disabled_words = frozenset(str(word) for word in state["disabled_words"])
-        if isinstance(state.get("special_levels"), dict):
-            self.special_levels = {key: level for key, level in state["special_levels"].items()
-                                   if key in SPECIAL_LEVELS and level in (1, 2) and level != SPECIAL_LEVELS[key]}
-        if isinstance(state.get("max_title_length"), int) and 10 <= state["max_title_length"] <= 200:
-            self.max_title_length = state["max_title_length"]
-        for key in ("filename_ongoing", "filename_completed"):
-            if isinstance(state.get(key), str) and state[key].strip():
-                setattr(self, key, upgrade_template(state[key]))
-        marks = state.get("mark_colors")
-        if marks is True:
-            marks = ["ad", "note"]                   # 第一版只有一個開關
-        if isinstance(marks, list):
-            # 有檔案之後才會真的掃描、上色
-            self.content_panel.set_marking({kind for kind in marks if kind in ("ad", "note")})
-        # 還原過程中各項會在狀態列留下訊息，最後統一改回來。
-        self._show_status("準備就緒")
-
-    def _open_pending_side_panel(self):
-        """第一次開檔後，把上次開著的左側面板打開。"""
-        panel = {"options": self.options_panel, "chapter": self.chapter_panel,
-                 "content": self.content_panel}.get(self._pending_side_panel)
-        self._pending_side_panel = None
-        if panel is not None and not self.side_card.isVisible():
-            self._set_active_side_panel(panel)
 
     @action
     def open_file(self):
@@ -1290,7 +842,6 @@ class MainWindow(QMainWindow):
         self.auto_titles = {}
         self.force_lv1_chapters = set()
         self.force_lv2_chapters = set()
-        self.ignored_chapters = set()
         self.structure_mode = DEFAULT_STRUCTURE_MODE
         self.format_options.structure = DEFAULT_STRUCTURE_MODE
         self.toc_full_labels = {}
@@ -1345,24 +896,58 @@ class MainWindow(QMainWindow):
         每批幾毫秒、開檔後等一下才開始；換了檔案就從新的檔案重來。"""
         self._warm_lines = list(self.raw_lines)
         self._warm_position = 0
+        self._warm_phase = 0
         self._warm_timer.start(WARM_START_DELAY_MS)
 
     def _drop_line_caches(self):
         self._warm_timer.stop()
         self._warm_lines = None
+        self._warm_waiters.clear()
         clear_line_caches()
+
+    def _caches_cold(self) -> bool:
+        """Are the scan windows' caches (phase 0) still far from warm? A little left (a small file, or warming
+        almost done) is just finished now — well under half a second — so only a large file makes a scan wait."""
+        if self._warm_lines is None or self._warm_phase > 0:
+            return False
+        if len(self._warm_lines) - self._warm_position > WARM_NOW_LINES:
+            return True
+        WARM_PHASES[0](self._warm_lines[self._warm_position:])
+        self._warm_position = len(self._warm_lines)
+        self._warm_step()           # moves on to the next phase and runs anything waiting
+        return False
+
+    def _when_warm(self, callback):
+        """Run callback once the scan windows' caches are warm; the warming continues right away in idle-time
+        chunks, so the window stays usable meanwhile."""
+        self._warm_waiters.append(callback)
+        self._warm_timer.start(0)
 
     def _warm_step(self):
         lines = self._warm_lines
         if lines is None:
             return
         if self._warm_position >= len(lines):
-            self._warm_lines = None
-            freeze_line_caches()
-            return
-        end = self._warm_position + WARM_CHUNK_LINES
-        warm_line_caches(lines[self._warm_position:end])
-        self._warm_position = end
+            if self._warm_phase == 0:
+                waiters, self._warm_waiters = self._warm_waiters, []
+                for callback in waiters:
+                    callback()
+            self._warm_phase += 1
+            self._warm_position = 0
+            if self._warm_phase >= len(WARM_PHASES):
+                self._warm_lines = None
+                freeze_line_caches()
+                return
+        warm = WARM_PHASES[self._warm_phase]
+        # A scan window waiting gets bigger slices (one per 40 ms) so its results come sooner; the window still
+        # gets a turn between slices.
+        deadline = time.perf_counter() + (WARM_WAITING_SLICE if self._warm_waiters else 0)
+        while True:
+            end = self._warm_position + WARM_CHUNK_LINES
+            warm(lines[self._warm_position:end])
+            self._warm_position = end
+            if self._warm_position >= len(lines) or time.perf_counter() >= deadline:
+                break
         self._warm_timer.start(0)
 
     def _read_document(self, path: str, encoding: str):
@@ -1500,17 +1085,8 @@ class MainWindow(QMainWindow):
         # 這一步已經包含還沒被計時器存起來的輸入，計時器不用再跑。
         self._typing_checkpoint_timer.stop()
         # 先把「記在第幾行」的章節狀態對到目前的文字，否則快照會是「新的文字
-        # 配舊的行號」，復原之後強制層級、忽略標記會落在別行。
-        self._sync_raw_lines()
-        text = (self._synced_text if self._synced_text_version == self._text_version
-                and self._synced_text is not None else self.editor.toPlainText())
-        state = (
-            text,
-            frozenset(self.ignored_chapters),
-            frozenset(self.force_lv1_chapters),
-            frozenset(self.force_lv2_chapters),
-            dict(self.auto_titles),
-        )
+        # 配舊的行號」，復原之後強制層級、自動標題記錄會落在別行。
+        state = self._document_state()
         if self._history_position >= 0 and self._history[self._history_position] == state:
             self._update_history_buttons()
             return
@@ -1519,6 +1095,18 @@ class MainWindow(QMainWindow):
         self._trim_history()
         self._history_position = len(self._history) - 1
         self._update_history_buttons()
+
+    def _document_state(self) -> tuple:
+        """目前的正文與章節結構（復原歷史的一步）。"""
+        self._sync_raw_lines()
+        text = (self._synced_text if self._synced_text_version == self._text_version
+                and self._synced_text is not None else self.editor.toPlainText())
+        return (
+            text,
+            frozenset(self.force_lv1_chapters),
+            frozenset(self.force_lv2_chapters),
+            dict(self.auto_titles),
+        )
 
     def _trim_history(self):
         """同時套用步數上限與記憶體預算，從最舊的步驟開始丟棄。"""
@@ -1538,6 +1126,20 @@ class MainWindow(QMainWindow):
     def _redo(self):
         self._restore_document_step(1)
 
+    def _restore_state(self, state: tuple):
+        """換回 _document_state() 存下的一份正文與章節結構（不記成新的一步）。"""
+        self._restoring_history = True
+        try:
+            self._set_editor_text(state[0], "diff")
+            # 先記下行號位移（目錄選取要用），再用快照整組覆蓋章節狀態。
+            self._adopt_lines(state[0].split("\n"), remap_state=False)
+            self.force_lv1_chapters = set(state[1])
+            self.force_lv2_chapters = set(state[2])
+            self.auto_titles = dict(state[3])
+            self._rebuild_toc()
+        finally:
+            self._restoring_history = False
+
     @timed
     def _restore_document_step(self, direction: int):
         self._typing_checkpoint_timer.stop()
@@ -1548,20 +1150,8 @@ class MainWindow(QMainWindow):
         if not 0 <= target < len(self._history):
             self._show_status("沒有上一步了" if direction < 0 else "沒有下一步了")
             return
-        state = self._history[target]
-        self._restoring_history = True
-        try:
-            self._set_editor_text(state[0], "diff")
-            # 先記下行號位移（目錄選取要用），再用快照整組覆蓋章節狀態。
-            self._adopt_lines(state[0].split("\n"), remap_state=False)
-            self.ignored_chapters = set(state[1])
-            self.force_lv1_chapters = set(state[2])
-            self.force_lv2_chapters = set(state[3])
-            self.auto_titles = dict(state[4])
-            self._history_position = target
-            self._rebuild_toc()
-        finally:
-            self._restoring_history = False
+        self._restore_state(self._history[target])
+        self._history_position = target
         self._update_history_buttons()
         self._show_status("已回到上一步" if direction < 0 else "已重做下一步")
 
@@ -1762,12 +1352,16 @@ class MainWindow(QMainWindow):
     @action
     def open_filename_dialog(self):
         dialog = FilenameDialog(self.filename_ongoing, self.filename_completed, self.filename_script,
-                                self._filename_fields(), self.metadata_bar.status(), self)
+                                self._filename_fields(), self.metadata_bar.status(), self,
+                                strip_markers=self._strip_markers_on_export)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.filename_ongoing, self.filename_completed = dialog.result_ongoing, dialog.result_completed
         self.filename_script = dialog.result_script
-        self._show_status(i18n.T("匯出檔名：") + self._suggest_export_filename(), translated=True)
+        self._strip_markers_on_export = dialog.result_strip_markers
+        self._show_status(i18n.T("匯出檔名：") + self._suggest_export_filename()
+                          + i18n.T("；匯出時移除章節標記" if self._strip_markers_on_export else "；匯出時保留章節標記"),
+                          translated=True)
 
     # ------------------------------------------------------------------
     # 目錄樹
@@ -1812,7 +1406,6 @@ class MainWindow(QMainWindow):
         self.auto_titles = {}
         self.force_lv1_chapters = set()
         self.force_lv2_chapters = set()
-        self.ignored_chapters = set()
         self.tree.clear()
         self._cut_state = None
         self._breadcrumb_rows = []
@@ -1853,14 +1446,12 @@ class MainWindow(QMainWindow):
             auto_titles=self.auto_titles,
             force_lv1_chapters=self.force_lv1_chapters,
             force_lv2_chapters=self.force_lv2_chapters,
-            ignored_chapters=self.ignored_chapters,
             invalid_tail_regex=self._title_check(),
             infer_volumes=self._infer_volumes,
-            infer_volume_names=self._infer_volumes and self._infer_volume_names,
             merge_titles=self._merge_titles,
             disabled_words=self.disabled_words,
             special_levels=self.special_levels,
-            skip_duplicate_titles=self._skip_duplicate_titles,
+            skip_duplicate_titles=self._merge_titles,
         )
 
     @timed
@@ -2222,7 +1813,7 @@ class MainWindow(QMainWindow):
             self._applying_formats = previous_flag
 
     def _strike_absorbed_titles(self, cursor: QTextCursor):
-        """自動合併重複標題的預覽：會被刪掉的那一行畫刪除線、用非原文色（本文不改）。"""
+        """自動合併標題（重複標題）的預覽：會被刪掉的那一行畫刪除線、用非原文色（本文不改）。"""
         if not self.absorbed_titles:
             return
         strike = QTextCharFormat()
@@ -2235,10 +1826,6 @@ class MainWindow(QMainWindow):
                 cursor.setPosition(block.position())
                 cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
                 cursor.mergeCharFormat(strike)
-
-    def _on_strip_markers_toggled(self, on: bool):
-        self._strip_markers_on_export = on
-        self._show_status("匯出時會移除章節標記（章節標記定義見說明）" if on else "匯出時保留章節標記")
 
     def _on_markers_toggled(self, shown: bool):
         """切換只影響顯示，一個字都不會動到。"""
@@ -2273,7 +1860,7 @@ class MainWindow(QMainWindow):
         self.close()
 
     def _show_marker_help(self):
-        """檔名列的問號（說明）：章節標記、本文字色、自動補齊卷號／卷名、設定檔位置。"""
+        """檔名列的問號（說明）：章節標記、本文字色、自動補齊卷號與卷名、設定檔位置。"""
         dialog = HelpDialog(self.tokens, [(mark, i18n.T(detail)) for mark, detail in MARKER_GUIDE],
                             APP_DATA_DIR, self, on_restore=self.restore_defaults)
         dialog.exec()
@@ -2489,9 +2076,7 @@ class MainWindow(QMainWindow):
                 found.setdefault(number, []).append((row, f"寫法是「{names[preset]}」，這種常用格式沒打開"))
                 continue
             if marker == "exclude":
-                reason = "標註為非章節"
-            elif row in self.ignored_chapters:
-                reason = "標註為非章節"
+                reason = "已移出目錄"
             elif tail is not None and tail.search(text):
                 reason = f"標題以「{text[-1]}」結尾"
             else:
@@ -2610,8 +2195,8 @@ class MainWindow(QMainWindow):
     @action
     def one_click_format(self):
         """一鍵排版：不管面板目前勾了什麼，直接套用一組固定的常用組合——
-        刪除所有空行、章節插入空行、增加縮排、標題前後空行、編號與標題間隔
-        用半形空格（使用者按過「套用到一鍵排版」就用存下來的組合）。不做合併下行標題：
+        段落之間不空行、標題前兩行後一行、段首兩個全形空格、編號間隔用半形空格
+        （使用者按過「保存到一鍵排版」就用存下來的組合）。不做合併下行標題：
         那是猜測，要在章節管理預覽過再套用。
 
         排版前先檢查缺章與高信心廣告：排版會重排整份文字，事後比較難回頭
@@ -2619,21 +2204,35 @@ class MainWindow(QMainWindow):
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
+        # 「自動套用到一鍵排版」：章節管理的預覽先寫進本文，跟排版算同一步；取消時整個退回
+        preview = self._toc_preview_lines() if self._auto_apply_preview else None
+        before = None
+        message = "已套用一鍵排版，可以按 Ctrl+Z 復原"
+        if preview is not None:
+            before = self._document_state()
+            self._set_editor_text("\n".join(preview[0]), "diff")
+            # the replacement restarts the typing timer: stopped here, the sync below would save the
+            # preview as a step of its own (typed text was already saved by _set_editor_text)
+            self._typing_checkpoint_timer.stop()
+            self._sync_raw_lines()
+            self._ensure_toc_current()
+            message = "已套用一鍵排版（" + "、".join(preview[1]) + "），可以按 Ctrl+Z 復原"
         options = self._one_click_options()
         # 排版前的檢查直接用排版那一次的辨識結果，不另外再建一次結構（大檔每次要好幾秒）。
         applied = self._apply_format_options(
-            options, "已套用一鍵排版，可以按 Ctrl+Z 復原",
-            confirm=self._confirm_one_click_warnings)
+            options, message, confirm=self._confirm_one_click_warnings)
         if not applied:
+            if before is not None:
+                self._restore_state(before)
             self._show_status("已取消一鍵排版")
             return
         self.options_panel.reset_to_defaults()
 
     def _one_click_options(self) -> FormatOptions:
-        """一鍵排版的組合：使用者按過「套用到一鍵排版」就用存下來的，否則用內建的。"""
+        """一鍵排版的組合：使用者按過「保存到一鍵排版」就用存下來的，否則用內建的。"""
         saved = self._ui_state.get("one_click_options")
         if isinstance(saved, dict):
-            # 合併下行標題不在排版做（章節管理預覽＋套用），舊存檔裡的 merge_title 忽略
+            # 合併下行標題不在一鍵排版做（在章節管理預覽再套用）：存下來的組合裡有 merge_title 也不用
             known = {field.name for field in dataclasses.fields(FormatOptions)} - {"structure", "merge_title"}
             values = {key: value for key, value in saved.items() if key in known}
             try:
@@ -2703,7 +2302,7 @@ class MainWindow(QMainWindow):
             result.chapter_index_map[node] - 1: dict(record)
             for node, record in result.chapter_records.items()
         }
-        for attribute in ("ignored_chapters", "force_lv1_chapters", "force_lv2_chapters"):
+        for attribute in ("force_lv1_chapters", "force_lv2_chapters"):
             old = getattr(self, attribute)
             setattr(self, attribute, {
                 result.chapter_index_map[node] - 1
@@ -2732,7 +2331,7 @@ class MainWindow(QMainWindow):
         每一段自己跑一次 build_document_structure，再把結果接回原文；段落
         邊界一律切在章節標題上，所以不會排版到沒選的章。行號對照用每個
         章節標題「從哪一行搬到哪一行」精確算出來，不靠 difflib 猜，
-        強制層級與忽略標記才不會跑掉（跟剪下／貼上同一套作法）。"""
+        強制層級與自動標題記錄才不會跑掉（跟剪下／貼上同一套作法）。"""
         if not self.raw_lines:
             return
         self._sync_raw_lines()
@@ -2750,11 +2349,11 @@ class MainWindow(QMainWindow):
         chapter_count = self._selected_chapter_count()
         lines_count = sum(end - start for start, end in spans)
         if not dialogs.confirm(
-            self, "套用格式到選取章節",
+            self, "套用格式到選取的章",
             f"將對選取的 {chapter_count} 章（共 {lines_count} 行）套用：\n\n"
             + "\n".join(f"• {item}" for item in items)
             + "\n\n沒有選到的章節維持原樣，所以整本書可能看起來不一致"
-              "（章節編號樣式、編號與標題間隔這類設定尤其明顯）。\n"
+              "（章節編號樣式、編號間隔這類設定尤其明顯）。\n"
               "此操作算一步，可以用「上一步」完整復原。\n\n是否繼續？",
         ):
             return
@@ -2813,8 +2412,8 @@ class MainWindow(QMainWindow):
                          if start <= row < end},
             force_lv1_chapters=shift(self.force_lv1_chapters),
             force_lv2_chapters=shift(self.force_lv2_chapters),
-            ignored_chapters=shift(self.ignored_chapters),
             invalid_tail_regex=self._title_check(),
+            infer_volumes=self._infer_volumes,
             disabled_words=self.disabled_words,
             special_levels=self.special_levels,
         )
@@ -2826,7 +2425,7 @@ class MainWindow(QMainWindow):
 
     def _remap_chapter_state(self, moved_titles: dict):
         """排版後行號全變了，把以行號為鍵的章節狀態搬到新行號。"""
-        for attribute in ("ignored_chapters", "force_lv1_chapters", "force_lv2_chapters"):
+        for attribute in ("force_lv1_chapters", "force_lv2_chapters"):
             old = getattr(self, attribute)
             setattr(self, attribute, {moved_titles[row] for row in old if row in moved_titles})
         self.auto_titles = {moved_titles[row]: record
@@ -2904,6 +2503,11 @@ class MainWindow(QMainWindow):
         self._show_status(i18n.T(f"已取代 {count} 處，可以按 Ctrl+Z 復原"))
 
     def _find_on_matches_changed(self, spans: list[tuple[int, int]], current_index: int):
+        if not spans:
+            # nothing to convert: don't build the whole-document position map (it happens on every keystroke
+            # while the find panel is open)
+            self.editor.setExtraSelections([])
+            return
         tokens = self.tokens
         document = self.editor.document()
         positions = self._positions()
@@ -2928,698 +2532,7 @@ class MainWindow(QMainWindow):
         self.editor.setExtraSelections(selections)
 
     # ------------------------------------------------------------------
-    # 插入章節標題
-    # ------------------------------------------------------------------
-
-    @action
-    def open_insert_title_dialog(self):
-        if not self.editor.toPlainText().strip():
-            return
-        insert_index = self.editor.textCursor().blockNumber()
-        self._sync_raw_lines()
-        insert_index = min(insert_index, len(self.raw_lines))
-        recognized_indices = sorted(set(self.chapter_raw_map.values()))
-        suggestions, default_kind = get_insert_suggestions(self.raw_lines, recognized_indices, insert_index)
-        self._close_tool_dialogs()
-
-        dialog = InsertTitleDialog(suggestions, default_kind, self)
-        try:
-            accepted = dialog.exec() == QDialog.DialogCode.Accepted
-            generated = dialog.result_text
-        finally:
-            dialog.deleteLater()
-        if not accepted:
-            return
-
-        lines = self.raw_lines
-        previous_is_blank = insert_index == 0 or not lines[insert_index - 1].strip()
-        current_is_blank = insert_index >= len(lines) or not lines[insert_index].strip()
-        leading = "" if previous_is_blank else "\n"
-        trailing = "\n" if current_is_blank else "\n\n"
-        generated_line = insert_index + (0 if previous_is_blank else 1)
-
-        block = self.editor.document().findBlockByNumber(insert_index)
-        position = block.position() if block.isValid() else len(self.editor.toPlainText())
-        cursor = self.editor.textCursor()
-        cursor.beginEditBlock()
-        cursor.setPosition(position)
-        cursor.insertText(leading + generated + trailing)
-        cursor.endEditBlock()
-
-        self._sync_raw_lines()
-        self._rebuild_toc()
-        for item, raw_index in self.chapter_raw_map.items():
-            if raw_index == generated_line:
-                self.tree.setCurrentItem(item)
-                self._on_tree_item_clicked(item, 0)
-                break
-        self._checkpoint_document()
-        self._show_status(f"已新增章節：{generated}")
-
-    # ------------------------------------------------------------------
-    # 廣告掃描
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # 工具對話框（非模式）
-    # ------------------------------------------------------------------
-
-    def _open_tool_dialog(self, key: str, create, reload, on_closed=None):
-        """開一個「開著也能編輯本文」的工具對話框。
-
-        非模式，本文隨時可以改，所以對話框手上的本文快照可能過期：每次切回對話框時
-        （_ToolDialogWatcher）比對文字版本，改過就呼叫 reload 用新的本文重算。
-
-        create()：建立對話框；reload(dialog)：用目前的本文重算；
-        on_closed(dialog, accepted)：關閉時要做的事（記住設定、套用結果）。"""
-        existing = self._tool_dialogs.get(key)
-        if existing is not None:
-            existing.showNormal()
-            existing.raise_()
-            existing.activateWindow()
-            return None
-        # 一次只開一個工具視窗：開新的之前先把其他開著的關掉（照常記住它們的設定）。
-        self._close_tool_dialogs()
-        dialog = create()
-        dialog._tool_version = self._text_version
-        dialog._tool_reload = reload
-        dialog.installEventFilter(self._tool_dialog_watcher)
-        dialog.finished.connect(
-            lambda result, d=dialog: self._on_tool_dialog_finished(key, d, result, on_closed))
-        # 在表格上點兩下：跳到本文那一行，並把焦點交給本文，可以直接改。
-        for table in dialog.findChildren(QTableWidget):
-            table.doubleClicked.connect(self._focus_editor_from_tool)
-        self._tool_dialogs[key] = dialog
-        dialog.show()
-        return dialog
-
-    def _close_tool_dialogs(self):
-        for dialog in list(self._tool_dialogs.values()):
-            dialog.reject()
-
-    def _focus_editor_from_tool(self, *_args):
-        self.activateWindow()
-        self.raise_()
-        self.editor.setFocus()
-
-    def _refresh_tool_dialog(self, dialog) -> bool:
-        """本文在對話框上次分析之後改過，就讓它重算；有重算回傳 True。"""
-        if getattr(dialog, "_tool_version", None) is None or dialog._tool_version == self._text_version:
-            return False
-        self._sync_raw_lines()
-        if self.raw_lines and any(line.strip() for line in self.raw_lines):
-            self._ensure_toc_current()
-        dialog._tool_reload(dialog)
-        dialog._tool_version = self._text_version
-        return True
-
-    def _on_tool_dialog_finished(self, key, dialog, result, on_closed):
-        self._tool_dialogs.pop(key, None)
-        self.editor.setExtraSelections([])
-        try:
-            if on_closed is not None:
-                on_closed(dialog, result == QDialog.DialogCode.Accepted)
-        finally:
-            # 對話框留著整份 raw_lines 與整張表格；明確釋放，不然一直開一直
-            # 累積到主視窗關閉為止。
-            dialog.deleteLater()
-
-    def _replace_text_from_tool(self, lines: list):
-        """工具對話框改完的整份本文：拆行、接行、刪行會改變行數，交給
-        _sync_raw_lines 比對新舊兩版搬章節狀態。"""
-        self._set_editor_text("\n".join(lines), "diff")
-        self._sync_raw_lines()
-        self._rebuild_toc()
-        self._checkpoint_document()
-
-    @action
-    def open_word_count_dialog(self):
-        """章節字數：每一章正文的字數，標出特別短、特別長的章（core/word_count.py）。"""
-        if not self.editor.toPlainText().strip():
-            return
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-
-        def create():
-            dialog = WordCountDialog(*self._word_counts(), self)
-            dialog.chapterSelected.connect(lambda row: self._jump_to_line(row + 1))
-            return dialog
-
-        def reload(dialog):
-            dialog.reload(*self._word_counts())
-
-        self._open_tool_dialog("word_count", create, reload)
-
-    def _word_counts(self):
-        """目錄裡沒有子項目的（章、序章、番外…）各算一段：從標題下一行到下一個目錄項目之前。"""
-        title_rows = sorted(set(self.chapter_raw_map.values()))
-        sections = []
-        for item, row in sorted(self.chapter_raw_map.items(), key=lambda pair: pair[1]):
-            if item.childCount():
-                continue
-            position = bisect.bisect_right(title_rows, row)
-            end = title_rows[position] if position < len(title_rows) else len(self.raw_lines)
-            parent = item.parent()
-            volume = self.toc_full_labels.get(parent, parent.text(0)) if parent is not None else ""
-            sections.append((row, end, self.toc_full_labels.get(item, item.text(0)), volume))
-        return chapter_word_counts(self.raw_lines, sections)
-
-    def _tool_scope(self):
-        spans = self._selected_section_spans()
-        return spans, len(self._selected_toc_items()) if spans else 0
-
-    # ------------------------------------------------------------------
-    # 合併重複章節
-    # ------------------------------------------------------------------
-
-    @action
-    def open_duplicate_chapters_dialog(self):
-        """相鄰、章號相同的章節列成清單，勾選後合併（判斷規則見 core/duplicate_chapters.py）。"""
-        if not self.editor.toPlainText().strip():
-            return
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-
-        def create():
-            dialog = DuplicateChaptersDialog(self.raw_lines, set(self.chapter_raw_map.values()), self)
-            dialog.groupHighlighted.connect(self._highlight_ad_candidate)
-            dialog.mergeReady.connect(lambda lines, d=dialog: self._apply_duplicate_merge(d, lines))
-            return dialog
-
-        def reload(dialog):
-            dialog.reload(self.raw_lines, set(self.chapter_raw_map.values()))
-
-        self._open_tool_dialog("duplicate_chapters", create, reload)
-
-    @action
-    def _apply_duplicate_merge(self, dialog, lines: list):
-        if self._refresh_tool_dialog(dialog):
-            dialogs.info(dialog, "本文已修改", "本文在檢查之後改過了，已經重新檢查，請確認勾選的項目後再按一次。")
-            return
-        removed = len(self.raw_lines) - len(lines)
-        self.editor.setExtraSelections([])
-        self._replace_text_from_tool(lines)
-        self._refresh_tool_dialog(dialog)
-        self._show_status(f"已合併重複章節（刪除 {removed} 行標題與空行），可以按 Ctrl+Z 復原")
-
-    # ------------------------------------------------------------------
-    # 廣告掃描
-    # ------------------------------------------------------------------
-
-    def _saved_ad_categories(self) -> set:
-        """掃描無關連內容視窗記住的偵測類型（不含重複段落，那在自己的分頁）。
-
-        記住的是「上次勾了哪些」；之後才新增的類型上次根本還沒有，不能當成
-        使用者取消了它——那些照預設勾起來。"""
-        own = {key for key in AD_ONLY_CATEGORIES if key != "repeat"}
-        saved = self._ui_state.get("ad_categories")
-        if not isinstance(saved, list):
-            return own
-        known = self._ui_state.get("ad_categories_known")
-        if not isinstance(known, list):
-            known = [key for key in AD_CATEGORY_LABELS if key != "author_note"]   # 還沒有「作者感言」類型時存的設定
-        return (set(saved) | (set(AD_CATEGORY_LABELS) - set(known))) & own
-
-    def _saved_note_categories(self) -> set:
-        saved = self._ui_state.get("note_categories")
-        return set(saved) & set(NOTE_CATEGORIES) if isinstance(saved, list) else set(NOTE_CATEGORIES)
-
-    def _saved_repeat_settings(self):
-        saved = self._ui_state.get("repeat_settings")
-        if (isinstance(saved, list) and len(saved) == 2
-                and all(isinstance(value, int) and value > 0 for value in saved)):
-            return saved[0], saved[1]
-        return REPEAT_MIN_LENGTH, REPEAT_MIN_COUNT
-
-    @action
-    def open_ad_scan_dialog(self):
-        self._open_scan_dialog("ads")
-
-    @action
-    def open_note_scan_dialog(self):
-        self._open_scan_dialog("notes")
-
-    def _open_scan_dialog(self, mode: str):
-        """mode＝"ads"：掃描無關連內容（含重複段落分頁）；"notes"：作者感言與作品資訊。"""
-        if not self.editor.toPlainText().strip():
-            return
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        spans = self._selected_section_spans()
-        enabled = self._saved_ad_categories() if mode == "ads" else self._saved_note_categories()
-
-        def create():
-            dialog = AdScanDialog(self.raw_lines, self, selected_ranges=spans,
-                                  selected_count=self._selected_chapter_count(),
-                                  enabled_categories=enabled,
-                                  title_rows=set(self.chapter_raw_map.values()),
-                                  mode=mode, repeat_settings=self._saved_repeat_settings())
-            dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
-            dialog.deletionReady.connect(lambda lines, d=dialog: self._apply_ad_deletion(d, lines))
-            return dialog
-
-        def reload(dialog):
-            ranges, count = self._tool_scope()
-            dialog.reload(self.raw_lines, ranges, count, title_rows=set(self.chapter_raw_map.values()))
-
-        def on_closed(dialog, _accepted):
-            if mode == "ads":
-                self._ui_state["ad_categories"] = sorted(dialog.enabled_categories())
-                self._ui_state["ad_categories_known"] = sorted(AD_CATEGORY_LABELS)
-                self._ui_state["repeat_settings"] = list(dialog.repeat_settings())
-            else:
-                self._ui_state["note_categories"] = sorted(dialog.enabled_categories())
-            if self.content_panel.marking():
-                self._schedule_mark_scan(0)      # 勾選的類型可能變了，照新的重標
-
-        self._open_tool_dialog("ad_scan" if mode == "ads" else "note_scan", create, reload, on_closed)
-
-    # ------------------------------------------------------------------
-    # 字色標示（內容檢查卡片底下的開關）
-    # ------------------------------------------------------------------
-
-    def _on_merge_titles_toggled(self, on: bool):
-        self._merge_titles = on
-        self._rebuild_preview_toc()
-        self._show_status("已開啟自動合併下行標題：「第1章」接上下一行的章名" + _PREVIEW_NOTE
-                          if on else "已關閉自動合併下行標題")
-
-    def _on_skip_duplicates_toggled(self, on: bool):
-        self._skip_duplicate_titles = on
-        self._rebuild_preview_toc()
-        self._show_status("已開啟自動合併重複標題：連續出現兩次的同一章標題只留第一個" + _PREVIEW_NOTE
-                          if on else "已關閉自動合併重複標題")
-
-    def _rebuild_preview_toc(self):
-        if self.raw_lines and any(line.strip() for line in self.raw_lines):
-            self._sync_raw_lines()
-            self._rebuild_toc()
-
-    def _on_infer_volumes_toggled(self, on: bool):
-        self._infer_volumes = on
-        self._rebuild_preview_toc()
-        self._show_status("已開啟自動補齊卷號：從卷結尾行、章號重新起算推出缺少的卷" + _PREVIEW_NOTE
-                          if on else "已關閉自動補齊卷號")
-
-    def _on_infer_volume_names_toggled(self, on: bool):
-        self._infer_volume_names = on
-        self._rebuild_preview_toc()
-        self._show_status("已開啟自動補齊卷名：卷結尾行寫的卷名一起補上" + _PREVIEW_NOTE
-                          if on else "已關閉自動補齊卷名")
-
-    def _on_marking_changed(self):
-        """廣告、作者感言兩個開關任一個變了：先把關掉的那一種清掉，還有開著的就重掃。"""
-        kinds = self.content_panel.marking()
-        for kind in ("ad", "note"):
-            if kind not in kinds:
-                self._mark_rows[kind] = set()
-        self._refresh_title_formats()
-        if kinds:
-            self._schedule_mark_scan(0)
-        else:
-            self._mark_timer.stop()
-            self._mark_rows_version = None
-
-    def _schedule_mark_scan(self, delay_ms: int = MARK_SCAN_DELAY_MS):
-        if not self.raw_lines or not any(line.strip() for line in self.raw_lines):
-            return
-        self._mark_timer.start(delay_ms)
-
-    def _start_mark_scan(self):
-        """在背景執行緒掃描（大檔要將近一秒），掃完才回到主執行緒上色。
-        掃描期間本文又改了：結果作廢，等這一輪結束再掃一次。"""
-        kinds = self.content_panel.marking()
-        if not kinds:
-            return
-        if self._mark_scan_running:
-            self._mark_scan_pending = True
-            return
-        self._sync_raw_lines()
-        lines = list(self.raw_lines)
-        version = self._text_version
-        # 目錄過期（剛改過本文）：掃完回來上色前本來要在畫面上重建目錄（大檔半秒以上），
-        # 改成在同一個背景執行緒裡一起辨識，畫面只負責把結果畫上去。
-        toc_ctx = None
-        title_rows = set(self.chapter_raw_map.values())
-        if self._toc_text_version != version:
-            toc_ctx = dataclasses.replace(
-                self._build_context(), raw_lines=lines, user_chapter_rules=list(self.user_chapter_rules),
-                auto_titles=dict(self.auto_titles), force_lv1_chapters=set(self.force_lv1_chapters),
-                force_lv2_chapters=set(self.force_lv2_chapters), ignored_chapters=set(self.ignored_chapters))
-        # 網頁字元碼只是換字，不是廣告：不標廣告色
-        ad_categories = (self._saved_ad_categories() - FIX_CATEGORIES) | {"repeat"} if "ad" in kinds else set()
-        note_categories = self._saved_note_categories() if "note" in kinds else set()
-        min_length, min_count = self._saved_repeat_settings()
-        self._mark_scan_running = True
-
-        def work():
-            try:
-                structure = None
-                rows = title_rows
-                if toc_ctx is not None:
-                    structure = build_document_structure(toc_ctx, apply_format=False, write_text=False)
-                    rows = set(structure.chapter_raw_map.values())
-                ad_rows, note_rows = set(), set()
-                if ad_categories:
-                    for candidate in scan_ad_candidates(lines, ad_categories, None, rows,
-                                                        repeat_min_length=min_length, repeat_min_count=min_count):
-                        ad_rows.update(range(candidate["start"], candidate["end"] + 1))
-                if note_categories:
-                    for candidate in scan_ad_candidates(lines, note_categories, None, rows):
-                        note_rows.update(range(candidate["start"], candidate["end"] + 1))
-                self._mark_signals.finished.emit(version, ad_rows, note_rows, structure)
-            except Exception:          # 背景執行緒的例外不會出現在畫面上：記下來、結束這一輪
-                log.exception("字色標示掃描失敗")
-                self._mark_signals.finished.emit(-1, set(), set(), None)
-
-        threading.Thread(target=work, name="mark-scan", daemon=True).start()
-
-    def _on_mark_scan_finished(self, version: int, ad_rows, note_rows, structure=None):
-        self._mark_scan_running = False
-        if self._mark_scan_pending or version != self._text_version:
-            self._mark_scan_pending = False
-            if self.content_panel.marking() and version != -1:
-                self._schedule_mark_scan()
-            return
-        kinds = self.content_panel.marking()
-        if not kinds:
-            return
-        # 同一行兩種都是：用廣告的顏色。開關在掃描期間被關掉的那一種不畫。
-        ad_rows = set(ad_rows) if "ad" in kinds else set()
-        note_rows = set(note_rows) - ad_rows if "note" in kinds else set()
-        self._mark_rows = {"ad": ad_rows, "note": note_rows}
-        self._mark_rows_version = version
-        if structure is not None and self._toc_text_version != version:
-            self._populate_tree(structure)
-            self._warn_timed_out_rules()
-        self._refresh_title_formats()
-
-    def _apply_mark_colors(self, cursor: QTextCursor):
-        """把掃描到的廣告／作者感言那幾行換成對應的字色（章節標題不動）。
-        只在掃描結果對應的就是目前這一版本文時才畫：行號過期會標錯行。"""
-        if not self.content_panel.marking() or self._mark_rows_version != self._text_version:
-            return
-        document = self.editor.document()
-        title_rows = set(self.chapter_raw_map.values())
-        for key, color in (("note", self.tokens.note_mark_text), ("ad", self.tokens.ad_mark_text)):
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(color))
-            for row in sorted(self._mark_rows[key] - title_rows):
-                block = document.findBlockByNumber(row)
-                if not block.isValid() or block.length() <= 1:
-                    continue
-                cursor.setPosition(block.position())
-                cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
-                cursor.mergeCharFormat(fmt)
-
-    @action
-    def _apply_ad_deletion(self, dialog, lines: list):
-        if self._refresh_tool_dialog(dialog):
-            dialogs.info(dialog, "本文已修改", "本文在掃描之後改過了，已經重新掃描，請確認勾選的項目後再按一次。")
-            return
-        removed, replaced = dialog.result_summary
-        self.editor.setExtraSelections([])
-        self._replace_text_from_tool(lines)
-        self._refresh_tool_dialog(dialog)
-        done = ([f"刪除 {removed} 行"] if removed else []) + ([f"換回 {replaced} 行的網頁字元碼"] if replaced else [])
-        self._show_status(i18n.T("已" + "、".join(done or ["處理完成"]) + "，可以按 Ctrl+Z 復原"), translated=True)
-
-    def _highlight_ad_candidate(self, start_line: int, end_line: int):
-        document = self.editor.document()
-        start_block = document.findBlockByNumber(start_line)
-        end_block = document.findBlockByNumber(end_line)
-        if not start_block.isValid() or not end_block.isValid():
-            return
-        tokens = self.tokens
-        # 整行（含行尾空白處）用較淡的底色，跟文字選取同色系但淺一階：
-        # 使用者在這幾行裡選字複製時，選取範圍才看得出來。
-        selections = []
-        block = start_block
-        while block.isValid() and block.blockNumber() <= end_block.blockNumber():
-            selection = QTextEdit.ExtraSelection()
-            selection.cursor = QTextCursor(block)
-            char_format = selection.format
-            char_format.setBackground(QColor(tokens.jump_bg))
-            char_format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-            selection.format = char_format
-            selections.append(selection)
-            block = block.next()
-        self.editor.setExtraSelections(selections)
-
-        jump_cursor = self.editor.textCursor()
-        jump_cursor.setPosition(start_block.position())
-        self.editor.setTextCursor(jump_cursor)
-        self.editor.centerCursor()
-
-    @action
-    def open_quote_check_dialog(self):
-        """標點校對；勾選的項目可以自動修正，其餘開著對話框直接在本文改。"""
-        if not self.editor.toPlainText().strip():
-            return
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        spans = self._selected_section_spans()
-        # 記的是「關掉了哪些」：之後新增的檢查項目預設是開的。
-        # 舊版記的是「開著哪些」（quote_kinds），只認得當時那四種。
-        disabled = self._ui_state.get("quote_disabled_kinds")
-        if not isinstance(disabled, list):
-            saved = self._ui_state.get("quote_kinds")
-            disabled = [kind for kind in ("unclosed", "unpaired", "leading_punct", "missing_separator")
-                        if kind not in saved] if isinstance(saved, list) else []
-        enabled = set(QUOTE_PROBLEM_LABELS) - set(disabled)
-
-        def create():
-            dialog = QuoteCheckDialog(self.raw_lines, self, selected_ranges=spans,
-                                      selected_count=self._selected_chapter_count(),
-                                      enabled_kinds=enabled,
-                                      title_rows=set(self.chapter_raw_map.values()))
-            dialog.problemSelected.connect(self._jump_to_line)
-            dialog.fixesReady.connect(lambda lines, count, d=dialog: self._apply_quote_fixes(d, lines, count))
-            return dialog
-
-        def reload(dialog):
-            ranges, count = self._tool_scope()
-            dialog.reload(self.raw_lines, ranges, count, title_rows=set(self.chapter_raw_map.values()))
-
-        def on_closed(dialog, _accepted):
-            # 「分隔線不一致」不是勾選框（由視窗裡的下拉決定），不記
-            self._ui_state["quote_disabled_kinds"] = sorted(
-                set(QUOTE_PROBLEM_LABELS) - dialog.enabled_kinds() - {"separator_style"})
-            self._ui_state.pop("quote_kinds", None)
-
-        self._open_tool_dialog("quote_check", create, reload, on_closed)
-
-    @action
-    def _apply_quote_fixes(self, dialog, lines: list, count: int):
-        if self._refresh_tool_dialog(dialog):
-            dialogs.info(dialog, "本文已修改", "本文在檢查之後改過了，已經重新檢查，請確認勾選的項目後再按一次。")
-            return
-        self.editor.setExtraSelections([])
-        self._replace_text_from_tool(lines)
-        # 對話框不關：用修正後的本文重新檢查，剩下要手動處理的繼續列著。
-        self._refresh_tool_dialog(dialog)
-        self._show_status(f"已修正 {count} 處標點問題，可以按 Ctrl+Z 復原")
-
-    @action
-    def open_script_convert_dialog(self):
-        """全文（或選取章節）繁簡轉換。"""
-        if not self.editor.toPlainText().strip():
-            return
-        if not opencc_available():
-            dialogs.info(self, "需要 OpenCC",
-                         "繁簡轉換需要 OpenCC 套件，目前的執行環境沒有安裝。\n\n"
-                         "安裝指令：pip install opencc-python-reimplemented")
-            return
-        self._close_tool_dialogs()
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        spans = self._selected_section_spans()
-        dialog = ScriptConvertDialog(self, selected_count=self._selected_chapter_count() if spans else 0,
-                                     mode=self._ui_state.get("script_mode"),
-                                     convert_metadata=bool(self._ui_state.get("script_metadata", True)))
-        try:
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            mode = dialog.mode()
-            selected_only = dialog.selected_only()
-            with_metadata = dialog.convert_metadata()
-            self._ui_state["script_mode"] = mode
-            self._ui_state["script_metadata"] = with_metadata
-        finally:
-            dialog.deleteLater()
-
-        lines = list(self.raw_lines)
-        if selected_only and spans:
-            rows = [row for start, end in spans for row in range(start, min(end, len(lines)))]
-            scope_text = f"{len(self._selected_toc_items())} 個章節"
-        else:
-            rows = range(len(lines))
-            scope_text = "全文"
-        generated = "\n".join(self._convert_lines_with_progress(lines, rows, mode))
-
-        if with_metadata:
-            self.metadata_bar.title_input.setText(
-                convert_body_text(self.metadata_bar.book_title(), mode))
-            self.metadata_bar.author_input.setText(
-                convert_body_text(self.metadata_bar.author(), mode))
-
-        # 自動辨識的作品／標題快取記著舊文字，重建目錄時會把舊名稱寫回去
-        # ：轉換範圍內的一起轉，建新的 dict，不改到復原快照共用的。
-        converted_rows = set(rows)
-        self.auto_titles = {
-            row: ({**record, "title": convert_body_text(record.get("title", ""), mode)}
-                  if row in converted_rows else dict(record))
-            for row, record in self.auto_titles.items()
-        }
-
-        # 逐字轉換，行數與行的順序都沒變，所以 raw_lines 直接換掉就好，
-        # 不用跑 _adopt_lines 的 difflib 比對，章節狀態的行號也原封不動。
-        self.raw_lines = generated.split("\n")
-        self._set_editor_text(generated, lambda row: row)
-        self._mark_synced(generated)
-        # 章節標題的字變了，目錄要重新辨識。
-        self._rebuild_toc()
-        self._checkpoint_document()
-        self._show_status(f"已將{scope_text}做「{mode}」轉換，可以按 Ctrl+Z 復原")
-
-    def _convert_lines_with_progress(self, lines: list, rows, mode: str) -> list:
-        """逐塊做繁簡轉換，中間更新狀態列。
-
-        OpenCC 是逐字轉換，2.6 MB 實測要 6 秒、5.8 MB 的檔案十幾秒；
-        一口氣轉完的話視窗整個沒反應，看起來就像當掉（卡死監看也會記一筆）。
-        分塊之間讓 Qt 重畫一次，並在轉換期間停用視窗，避免中途又按了別的功能。
-
-        OpenCC 不會增減換行，所以把一塊接起來轉、再切回去，行數仍然 1:1。
-        """
-        rows = list(rows)
-        total = len(rows)
-        chunk_size = 2000
-        self.setEnabled(False)
-        self._long_task_running = True
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            for index in range(0, total, chunk_size):
-                block = rows[index:index + chunk_size]
-                converted = convert_body_text("\n".join(lines[row] for row in block), mode)
-                for row, text in zip(block, converted.split("\n")):
-                    lines[row] = text
-                if total > chunk_size:
-                    self._show_status(
-                        i18n.T("繁簡轉換中…") + f" {min(index + chunk_size, total)} / {total}",
-                        translated=True)
-                    QApplication.processEvents()
-        finally:
-            QApplication.restoreOverrideCursor()
-            self._long_task_running = False
-            self.setEnabled(True)
-        return lines
-
-    def _jump_to_line(self, line_number: int):
-        """跳到某一行並整行反白（檢查清單點選用，1 起算）。"""
-        self._highlight_ad_candidate(line_number - 1, line_number - 1)
-
-    # ------------------------------------------------------------------
-    # 自訂章節規則
-    # ------------------------------------------------------------------
-
-    @action
-    def open_recognition_dialog(self):
-        """辨識章節：積木組合、單位與特殊標題、標題長度與章名結尾。非模式：開著時可以從本文複製一行貼上。"""
-        self._sync_raw_lines()
-        if self.raw_lines and any(line.strip() for line in self.raw_lines):
-            self._ensure_toc_current()
-
-        def create():
-            dialog = RecognitionDialog(self.user_chapter_rules, lambda: list(self.raw_lines), self,
-                                       known_rows=set(self.chapter_raw_map.values()),
-                                       title_tail_allowed=self.title_tail_allowed,
-                                       title_tail_custom=self.title_tail_custom,
-                                       disabled_words=self.disabled_words, max_title_length=self.max_title_length,
-                                       special_levels=self.special_levels)
-            dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
-            return dialog
-
-        def reload(dialog):
-            dialog.reload(self.raw_lines, set(self.chapter_raw_map.values()))
-
-        self._open_tool_dialog("recognition", create, reload, self._on_recognition_dialog_closed)
-
-    @action
-    def _on_recognition_dialog_closed(self, dialog, accepted: bool):
-        if not accepted or dialog.result_rules is None:
-            return
-        new = (dialog.result_rules, dialog.result_title_tail, dialog.result_title_tail_custom or "",
-               dialog.result_disabled_words, dialog.result_max_title_length, dialog.result_special_levels)
-        old = (self.user_chapter_rules, self.title_tail_allowed, self.title_tail_custom, self.disabled_words,
-               self.max_title_length, self.special_levels)
-        (self.user_chapter_rules, self.title_tail_allowed, self.title_tail_custom, self.disabled_words,
-         self.max_title_length, self.special_levels) = new
-        if new != old:
-            # 排版時記下的自動標題會優先採用：辨識的設定改了就照新的設定重新辨識（作品名稱照舊）
-            self.auto_titles = {row: record for row, record in self.auto_titles.items()
-                                if record.get("kind") == "work"}
-        self.rescan_toc()
-        self._show_status("已保存辨識章節的設定")
-
-    def open_rules_dialog(self):
-        """自訂章節規則（自己寫的正則、本文可疑章節）。非模式：開著時可以從本文複製一行貼到「從範例產生」。"""
-        self._sync_raw_lines()
-        # 目錄在打字之後可能還沒重建，行號會對不上：已經是章節的行被當成
-        # 「可疑章節」再列一次，或真正沒辨識到的反而被跳過。
-        if self.raw_lines and any(line.strip() for line in self.raw_lines):
-            self._ensure_toc_current()
-
-        def create():
-            dialog = RulesDialog(self.user_chapter_rules, lambda: list(self.raw_lines), self,
-                                 known_rows=set(self.chapter_raw_map.values()),
-                                 max_title_length=self.max_title_length)
-            dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
-            return dialog
-
-        def reload(dialog):
-            dialog.reload(self.raw_lines, set(self.chapter_raw_map.values()))
-
-        self._open_tool_dialog("rules", create, reload, self._on_rules_dialog_closed)
-
-    @action
-    def _on_rules_dialog_closed(self, dialog, accepted: bool):
-        result_rules = dialog.result_rules
-        result_lines = dialog.result_lines
-        volume_rows = set(dialog.result_volume_rows)
-        if not accepted or result_rules is None:
-            return
-        if result_lines is not None and dialog._tool_version != self._text_version:
-            # 按下按鈕前本文又改了（理論上切回對話框時就會重算，這裡保險）：
-            # 勾選的行號已經對不上，只存規則，不動本文。
-            result_lines = None
-            self._show_status("本文在勾選之後改過了，只保存規則；要加入的行請重新勾選")
-        added = 0
-        if result_lines is not None:
-            # 只在行尾加 [::]，行數不變，章節狀態的行號也不用搬。
-            added = sum(1 for old, new in zip(self.raw_lines, result_lines) if old != new)
-            generated = "\n".join(result_lines)
-            self.raw_lines = list(result_lines)
-            self._set_editor_text(generated, lambda row: row)
-            self._mark_synced(generated)
-            # 卷級格式逐行加入時要設成卷；[::] 本身只代表「這一行是標題」。
-            self.force_lv1_chapters |= volume_rows
-            self.force_lv2_chapters -= volume_rows
-        detection_changed = result_rules != self.user_chapter_rules
-        self.user_chapter_rules = result_rules
-        if detection_changed:
-            # 排版時會把當時目錄裡的標題都記成自動標題，重掃時優先採用；規則、標題結尾改了，
-            # 就要照新的設定重新辨識，不然停用的規則、關掉的標點都改不動目錄。作品名稱照舊。
-            self.auto_titles = {row: record for row, record in self.auto_titles.items()
-                                if record.get("kind") == "work"}
-        self.rescan_toc()
-        if result_lines is not None:
-            self._checkpoint_document()
-            self._show_status(f"已把 {added} 行加入目錄，並保存 {len(self.user_chapter_rules)} 條自訂章節規則")
-        elif dialog._tool_version == self._text_version:
-            self._show_status(f"已保存 {len(self.user_chapter_rules)} 條自訂章節規則")
-
-    # ------------------------------------------------------------------
-    # 目錄右鍵選單：整理／合併／連續編號／設層級／忽略／刪除
+    # 本文與行號：工作版本（raw_lines）、整份替換後的行號換算
     # ------------------------------------------------------------------
 
     def _sync_raw_lines(self):
@@ -3687,7 +2600,7 @@ class MainWindow(QMainWindow):
         self._push_line_map(_diff_line_mapper(opcodes))
         if not remap_state:
             return
-        for attribute in ("ignored_chapters", "force_lv1_chapters", "force_lv2_chapters"):
+        for attribute in ("force_lv1_chapters", "force_lv2_chapters"):
             setattr(self, attribute, {mapping[i] for i in getattr(self, attribute) if i in mapping})
         self.auto_titles = {mapping[i]: value for i, value in self.auto_titles.items()
                             if i in mapping and old_lines[i] == new_lines[mapping[i]]}
@@ -3718,885 +2631,4 @@ class MainWindow(QMainWindow):
         cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
         cursor.insertText(new_text)
 
-    def _chapter_nodes_share_unit(self, nodes: list) -> bool:
-        """判斷這些節點是不是同一種章節類型（例如都是「第…章」，
-        不能混到「第…集」）。任一節點判斷不出類型，就保守視為不一致。"""
-        if len(nodes) < 2:
-            return True
-        signatures = set()
-        for node in nodes:
-            raw_idx = self.chapter_raw_map.get(node)
-            if raw_idx is None or raw_idx >= len(self.raw_lines):
-                return False
-            clean, _marker = strip_persistent_title_marker(self.raw_lines[raw_idx].strip())
-            signature = chapter_unit_signature(clean)
-            if signature is None:
-                return False
-            signatures.add(signature)
-        return len(signatures) == 1
-
-    def _build_toc_context_menu(self, pos):
-        """只負責組出選單，不呼叫 exec()——方便測試時不用真的彈出視窗。
-
-        只放「現在按得下去、而且有意義」的項目：灰掉的項目只會讓人猜為什麼
-        不能按。剪下之後就不再顯示「剪下」，改成貼上與取消；已經是章的不顯示
-        「設為章標題」，卷也一樣。"""
-        item = self.tree.itemAt(pos)
-        if item is None:
-            return None
-        if item not in self.tree.selectedItems():
-            self.tree.setCurrentItem(item)
-        selected = self._selected_toc_items()
-        # 用詞統一：選到卷也照「章」描述——一章叫「這章」，多章叫「這 N 章」；
-        # 排版設定卡片的按鈕叫「套用格式到選取章節」，跟這裡同一組詞。
-        chapters = self._selected_chapter_count()
-        these = f"這 {chapters} 章" if chapters > 1 else "這章"
-
-        groups = [[(f"選取{these}的全部內容", self.select_chapter_text)]]
-
-        pending = self._cut_state
-        if pending is None:
-            groups.append([(f"剪下{these}", self.cut_selected_chapters)])
-        else:
-            group = []
-            if self._paste_target(item) is not None:
-                group.append((f"貼到這章之前（{pending['summary']}）",
-                              lambda: self.paste_cut_chapters(item, before=True)))
-                group.append((f"貼到這章之後（{pending['summary']}）",
-                              lambda: self.paste_cut_chapters(item, before=False)))
-            group.append(("取消剪下（Esc）", self.cancel_cut))
-            groups.append(group)
-
-        group = [(f"套用格式到{these}", self.format_selected_chapters)]
-        leaves = [node for node in selected if node.childCount() == 0]
-        if len(selected) > 1 and len(leaves) == len(selected):
-            group.append((f"合併{these}", self.merge_selected_chapters))
-        chapter_nodes = [node for node in selected
-                         if self.chapter_records.get(node, {}).get("kind") in ("chapter", "volume")]
-        if len(chapter_nodes) > 1 and self._chapter_nodes_share_unit(chapter_nodes):
-            group.append(("連續編號", self.renumber_selected_chapters))
-        groups.append(group)
-
-        kinds = {self.chapter_records.get(node, {}).get("kind") for node in selected}
-        group = []
-        if kinds - {"volume"}:
-            group.append(("設為卷標題", lambda: self.set_chapter_level(1)))
-        if kinds - {"chapter"}:
-            group.append(("設為章標題", lambda: self.set_chapter_level(2)))
-        groups.append(group)
-
-        groups.append([("標註為非章節（保留正文，從目錄移除）", self.ignore_selected_chapter),
-                       (f"刪除{these}（含正文）", self.delete_selected_chapter)])
-
-        menu = QMenu(self)
-        for group in groups:
-            if not group:
-                continue
-            if menu.actions():
-                menu.addSeparator()
-            for text, slot in group:
-                menu.addAction(text).triggered.connect(slot)
-        return menu
-
-    def _selected_chapter_count(self) -> int:
-        """選取範圍有幾章：選到卷就算卷底下的章。"""
-        chapters = set()
-
-        def collect(item):
-            if item.childCount() == 0:
-                chapters.add(id(item))
-            for index in range(item.childCount()):
-                collect(item.child(index))
-
-        for item in self._selected_toc_items():
-            collect(item)
-        return len(chapters)
-
-    def _selected_toc_items(self) -> list:
-        """目前選取的目錄項目；推定卷沒有對應的標題行，換成它底下的章節。"""
-        items = []
-        for item in self.tree.selectedItems():
-            if item in self.virtual_volume_items:
-                items.extend(item.child(index) for index in range(item.childCount()))
-            else:
-                items.append(item)
-        return list(dict.fromkeys(items))
-
-    @action
-    def apply_toc_preview(self):
-        """「章節管理 → 套用到本文」：把開關預覽的結果真的寫進本文。
-
-        - 自動合併下行標題：章名接到標題行後面，原本放章名的行（和中間的空行）拿掉。
-
-        - 推算出來的卷（斜體）：卷標題插在卷內第一個項目前面，前後留空行。
-        - 開了「自動補齊卷名」、每章都帶著卷的寫法（「卷一 山路 第一章 出發」）：換卷的地方
-          插一行卷標題，章節行只留「第一章 出發」。卷標題寫成正式的「第一卷 山路」——
-          單獨一行的「卷一」預設不算卷（避免誤判），寫成「第…卷」重新整理後才認得出來。
-        寫進去之後就是一般的卷標題，排版、匯出都會帶著它；可以按 Ctrl+Z 復原。"""
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        lines = list(self.raw_lines)
-        inserts = {}          # 行號 → 要插在這一行前面的卷標題
-        replaces = {}         # 行號 → 換成這一行
-        for info in self.virtual_volume_items.values():
-            inserts[info["row"]] = info["title"]
-        if self._infer_volumes and self._infer_volume_names:
-            previous = None
-            for row in sorted(set(self.chapter_raw_map.values())):
-                clean, marker = strip_persistent_title_marker(lines[row].strip())
-                mixed = parse_mixed_volume_chapter_header(clean, True)
-                if not mixed or mixed["volume_raw"].startswith("第"):
-                    # 「第一卷 卷名 第N章」原本就會分卷，排版時處理；這裡只拆「卷一」這種
-                    if not mixed:
-                        previous = None
-                    continue
-                number = mixed["volume_raw"][1:].strip()        # 「篇一」→「一」，數字寫法、單位照原文
-                volume = f"第{number}{mixed['volume_unit']}{mixed['volume_note']} {mixed['volume_body']}".strip()
-                indent = lines[row][:len(lines[row]) - len(lines[row].lstrip())]
-                suffix = {"include": "[::]", "auto_title": "[::T]"}.get(marker, "")    # 手動收錄的標記照留
-                replaces[row] = f"{indent}{mixed['chapter_raw'].strip()}{suffix}"
-                if volume != previous:
-                    inserts[row] = volume
-                previous = volume
-        removed = set()
-        for row, (subtitle_row, subtitle) in self.merged_titles.items():
-            line = replaces.get(row, lines[row])
-            clean, marker = strip_persistent_title_marker(line.strip())
-            indent = line[:len(line) - len(line.lstrip())]
-            suffix = {"include": "[::]", "auto_title": "[::T]"}.get(marker, "")
-            replaces[row] = f"{indent}{clean} {subtitle}{suffix}"
-            removed.update(range(row + 1, subtitle_row + 1))
-        removed.update(self.absorbed_titles)
-        if not inserts and not replaces and not removed:
-            self._show_status("沒有可以套用的內容：先打開章節管理的預覽開關（合併下行標題、合併重複標題、"
-                              "補齊卷號），目錄上會先顯示預覽")
-            return
-        done = []           # 寫進去之前先數好：寫完目錄就重建了，預覽資料會清掉
-        if self.merged_titles:
-            done.append(f"合併 {len(self.merged_titles)} 個標題")
-        if self.absorbed_titles:
-            done.append(f"刪掉 {len(self.absorbed_titles)} 行重複標題")
-        if inserts:
-            done.append(f"寫入 {len(inserts)} 個卷標題")
-        result = []
-        for row, line in enumerate(lines):
-            if row in removed:
-                continue
-            if row in inserts:
-                if result and result[-1].strip():
-                    result.append("")
-                result.extend([inserts[row], ""])
-            result.append(replaces.get(row, line))
-        self._replace_text_from_tool(result)
-        self._show_status(i18n.T("已套用到本文：" + "、".join(done) + "，可以按 Ctrl+Z 復原"), translated=True)
-
-    def _show_toc_context_menu(self, pos):
-        menu = self._build_toc_context_menu(pos)
-        if menu is not None:
-            menu.exec(self.tree.viewport().mapToGlobal(pos))
-
-    @action
-    def select_chapter_text(self):
-        """把選取章節的整段內容（標題＋正文）在本文裡選起來，方便直接複製。
-
-        多選時選取涵蓋範圍的頭到尾——編輯器一次只能有一段選取，硬要分段
-        反而看不出選到哪裡。"""
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        total_lines = len(self.raw_lines)
-        spans = []
-        ordered = toc_ops.ordered_boundaries(self.chapter_index_map, self.toc_boundary_map)
-        for node in self._selected_toc_items():
-            span = toc_ops.toc_section_lines(
-                self.tree, node, self.chapter_index_map, self.toc_boundary_map, total_lines, ordered)
-            if span is not None:
-                spans.append(span)
-        if not spans:
-            return
-        document = self.editor.document()
-        first_row = min(start for start, _end in spans)
-        last_row = min(max(end for _start, end in spans), document.blockCount()) - 1
-        start_block = document.findBlockByNumber(first_row)
-        end_block = document.findBlockByNumber(max(first_row, last_row))
-        if not start_block.isValid() or not end_block.isValid():
-            return
-        cursor = self.editor.textCursor()
-        cursor.setPosition(start_block.position())
-        cursor.setPosition(end_block.position() + end_block.length() - 1,
-                           QTextCursor.MoveMode.KeepAnchor)
-        self.editor.setTextCursor(cursor)
-        self.editor.setFocus()
-        self._show_status(i18n.T(f"已選取 {end_block.blockNumber() - first_row + 1} 行，可以直接複製（Ctrl+C）"))
-
-    # ------------------------------------------------------------------
-    # 剪下／貼上章節（調整章節順序）
-    # ------------------------------------------------------------------
-
-    def _selected_section_spans(self) -> list:
-        """選取章節涵蓋的行範圍（0-based 半開區間），重疊的合併起來。"""
-        total_lines = len(self.raw_lines)
-        spans = []
-        ordered = toc_ops.ordered_boundaries(self.chapter_index_map, self.toc_boundary_map)
-        for node in self._selected_toc_items():
-            span = toc_ops.toc_section_lines(
-                self.tree, node, self.chapter_index_map, self.toc_boundary_map, total_lines, ordered)
-            if span is not None and span[0] < span[1]:
-                spans.append(span)
-        spans.sort()
-        merged: list = []
-        for start, end in spans:
-            if merged and start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-        return merged
-
-    @action
-    def cut_selected_chapters(self):
-        """剪下＝先做記號，按貼上才真的搬動（跟檔案總管一樣）。
-
-        沒有貼上就不會少任何東西；按 Esc 或重新剪下就取消。內容同時放進系統
-        剪貼簿，也可以直接貼到其他程式。"""
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        spans = self._selected_section_spans()
-        if not spans:
-            return
-        labels = [self.toc_full_labels.get(node, node.text(0)) for node in self.tree.selectedItems()]
-        summary = "、".join(label[:12] for label in labels[:2])
-        if len(labels) > 2:
-            summary += f" 等 {len(labels)} 項"
-        moved_lines = [line for start, end in spans for line in self.raw_lines[start:end]]
-        QApplication.clipboard().setText("\n".join(moved_lines))
-        self._cut_state = {
-            "spans": spans,
-            "text_version": self._text_version,
-            "summary": summary,
-            "count": len(labels),
-        }
-        self._style_cut_items()
-        self._show_status(i18n.T(f"已剪下 {len(labels)} 章（共 {len(moved_lines)} 行）："
-                                 "在目錄對著要放的位置按右鍵貼上，按 Esc 取消"))
-
-    def cancel_cut(self):
-        if self._cut_state is None:
-            return
-        self._cut_state = None
-        self._style_cut_items()
-        self._show_status("已取消剪下")
-
-    def _style_cut_items(self):
-        """已剪下的章節在目錄裡變淡，一眼看得出「等著被搬走」。"""
-        tokens = self.tokens
-        spans = self._cut_state["spans"] if self._cut_state else []
-        # 推算／拆出來的卷（預覽）自己有斜體＋非原文色，不能在這裡被重設
-        preview = (set(self.virtual_volume_items) | self.split_volume_items | self.merged_title_items
-                   | self.absorbed_title_items)
-        for item, row in self.chapter_raw_map.items():
-            inside = any(start <= row < end for start, end in spans)
-            font = item.font(0)
-            if font.italic() != (inside or item in preview) or inside:
-                font.setItalic(inside or item in preview)
-                item.setFont(0, font)
-            if inside:
-                item.setForeground(0, QColor(tokens.text_faint))
-                item.setToolTip(0, i18n.T("已剪下，貼上後才會真的移動；按 Esc 取消"))
-            elif item not in preview:
-                item.setData(0, Qt.ItemDataRole.ForegroundRole, None)
-                item.setToolTip(0, "")
-
-    def _paste_target(self, item):
-        """可以貼到這個項目旁邊嗎？回傳它的行範圍，不行則回傳 None。"""
-        if self._cut_state is None or item is None:
-            return None
-        if self._cut_state["text_version"] != self._text_version:
-            return None
-        if item in self.virtual_volume_items:
-            item = item.child(0) if item.childCount() else None
-            if item is None:
-                return None
-        span = toc_ops.toc_section_lines(
-            self.tree, item, self.chapter_index_map, self.toc_boundary_map, len(self.raw_lines))
-        if span is None:
-            return None
-        # 不能貼到自己（或自己底下）：那等於把整段搬進它自己裡面。
-        for start, end in self._cut_state["spans"]:
-            if start <= span[0] < end:
-                return None
-        return span
-
-    @action
-    def paste_cut_chapters(self, item, before: bool):
-        """把剪下的章節搬到指定章節的前面或後面，整個算一步。"""
-        if self._cut_state is None:
-            return
-        if self._cut_state["text_version"] != self._text_version:
-            self.cancel_cut()
-            dialogs.info(self, "無法貼上", "剪下之後本文有變動，原本的範圍已經對不上，請重新剪下。")
-            return
-        target = self._paste_target(item)
-        if target is None:
-            dialogs.info(self, "無法貼上", "不能貼到剪下的章節自己（或它底下的章節）旁邊。")
-            return
-        spans = self._cut_state["spans"]
-        insert_at = target[0] if before else target[1]
-        # 目標節點在重建目錄時會被銷毀，標題要先留下來。
-        target_label = self.toc_full_labels.get(item, item.text(0))[:16]
-        new_lines, mapping = self._move_line_blocks(self.raw_lines, spans, insert_at)
-        summary, count = self._cut_state["summary"], self._cut_state["count"]
-        self._cut_state = None
-
-        text = "\n".join(new_lines)
-        self._set_editor_text(text, lambda row: mapping.get(row, row))
-        # 行號是自己算出來的，不必也不能靠 difflib 猜：搬移在比對時會變成
-        # 「一處刪掉、一處新增」，被搬走章節的強制層級、忽略標記都會遺失。
-        for attribute in ("ignored_chapters", "force_lv1_chapters", "force_lv2_chapters"):
-            setattr(self, attribute, {mapping[row] for row in getattr(self, attribute) if row in mapping})
-        self.auto_titles = {mapping[row]: value for row, value in self.auto_titles.items() if row in mapping}
-        self.raw_lines = new_lines
-        self._mark_synced(text)
-        self._push_line_map(_chapter_line_mapper(mapping))
-        self._rebuild_toc()
-        self._checkpoint_document()
-        self._show_status(i18n.T(
-            f"已把 {count} 章（{summary}）移到「{target_label}」"
-            f"{'之前' if before else '之後'}，可以按 Ctrl+Z 復原"))
-
-    @staticmethod
-    def _move_line_blocks(lines: list, spans: list, insert_at: int):
-        """把 spans 這幾段行搬到 insert_at 之前，回傳（新的行, 舊行號→新行號）。
-
-        接縫處順便整理空行：搬走的位置不留下連續空行，貼上的地方前後各留
-        一個空行，這樣章節標題不會黏在上一段的最後一行。只整理接縫：其他
-        章節裡刻意留的多個空行、檔尾的空行都照原樣。"""
-        moved_rows = [row for start, end in spans for row in range(start, end)]
-        # 搬動的內容去掉前後空行，貼上時再統一補。
-        while moved_rows and not lines[moved_rows[0]].strip():
-            moved_rows.pop(0)
-        while moved_rows and not lines[moved_rows[-1]].strip():
-            moved_rows.pop()
-        cut_rows = {row for start, end in spans for row in range(start, end)}
-
-        result: list = []
-        mapping: dict = {}
-        at_seam = False           # 剛經過剪下的位置或貼上的位置，還沒遇到下一行文字
-
-        def emit(row):
-            mapping[row] = len(result)
-            result.append(lines[row])
-
-        def emit_moved():
-            if not moved_rows:
-                return
-            if result and result[-1].strip():
-                result.append("")
-            for row in moved_rows:
-                emit(row)
-            result.append("")
-
-        for index, line in enumerate(lines):
-            if index == insert_at:
-                emit_moved()
-                at_seam = True
-            if index in cut_rows:
-                at_seam = True
-                continue
-            if at_seam and not line.strip() and result and not result[-1].strip():
-                continue          # 接縫：搬走之後不要留下連續空行
-            if line.strip():
-                at_seam = False
-            emit(index)
-        if insert_at >= len(lines):
-            emit_moved()
-        if insert_at >= len(lines) or at_seam:
-            # 檔尾是接縫（貼在檔尾，或剪下的是最後一章）：檔尾的空行照原本的樣子
-            original_blank_tail = 0
-            for line in reversed(lines):
-                if line.strip():
-                    break
-                original_blank_tail += 1
-            while result and not result[-1].strip():
-                result.pop()
-            result.extend([""] * original_blank_tail)
-        return result, mapping
-
-    @action
-    def merge_selected_chapters(self):
-        """保留第一個選取章節的標題，把其餘選取章節的正文接到它後面。
-        支援不連續多選：例如選取第 2、3、7 章後，第 3 與第 7 章的正文
-        會依序搬到第 2 章之後，兩者的標題行一併移除。"""
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        nodes = [node for node in self._selected_toc_items() if node in self.chapter_index_map]
-        if len(nodes) < 2:
-            dialogs.info(self, "合併章節", "請先用 Ctrl 點選或 Shift 連續選取兩個以上的章節。")
-            return
-
-        lines = self.editor.toPlainText().split("\n")
-        sections = []
-        ordered = toc_ops.ordered_boundaries(self.chapter_index_map, self.toc_boundary_map)
-        for node in nodes:
-            span = toc_ops.toc_section_lines(
-                self.tree, node, self.chapter_index_map, self.toc_boundary_map, len(lines), ordered)
-            if span is not None:
-                sections.append((span[0], span[1], node))
-        if len(sections) < 2:
-            dialogs.info(self, "合併章節", "選取的章節無法定位到正文，請先按「重新掃描目錄」再試一次。")
-            return
-        sections.sort()
-
-        for (_, previous_end, _), (next_start, _, _) in zip(sections, sections[1:]):
-            if next_start < previous_end:
-                dialogs.info(
-                    self, "合併章節",
-                    "選取範圍互相重疊（可能同時選到某一卷與它底下的章節）。\n"
-                    "請只選取同一層級、彼此獨立的章節。",
-                )
-                return
-
-        keep_start, keep_end, keep_node = sections[0]
-        keep_title = keep_node.text(0)
-        others = sections[1:]
-        preview_text = "、".join(node.text(0)[:20] for _, _, node in others[:4])
-        if len(others) > 4:
-            preview_text += f" 等 {len(others)} 章"
-        if not dialogs.confirm(
-            self, "合併章節",
-            f"將把以下章節的正文併入「{keep_title[:30]}」：\n\n{preview_text}\n\n"
-            "這些章節的標題行會被移除，正文依原順序接續在後。是否繼續？",
-        ):
-            return
-
-        moved = []
-        for start, end, _ in others:
-            body = lines[start + 1:end]           # 跳過標題行，只取正文
-            while body and not body[0].strip():    # 去掉正文前後的空行，稍後統一補
-                body.pop(0)
-            while body and not body[-1].strip():
-                body.pop()
-            if body:
-                moved.append(body)
-
-        new_lines = list(lines)
-        for start, end, _ in reversed(others):     # 由後往前刪除，避免行號位移
-            del new_lines[start:end]
-
-        block = []
-        for body in moved:
-            if block:
-                block.append("")
-            block.extend(body)
-        if block:
-            if keep_end > 0 and new_lines[keep_end - 1].strip():
-                block.insert(0, "")
-            if keep_end < len(new_lines) and new_lines[keep_end].strip():
-                block.append("")
-            new_lines[keep_end:keep_end] = block
-
-        self._set_editor_text("\n".join(new_lines), "diff")
-        self._sync_raw_lines()
-        self._rebuild_toc()
-
-        for item, raw_index in self.chapter_raw_map.items():
-            if raw_index == keep_start:
-                self.tree.setCurrentItem(item)
-                self._on_tree_item_clicked(item, 0)
-                break
-        self._checkpoint_document()
-        self._show_status(f"已把 {len(others)} 章的正文併入「{keep_title[:20]}」，可以按 Ctrl+Z 復原")
-
-    @action
-    def renumber_selected_chapters(self):
-        """把選取的章節（或卷／集／篇）改成連續編號：保留第一個（依文件順序）
-        的原編號當起點，其餘依序遞增。同一次只能對同一種單位操作。"""
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        selected_nodes = [node for node in self._selected_toc_items()
-                          if self.chapter_records.get(node, {}).get("kind") in ("chapter", "volume")]
-        if len(selected_nodes) < 2:
-            dialogs.info(self, "連續編號", "請選取兩個以上的章節或卷節點（不含作品層級）。")
-            return
-        if not self._chapter_nodes_share_unit(selected_nodes):
-            dialogs.info(
-                self, "連續編號",
-                "選取的項目類型不一致（例如同時選到「第…卷」和「第…集」，"
-                "或「第…集」和「第…章」），這些是各自獨立的編號系統，"
-                "混在一起重排沒有意義，請分開執行。",
-            )
-            return
-
-        selected_nodes.sort(key=lambda node: self.chapter_raw_map.get(node, 0))
-
-        plans, skipped = [], []
-        for node in selected_nodes:
-            raw_idx = self.chapter_raw_map.get(node)
-            if raw_idx is None or raw_idx >= len(self.raw_lines):
-                skipped.append((node, "找不到對應行"))
-                continue
-            raw_line = self.raw_lines[raw_idx]
-            leading = raw_line[:len(raw_line) - len(raw_line.lstrip())]
-            clean, marker = strip_persistent_title_marker(raw_line.strip())
-            located = locate_chapter_number(clean)
-            if located is None:
-                skipped.append((node, "無法自動判斷編號位置"))
-                continue
-            start, end, number_text = located
-            current_number = int(round(chinese_to_arabic(number_text)))
-            plans.append({
-                "node": node, "raw_idx": raw_idx, "leading": leading,
-                "clean": clean, "marker": marker, "start": start, "end": end,
-                "number_text": number_text, "current_number": current_number,
-            })
-
-        if len(plans) < 2:
-            detail = "\n".join(f"• {node.text(0)[:24]}：{reason}" for node, reason in skipped)
-            dialogs.info(
-                self, "連續編號",
-                "選取範圍內能自動判斷編號位置的項目不足兩個，無法執行。\n\n" + detail,
-            )
-            return
-
-        anchor_number = plans[0]["current_number"]
-        targets = [anchor_number + offset for offset in range(len(plans))]
-
-        selected_node_set = {plan["node"] for plan in plans}
-        reference_signature = chapter_unit_signature(plans[0]["clean"])
-        sibling_index = {}
-        for parent in {plan["node"].parent() for plan in plans}:
-            for sibling in toc_ops.tree_children(self.tree, parent):
-                if sibling in selected_node_set:
-                    continue
-                sibling_row = self.chapter_raw_map.get(sibling)
-                if sibling_row is None or sibling_row >= len(self.raw_lines):
-                    continue
-                sibling_clean, _m = strip_persistent_title_marker(self.raw_lines[sibling_row].strip())
-                if chapter_unit_signature(sibling_clean) != reference_signature:
-                    continue
-                sibling_located = locate_chapter_number(sibling_clean)
-                if sibling_located is None:
-                    continue
-                _s, _e, sibling_number_text = sibling_located
-                key = (parent, int(round(chinese_to_arabic(sibling_number_text))))
-                sibling_index.setdefault(key, sibling)
-
-        conflicts = []
-        for plan, target in zip(plans, targets):
-            sibling = sibling_index.get((plan["node"].parent(), target))
-            if sibling is not None:
-                conflicts.append((plan, target, sibling))
-
-        changes = [(plan, target) for plan, target in zip(plans, targets)
-                  if plan["current_number"] != target]
-        if not changes:
-            dialogs.info(self, "連續編號", "選取的項目編號本來就已經連續，不需要調整。")
-            return
-
-        preview_lines = [f"「{plan['node'].text(0)[:22]}」：{plan['current_number']} → {target}"
-                         for plan, target in changes[:8]]
-        if len(changes) > 8:
-            preview_lines.append(f"……等共 {len(changes)} 處")
-        message = "將調整以下編號：\n\n" + "\n".join(preview_lines)
-        if skipped:
-            message += "\n\n以下項目無法判斷編號位置，將維持不變：\n" + "\n".join(
-                f"• {node.text(0)[:22]}：{reason}" for node, reason in skipped)
-        if conflicts:
-            conflict_lines = "\n".join(
-                f"• 目標編號 {target} 與「{sibling.text(0)[:22]}」重複"
-                for _plan, target, sibling in conflicts[:5])
-            message += "\n\n⚠️ 以下目標編號會與未選取的項目重複，繼續的話會出現重複編號：\n" + conflict_lines
-        message += "\n\n此操作可用「復原」撤銷。是否繼續？"
-
-        if not dialogs.confirm(self, "連續編號", message):
-            return
-
-        marker_suffix = {"exclude": "[::X]", "include": "[::]",
-                         "auto_work": "[::W]", "auto_title": "[::T]", "": ""}
-        cursor = self.editor.textCursor()
-        cursor.beginEditBlock()
-        for plan, target in changes:
-            new_number_text = render_chapter_number_like(target, plan["number_text"])
-            new_clean = plan["clean"][:plan["start"]] + new_number_text + plan["clean"][plan["end"]:]
-            new_line = plan["leading"] + new_clean + marker_suffix[plan["marker"]]
-            self._replace_line(cursor, plan["raw_idx"], new_line)
-        cursor.endEditBlock()
-
-        self._sync_raw_lines()
-        self._rebuild_toc()
-        self._checkpoint_document()
-        self._show_status(f"已把 {len(changes)} 章改成連續編號，可以按 Ctrl+Z 復原")
-
-    def _exclude_marker_for(self, raw_idx: int, line: str) -> str:
-        """把某一行移出目錄時，行尾該留什麼？
-
-        只有「使用者自己用 [::] 加進目錄、而且拿掉標記之後不會被自動認成
-        章節」的行，才直接把標記清掉——那段正文本來就不是章節，留一個 [::X]
-        只是在檔案裡多一個看不懂的符號。
-
-        其他情況一律寫 [::X]：沒有標記、或是 [::W]／[::T] 這類自動標記的行，
-        它會在目錄裡是因為別的機制（合集結構、自動標題快取、強制層級…），
-        只清標記的話文字根本沒變，重新掃描它又會回來，使用者卻看到「已移除」。"""
-        clean, marker = strip_persistent_title_marker(line.strip())
-        if marker != "include":
-            return "[::X]"
-        if raw_idx in self.force_lv1_chapters or raw_idx in self.force_lv2_chapters:
-            return "[::X]"
-        return "[::X]" if looks_like_auto_chapter(clean, self.user_chapter_rules) else ""
-
-    @action
-    def ignore_selected_chapter(self):
-        """章節保留在正文中，只是行尾加上 [::X]，從目錄移除。"""
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        selected = self._selected_toc_items()
-        if not selected:
-            return
-        targets = sorted({raw_idx for node in selected
-                          if (raw_idx := self.chapter_raw_map.get(node)) is not None}, reverse=True)
-        if not targets:
-            return
-        cursor = self.editor.textCursor()
-        cursor.beginEditBlock()
-        marked_count, last_clean, marked_any = 0, "", False
-        for raw_idx in targets:
-            raw_str = self.raw_lines[raw_idx]
-            clean, marker = strip_persistent_title_marker(raw_str.strip())
-            if marker == "exclude":
-                continue
-            leading = raw_str[:len(raw_str) - len(raw_str.lstrip())]
-            suffix = self._exclude_marker_for(raw_idx, raw_str)
-            self._replace_line(cursor, raw_idx, leading + clean + suffix)
-            marked_any = marked_any or bool(suffix)
-            marked_count += 1
-            last_clean = clean
-        cursor.endEditBlock()
-        if not marked_count:
-            return
-        self._sync_raw_lines()
-        self._rebuild_toc()
-        self._checkpoint_document()
-        note = "（行尾已加上 [::X]）" if marked_any else "（原本就不是章節，已直接清掉標記）"
-        if marked_count == 1:
-            self._show_status(f"已標註為非章節：{last_clean[:18]}{note}")
-        else:
-            self._show_status(f"已把 {marked_count} 章標註為非章節{note}")
-
-    @action
-    def set_chapter_level(self, level: int):
-        """章節層級（force_lv1/2_chapters）是跟著文件走的結構狀態，不是文字，
-        所以就算沒有改到任何一個字，也要單獨存一次復原步驟，不然 Ctrl+Z
-        永遠碰不到這個操作。"""
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        selected = self._selected_toc_items()
-        if not selected:
-            return
-        targets = {raw_idx for node in selected if (raw_idx := self.chapter_raw_map.get(node)) is not None}
-        if not targets:
-            return
-        for raw_idx in targets:
-            if level == 1:
-                self.force_lv1_chapters.add(raw_idx)
-                self.force_lv2_chapters.discard(raw_idx)
-            elif level == 2:
-                self.force_lv2_chapters.add(raw_idx)
-                self.force_lv1_chapters.discard(raw_idx)
-        self._rebuild_toc()
-        self._checkpoint_document()
-        if len(targets) == 1:
-            raw_str = self.raw_lines[next(iter(targets))].strip()
-            self._show_status(f"已設為{'卷' if level == 1 else '章'}標題：{raw_str[:15]}")
-        else:
-            self._show_status(f"已把 {len(targets)} 項設為{'卷' if level == 1 else '章'}標題")
-
-    @action
-    def delete_selected_chapter(self):
-        self._sync_raw_lines()
-        self._ensure_toc_current()
-        selected = self._selected_toc_items()
-        if not selected:
-            return
-        lines = self.editor.toPlainText().split("\n")
-        total_lines = len(lines)
-        sections = []
-        ordered = toc_ops.ordered_boundaries(self.chapter_index_map, self.toc_boundary_map)
-        for node in selected:
-            span = toc_ops.toc_section_lines(
-                self.tree, node, self.chapter_index_map, self.toc_boundary_map, total_lines, ordered)
-            if span is not None:
-                sections.append((span[0], span[1], node))
-        if not sections:
-            return
-        sections.sort()
-        merged = [sections[0]]
-        for start, end, node in sections[1:]:
-            last_start, last_end, last_node = merged[-1]
-            if start < last_end:
-                merged[-1] = (last_start, max(last_end, end), last_node)
-            else:
-                merged.append((start, end, node))
-        sections = merged
-
-        if len(sections) == 1:
-            ch_name = sections[0][2].text(0)
-            question = f"確定要刪除「{ch_name}」及其所有正文內容嗎？"
-            done_text = f"已刪除：{ch_name}，可以按 Ctrl+Z 復原"
-        else:
-            preview_text = "、".join(node.text(0)[:20] for _, _, node in sections[:4])
-            if len(sections) > 4:
-                preview_text += f" 等 {len(sections)} 章"
-            question = f"確定要刪除以下章節及其所有正文內容嗎？\n\n{preview_text}"
-            done_text = f"已刪除 {len(sections)} 章，可以按 Ctrl+Z 復原"
-        if not dialogs.confirm(self, "刪除章節", question):
-            return
-
-        document = self.editor.document()
-        cursor = self.editor.textCursor()
-        cursor.beginEditBlock()
-        for start, end, _ in reversed(sections):    # 由後往前刪除，讓前面區段的行號保持有效
-            start_block = document.findBlockByNumber(start)
-            end_block = document.findBlockByNumber(end)
-            end_of_document = document.characterCount() - 1     # Qt 單位，不能用 len(文字)
-            start_pos = start_block.position() if start_block.isValid() else end_of_document
-            end_pos = end_block.position() if end_block.isValid() else end_of_document
-            cursor.setPosition(start_pos)
-            cursor.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
-            cursor.removeSelectedText()
-        cursor.endEditBlock()
-
-        self._sync_raw_lines()
-        self._rebuild_toc()
-        self._checkpoint_document()
-        self._show_status(done_text)
-
-    # ------------------------------------------------------------------
-    # 本文右鍵選單：加入目錄／取消「非章節」標記
-    # ------------------------------------------------------------------
-
-    def _build_editor_context_menu(self):
-        """只負責組出選單，不呼叫 exec()——方便測試時不用真的彈出視窗。
-
-        刻意不用 QPlainTextEdit.createStandardContextMenu()：那組復原／剪下／
-        複製／貼上／全選是 Qt 內建、沒套用中文翻譯，混在自己中文選單裡顯得
-        突兀，而且復原／剪貼本來就有全域快捷鍵可用，選單裡不需要重複。
-
-        「加入目錄」「移除目錄」一次只會有一個能按：看目標那一行現在是不是
-        已經在目錄裡。"""
-        menu = QMenu(self)
-        insert_action = menu.addAction("新增章節")
-        insert_action.triggered.connect(self.open_insert_title_dialog)
-        menu.addSeparator()
-
-        target = self._editor_target_line()
-        in_toc = target is not None and target[0] in self._current_title_lines()
-        add_action = menu.addAction("將所選文字加入目錄")
-        add_action.setEnabled(target is not None and not in_toc)
-        add_action.triggered.connect(self.mark_selected_as_title)
-        remove_action = menu.addAction("將所選文字移除目錄")
-        remove_action.setEnabled(target is not None and in_toc)
-        remove_action.triggered.connect(self.exclude_selected_line)
-
-        # 下方接上 Qt 自己的剪下／複製／貼上／全選：這些動作的文字由 Qt 的
-        # 翻譯檔提供（見 i18n.install_qt_translation），會跟著繁簡切換。
-        standard = self.editor.createStandardContextMenu()
-        # 去掉 Qt 自己的復原／重做：Qt 的復原已經關掉（復原走自訂快照系統），
-        # 留著只會是兩個永遠灰掉的項目。Ctrl+Z／Ctrl+Y 與工具列按鈕照常可用。
-        undo_keys = {QKeySequence(QKeySequence.StandardKey.Undo).toString(),
-                     QKeySequence(QKeySequence.StandardKey.Redo).toString()}
-        # Qt 把快捷鍵直接寫在動作文字裡（「復原(&U)	Ctrl+Z」），shortcut() 是空的，
-        # 所以從文字尾端取快捷鍵來比對。
-        editing_actions = [action for action in standard.actions()
-                           if action.text() and action.text().rpartition("	")[2] not in undo_keys]
-        if editing_actions:
-            menu.addSeparator()
-            # 只把「動作」接過來，改由這個選單持有；標準選單本身要丟掉，
-            # 不能拿它當子元件——QMenu 是一個真的視窗元件，掛成子元件會被
-            # 整個畫在自訂選單上面，變成兩層選單疊在一起。
-            for standard_action in editing_actions:
-                standard_action.setParent(menu)
-            menu.addActions(editing_actions)
-        standard.deleteLater()
-        return menu
-
-    def _show_editor_context_menu(self, pos):
-        # 在選取範圍以外按右鍵時，先把游標移到按的位置：選單裡的動作（新增
-        # 章節、加入／移除目錄）都是針對「游標所在那一行」。
-        clicked = self.editor.cursorForPosition(pos)
-        current = self.editor.textCursor()
-        if not (current.hasSelection()
-                and current.selectionStart() <= clicked.position() <= current.selectionEnd()):
-            self.editor.setTextCursor(clicked)
-        menu = self._build_editor_context_menu()
-        menu.exec(self.editor.viewport().mapToGlobal(pos))
-
-    def _current_title_lines(self) -> set:
-        """目前目錄裡每個節點在正文的行號（已換算到編輯器現在的內容）。"""
-        self._sync_raw_lines()
-        return {self._map_tree_line(row) for row in self.chapter_raw_map.values()}
-
-    def _editor_target_line(self):
-        """右鍵動作的目標行：有選取時是選取範圍內唯一的非空白行，沒選取時是
-        游標所在行。多行或空白行回傳 None——避免把整段正文誤加進目錄。"""
-        cursor = self.editor.textCursor()
-        document = self.editor.document()
-        if not cursor.hasSelection():
-            block = cursor.block()
-            return (block.blockNumber(), block.text()) if block.text().strip() else None
-        start_block = document.findBlock(cursor.selectionStart())
-        end_block = document.findBlock(cursor.selectionEnd())
-        end_number = end_block.blockNumber()
-        if cursor.selectionEnd() == end_block.position() and end_number > start_block.blockNumber():
-            end_number -= 1
-        lines = []
-        for number in range(start_block.blockNumber(), end_number + 1):
-            text = document.findBlockByNumber(number).text()
-            if text.strip():
-                lines.append((number, text))
-        return lines[0] if len(lines) == 1 else None
-
-    @action
-    def mark_selected_as_title(self):
-        """把目標行標成目錄章節（行尾加 [::]；原本若是 [::X] 會一併換掉）。"""
-        target = self._editor_target_line()
-        if target is None:
-            dialogs.info(self, "一次限一個標題", "請選取（或把游標放在）單獨一行章節標題，避免將正文誤加到目錄。")
-            return
-        clean_title = self._set_line_marker(target[0], "[::]")
-        if clean_title is None:
-            return
-        for item, raw_index in self.chapter_raw_map.items():
-            if raw_index == target[0]:
-                self.tree.setCurrentItem(item)
-                self._on_tree_item_clicked(item, 0)
-                break
-        self._show_status(f"已加入目錄：{clean_title}")
-
-    @action
-    def exclude_selected_line(self):
-        """把目標行移出目錄（行尾加 [::X]；原本若是 [::] 會一併換掉）。"""
-        target = self._editor_target_line()
-        if target is None:
-            dialogs.info(self, "一次限一行", "請選取（或把游標放在）單獨一行章節標題。")
-            return
-        suffix = self._exclude_marker_for(target[0], target[1])
-        clean_title = self._set_line_marker(target[0], suffix)
-        if clean_title is None:
-            return
-        self._show_status(f"已移出目錄：{clean_title}" if suffix
-                          else f"已移除章節標記：{clean_title}")
-
-    def _set_line_marker(self, line_number: int, marker: str):
-        block = self.editor.document().findBlockByNumber(line_number)
-        original = block.text()
-        clean, _old_marker = strip_persistent_title_marker(original.strip())
-        if not clean:
-            return None
-        leading = original[:len(original) - len(original.lstrip())]
-        cursor = self.editor.textCursor()
-        cursor.beginEditBlock()
-        self._replace_line(cursor, line_number, leading + clean + marker)
-        cursor.endEditBlock()
-        self._sync_raw_lines()
-        self._rebuild_toc()
-        self._checkpoint_document()
-        return clean
 

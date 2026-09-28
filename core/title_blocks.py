@@ -113,8 +113,9 @@ def _framed(frame_options, prefix_re: str, number_re: str, unit_re: str) -> str:
     opens = "".join(re.escape(char) for frame in frames for char in _FRAMES[frame][0])
     closes = "".join(re.escape(char) for frame in frames for char in _FRAMES[frame][1])
     optional = "?" if "無" in frame_options else ""
-    # 兩個位置各一個群組（同名群組不能出現兩次）；右括號照「有沒有左括號」決定要不要出現
-    opening = f"(?:(?P<open>[{opens}])\\s*{prefix_re}|{prefix_re}\\s*(?P<open2>[{opens}]){optional})"
+    # 兩個位置各一個群組；右括號照「有沒有左括號」決定要不要出現。The prefix appears only once (it may carry a
+    # named group, e.g. the volume number of "N-"): the opening bracket goes before it, or else after it.
+    opening = f"(?P<open>[{opens}])?\\s*{prefix_re}\\s*(?(open)|(?P<open2>[{opens}]){optional})"
     close = rf"(?(open)\s*[{closes}]|(?(open2)\s*[{closes}]))"
     if not unit:
         return opening + r"\s*" + number_re + close
@@ -168,7 +169,7 @@ def refresh_block_rule(rule: dict):
 _ALL_SEPS = ["無", "空格", "、", ".", "：", "-"]
 _ARABIC = ["123", "全形１２"]
 _ANY_NUMBER = ["一二三", "123", "全形１２"]
-# 常用寫法：（代號, 層級, 積木）。代號跟以前的常用格式一樣，舊設定裡打開的常用格式照代號換成組合。
+# 常用寫法：（代號, 層級, 積木）。代號跟 user_rules.PRESET_RULES（本文可疑章節用的常用格式）一樣。
 TEMPLATES = [
     ("hash_number", 2, {"frame": ["無"], "prefix": ["#"], "number": _ARABIC, "unit": ["無"],
                         "sep": _ALL_SEPS, "title": "要有"}),
@@ -226,15 +227,6 @@ def templates_by_confidence(level: int) -> list:
         if items:
             groups.append((grade, items))
     return groups
-
-
-def migrate_preset_rule(rule: dict):
-    """舊設定裡打開的常用格式 → 組合（名稱改成現在的自動名稱）；不是常用格式、或沒有對應的回傳 None。"""
-    try:
-        level, blocks = template(rule.get("preset", ""))
-    except KeyError:
-        return None
-    return block_rule(blocks, level, enabled=bool(rule.get("enabled", True)))
 
 
 def blocks_from_sample(sample: str, level: int):

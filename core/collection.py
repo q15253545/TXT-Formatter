@@ -469,7 +469,7 @@ def group_formal_chapters(records, parent_of, label_of):
             if records.get(ancestor, {}).get("kind") == "work":
                 work = ancestor
             ancestor = parent_of(ancestor)
-        # 章名前面帶著卷號（「卷一 山路 第一章」，沒開自動補齊卷號時不拆成卷）：再照卷號分組，
+        # 章名前面帶著卷號（「卷一 山路 第一章」，沒開自動補齊卷號與卷名時不拆成卷）：再照卷號分組，
         # 每卷重新數的章號才不會全擠在一起變成重複（目錄上的卷放錯位置時也一樣）
         prefix = _TITLE_VOLUME.match(label_of(node) or "")
         prefix_volume = re.sub(r"\s+", "", prefix.group(0)) if prefix else ""

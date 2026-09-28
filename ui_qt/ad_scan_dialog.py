@@ -25,7 +25,9 @@ from core.ad_scan import (
 )
 from . import dialogs, i18n
 from .theme import active_tokens
-from .widgets import ContextPreview, Divider, ScopeToggle, dialog_frame, flow_container, size_dialog, slider_with_spin
+from .widgets import (
+    ContextPreview, Divider, GroupCheckBox, ScopeToggle, dialog_frame, flow_container, size_dialog, slider_with_spin,
+)
 from .sortable_table import (
     PreviewTable,
     CONFIDENCE_ORDER, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns,
@@ -42,6 +44,7 @@ _CATEGORY_TIPS = {
 }
 
 REPEAT_LENGTH_RANGE = (2, 60)
+_WAITING_TEXT = "準備中：第一次打開要先整理本文，整理好就會自動掃描"
 REPEAT_COUNT_RANGE = (2, 50)
 
 _INTROS = {
@@ -236,8 +239,12 @@ class AdScanDialog(QDialog):
     deletionReady = Signal(list)             # 刪除後的整份本文
 
     def __init__(self, raw_lines: list, parent=None, selected_ranges=None, selected_count: int = 0,
-                 enabled_categories=None, title_rows=None, mode: str = "ads", repeat_settings=None):
+                 enabled_categories=None, title_rows=None, mode: str = "ads", repeat_settings=None,
+                 defer_scan: bool = False):
+        """defer_scan: show the dialog first and scan when start_scan() is called (the main window does that once
+        its idle-time cache warming is done — scanning a large file cold would freeze the window for seconds)."""
         super().__init__(parent)
+        self._waiting = defer_scan
         self._mode = mode
         title_text, self._categories, self._empty_name = _MODES[mode]
         self.setWindowTitle(title_text)
@@ -262,9 +269,9 @@ class AdScanDialog(QDialog):
         main_layout = QVBoxLayout(main_page)
         main_layout.setContentsMargins(0, 8 if mode == "ads" else 0, 0, 0)
         main_layout.setSpacing(12)
-        title = QLabel("偵測類型")
-        title.setObjectName("appTitle")
-        main_layout.addWidget(title)
+        self.category_group = GroupCheckBox("偵測類型")
+        self.category_group.members_changed.connect(self._run_scan)
+        main_layout.addWidget(self.category_group)
         # 類型照視窗寬度自動換行：寬的時候一列排完，不會在右邊留一大塊空白。
         category_box, category_flow = flow_container(uniform=True)
         self._category_checks = {}
@@ -274,6 +281,7 @@ class AdScanDialog(QDialog):
             checkbox.setToolTip(_CATEGORY_TIPS.get(key, ""))
             checkbox.toggled.connect(self._run_scan)
             self._category_checks[key] = checkbox
+            self.category_group.add_member(checkbox)
             category_flow.addWidget(checkbox)
         main_layout.addWidget(category_box)
         main_layout.addWidget(Divider())
@@ -302,6 +310,20 @@ class AdScanDialog(QDialog):
         footer.addWidget(buttons)
 
         self._update_action_label()
+        if defer_scan:
+            self.delete_button.setEnabled(False)
+            for pane in (self._main_pane, self._repeat_pane):
+                if pane is not None:
+                    pane.set_candidates([], _WAITING_TEXT)
+        else:
+            self._run_scan()
+
+    def start_scan(self):
+        """The deferred first scan (see defer_scan), with whatever settings the user picked meanwhile."""
+        if not self._waiting or not self.isVisible():
+            return                  # already scanned, or closed while waiting
+        self._waiting = False
+        self.delete_button.setEnabled(True)
         self._run_scan()
 
     def _update_action_label(self, *_args):
@@ -380,6 +402,8 @@ class AdScanDialog(QDialog):
         return self._selected_ranges if self.scope_check.isChecked() else None
 
     def _run_scan(self, *_args, keep_state: bool = False):
+        if self._waiting:
+            return          # start_scan() picks up the current settings
         categories = self._enabled_categories()
         state = self._main_pane.state() if keep_state else None
         if not categories:
@@ -396,6 +420,8 @@ class AdScanDialog(QDialog):
         self._repeat_timer.start()
 
     def _scan_repeats(self, *_args, keep_state: bool = True):
+        if self._waiting:
+            return
         min_length, min_count = self.repeat_settings()
         state = self._repeat_pane.state() if keep_state else None
         candidates = scan_ad_candidates(self._raw_lines, {"repeat"}, self._ranges(), self._title_rows,

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import i18n
-from .widgets import Divider, IconButton, IconTextButton
+from .widgets import Divider, IconButton, IconTextButton, VDivider
 
 STRUCTURE_CHOICES = ["自動判斷", "單本小說", "多作品合集"]
 STATUS_CHOICES = ["未指定", "未完結", "已完結"]
@@ -78,7 +78,7 @@ class MetadataBar(QWidget):
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 12, 0, 0)
-        grid.setHorizontalSpacing(10)
+        grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(10)
         details_layout.addLayout(grid)
         self.details.hide()
@@ -93,34 +93,40 @@ class MetadataBar(QWidget):
         self._auto_last = {}
         self.last_vol_label = QLineEdit()
         self.last_vol_label.setPlaceholderText("－")
-        self._add_field(grid, 0, 2, "最新卷", self.last_vol_label)
+        self._add_field(grid, 0, 3, "最新卷", self.last_vol_label)
         self.last_ch_label = QLineEdit()
         self.last_ch_label.setPlaceholderText("－")
-        self._add_field(grid, 0, 3, "最新章", self.last_ch_label)
+        self._add_field(grid, 0, 4, "最新章", self.last_ch_label)
 
         self.status_combo = QComboBox()
         self.status_combo.addItems(STATUS_CHOICES)
         self.status_combo.currentIndexChanged.connect(
             lambda _index: self.set_status_badge(i18n.combo_value(self.status_combo)))
-        self._add_field(grid, 0, 4, "狀態", self.status_combo)
+        self._add_field(grid, 0, 5, "狀態", self.status_combo)
 
         self.structure_combo = QComboBox()
         self.structure_combo.addItems(STRUCTURE_CHOICES)
         self.structure_combo.currentIndexChanged.connect(
             lambda _index: self.structure_changed.emit(i18n.combo_value(self.structure_combo)))
-        self._add_field(grid, 0, 5, "結構", self.structure_combo)
+        self._add_field(grid, 0, 7, "結構", self.structure_combo)
 
         self.encoding_combo = QComboBox()
         self.encoding_combo.addItems(ENCODING_CHOICES)
         self.encoding_combo.currentIndexChanged.connect(
             lambda _index: self.encoding_changed.emit(i18n.combo_value(self.encoding_combo)))
-        self._add_field(grid, 0, 6, "讀取編碼", self.encoding_combo)
+        self._add_field(grid, 0, 8, "讀取編碼", self.encoding_combo)
+        # 三組用直線隔開：書的基本資料｜從目錄帶出來、寫進檔名的｜怎麼讀這個檔
+        for column in (2, 6):
+            divider = VDivider()
+            divider.setMinimumHeight(0)
+            divider.setMaximumHeight(16777215)
+            grid.addWidget(divider, 0, column)
         # 全部排成一行：書名最長、作者其次，其他欄位平分剩下的空間。視窗窄時每一欄至少
         # 放得下常見的內容（下拉框照選項、輸入框照幾個字），不會被壓到看不到字。
-        for column, stretch in enumerate((4, 3, 2, 2, 2, 2, 2)):
+        for column, stretch in enumerate((4, 3, 0, 2, 2, 2, 0, 2, 2)):
             grid.setColumnStretch(column, stretch)
         char = self.fontMetrics().horizontalAdvance("字")
-        for field, chars in ((self.title_input, 5), (self.author_input, 3), (self.last_vol_label, 3),
+        for field, chars in ((self.title_input, 4), (self.author_input, 3), (self.last_vol_label, 3),
                              (self.last_ch_label, 4)):
             field.setMinimumWidth(char * chars + 24)
         metrics = self.fontMetrics()

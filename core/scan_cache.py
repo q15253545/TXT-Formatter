@@ -15,11 +15,17 @@ from .user_rules import preset_match
 _CANDIDATE_MAX_LENGTH = 60
 
 
-def warm_line_caches(lines):
+def warm_ad_caches(lines):
+    """What the ad / author-note scan windows look up per line (warmed first: those windows can wait on it)."""
     for line in lines:
         _line_profile(line)
         forum_line_strength(line)
         meta_line_kind(line)
+
+
+def warm_other_caches(lines):
+    """Punctuation check and chapter-candidate lookups."""
+    for line in lines:
         _check_line(line)
         text = line.strip()
         if text and len(text) <= _CANDIDATE_MAX_LENGTH:
@@ -28,6 +34,14 @@ def warm_line_caches(lines):
                 preset_match(clean)
                 parse_weak_numbered_title(clean)
                 heading_word(clean)
+
+
+WARM_PHASES = (warm_ad_caches, warm_other_caches)
+
+
+def warm_line_caches(lines):
+    for phase in WARM_PHASES:
+        phase(lines)
 
 
 def freeze_line_caches():
@@ -46,3 +60,7 @@ def clear_line_caches():
     for cached in (compact_ad_text, forum_line_strength, meta_line_kind, _check_line, preset_match, heading_word, heading_number,
                    parse_weak_numbered_title):
         cached.cache_clear()
+    # Collect now: unfrozen garbage (the last book's cyclic leftovers) would otherwise sit in the oldest
+    # generation until this book's warm-up freezes it again, and pile up with every file opened.
+    # Cheap here — the caches were just emptied, so the collection only walks the window's own objects.
+    gc.collect()

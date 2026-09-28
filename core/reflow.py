@@ -320,7 +320,7 @@ def _plan_body_edits(body: str, base_offset: int, check_spaces: bool = True) -> 
 def reflow_lines(lines: list, protected_rows) -> tuple:
     """排版的「整理段落換行」：把正文裡固定欄寬的硬換行接回同一段。
 
-    protected_rows（章節標題、被標成非章節的行…）不動，也不會跟前後接在一起；
+    protected_rows（章節標題、移出目錄的行…）不動，也不會跟前後接在一起；
     兩個保護行之間的正文各自整理。回傳（新的行, 舊行號 → 新行號）：被接到上一行的
     舊行對到它接進去的那一行，章節標題的行號靠這份對照搬過去。"""
     from bisect import bisect_right

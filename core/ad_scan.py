@@ -365,6 +365,8 @@ _NOTE_SEPARATOR_REGEX = re.compile(
     r"^[-—–_~=*※☆★◆◇●○]{2,}(?:分割(?:线|線)|分隔(?:线|線)|分界(?:线|線))?[-—–_~=*※☆★◆◇●○]*$")
 # 整行被括號包住（後面可以多一個句號之類：「（第5更送上，求订阅……）。」）
 _NOTE_PAREN_REGEX = re.compile(r"^[(（【\[].*[)）】\]][。．.！!]?$")
+# Asking readers for tips / votes: never a chapter name (also used by the merge-subtitle preview)
+SUPPORT_REQUEST_WORDS = ("打赏", "打賞", "月票", "推荐票", "推薦票", "订阅", "訂閱", "求票", "加更")
 _NOTE_WORDS = (
     "作者", "读者", "讀者", "书友", "書友", "感谢", "感謝", "谢谢", "謝謝", "订阅", "訂閱", "首订", "首訂",
     "月票", "推荐票", "推薦票", "打赏", "打賞", "收藏", "投票", "加更", "更新", "停更", "断更", "斷更",
@@ -805,7 +807,7 @@ def lost_char_candidates(lines) -> list:
     """轉存遺失的字：每一行一個候選，fix 是拿掉行首問號之後的樣子（整行只有問號的換成空行）。"""
     candidates = []
     for row, line in enumerate(lines):
-        if "?" not in line[:8]:
+        if line.lstrip(" \t\u3000")[:1] != "?":
             continue
         match = _LOST_LEAD.match(line)
         if not match:
@@ -914,6 +916,9 @@ _AD_BLOCK_REACH = 10         # 往上／往下最多找幾行分隔線
 _AD_BLOCK_MAX_LINES = 12     # 分隔線中間最多幾行文字（太長就不是一段廣告）
 
 
+_BLOCK_WORDS = QQ_WORDS + SOURCE_WORDS + PUBLISH_WORDS + WECHAT_WORDS
+
+
 def _expand_ads_to_separator_blocks(lines, hits, title_rows):
     """廣告常用兩條分隔線框成一段（群號、網址夾在「全網小說資源共享」「已滿請換群號」
     這類說明中間）：候選的上下各找得到分隔線、中間沒有章節標題、而且不長，就整段收進來。"""
@@ -933,6 +938,10 @@ def _expand_ads_to_separator_blocks(lines, hits, title_rows):
             row += step
         return None
 
+    def ad_worded(line):
+        compact = compact_ad_text(line)
+        return _compact_contains_any(compact, _BLOCK_WORDS) or bool(find_domain_tokens(compact))
+
     for hit in hits:
         if not (hit["types"] & _AD_TYPES):
             continue
@@ -943,16 +952,19 @@ def _expand_ads_to_separator_blocks(lines, hits, title_rows):
         inside = [line for line in lines[top + 1:bottom] if line.strip() and not looks_like_separator(line)]
         if len(inside) > _AD_BLOCK_MAX_LINES:
             continue
+        # Every line the block would add must carry its own ad wording: a story paragraph that merely sits
+        # between two separators next to an ad line is not part of the ad (ambiguous prose is kept).
+        added = [row for row in range(top + 1, bottom)
+                 if not hit["start"] <= row <= hit["end"] and lines[row].strip() and not looks_like_separator(lines[row])]
+        if not all(ad_worded(lines[row]) for row in added):
+            continue
         # 後面緊接著再一小段分隔線框住的廣告說明（「已满或搜不到请换个群号」）也一起收
         while True:
             following = find(bottom + 1, 1)
             if following is None:
                 break
-            extra = [compact_ad_text(line) for line in lines[bottom + 1:following]
-                     if line.strip() and not looks_like_separator(line)]
-            if not extra or len(extra) > 3 or not any(
-                    _compact_contains_any(text, QQ_WORDS + SOURCE_WORDS + PUBLISH_WORDS + WECHAT_WORDS)
-                    for text in extra):
+            extra = [line for line in lines[bottom + 1:following] if line.strip() and not looks_like_separator(line)]
+            if not extra or len(extra) > 3 or not all(ad_worded(line) for line in extra):
                 break
             bottom = following
         hit["start"], hit["end"] = min(hit["start"], top), max(hit["end"], bottom)
@@ -1073,9 +1085,17 @@ def _inline_ads(lines, rows):
             # 故事裡一再提到的網站（「買下 example.com 這個網域」）：沒有 www、大小寫正常、前後每次都不一樣、
             # 也不在段尾
             continue
+        # Injected fragments sit at the end of the paragraph or are wrapped in decoration (☆…★, 【…】). One
+        # repeated in the middle of a sentence with nothing around it may be the story's own text ("請收件者查看
+        # https://… 並且讀完這封信"): list it, but never pre-select it.
+        at_end = sum(not lines[row][end:].strip() for row, _start, end, _text in items) * 2 > len(items)
+        # looked at per occurrence: one site may use several wrappings ("[www…]" in some lines, "の www…★" in others)
+        decorated = sum(lines[row][start - 1:start] in _INLINE_OPENERS | {"の"}
+                        or lines[row][end:end + 1] in _INLINE_AFTER_CHARS - {" ", "　"}
+                        for row, start, end, _text in items) * 2 > len(items)
         for row, start, end, _text in items:
             spans[row].append((start - len(before), end + len(after)))
-            counts[row] = max(counts.get(row, 0), len(rows_with))
+            counts[row] = max(counts.get(row, 0), len(rows_with) if at_end or decorated else min(len(rows_with), 4))
     candidates = []
     for row, ranges in spans.items():
         fixed = lines[row]

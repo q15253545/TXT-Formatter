@@ -10,7 +10,7 @@ from PySide6.QtGui import (
     QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QMenu, QPlainTextEdit,
+    QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit,
     QPushButton, QScrollArea,
     QSizePolicy, QSplitter, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
 )
@@ -570,7 +570,7 @@ def dialog_frame(dialog, margins=(20, 18, 20, 14), enter_submits: bool = False, 
     """功能視窗的版面：上面放內容，最下面一條貫穿整個視窗的分隔線，線下面是按鈕列
     （跟側邊卡片置底的按鈕同一種做法）。回傳（內容用的 QVBoxLayout, 按鈕列用的 QHBoxLayout）。
 
-    enter_submits：只有簡單的確認視窗（新增章節、匯出檔名…）在輸入框按 Enter 等於按主要按鈕；
+    enter_submits：只有簡單的確認視窗（新增章節、匯出設定…）在輸入框按 Enter 等於按主要按鈕；
     工具視窗的 Enter 只做那一欄的事（見 _EnterStaysLocal）。
     intro：內容最上面一行灰字，一句話說明這個視窗做什麼（不重複視窗標題）。"""
     if not enter_submits:
@@ -872,7 +872,7 @@ class Editor(QPlainTextEdit):
     # --- 合併下行標題的預覽 ---------------------------------------------
 
     def set_title_preview(self, appended: dict, hidden_rows, color: str):
-        """「自動合併下行標題」開著時：本文一個字都不改，只在畫面上把章名接在標題後面
+        """「自動合併標題」開著時：本文一個字都不改，只在畫面上把章名接在標題後面
         （非原文色），原本放章名的那幾行先藏起來。appended 是 行號 → 要接上去的章名。
 
         記在段落（QTextBlock）自己身上（userState 當索引），使用者在前面打字、行號位移時
@@ -1245,3 +1245,107 @@ class ContextPreview(QTextEdit):
         block = self.document().findBlockByNumber(len(before))
         self.setTextCursor(QTextCursor(block))
         self.ensureCursorVisible()
+
+
+# ---------------------------------------------------------------- "+" snippet menus (find & replace, custom rules)
+# groups: (heading, ((label, text, hint), ...)). In the text, "‸" is where the caret ends up (a selection is wrapped
+# there) and «X» is a placeholder that gets selected, ready to be typed over.
+_CARET, _PLACEHOLDER = "‸", ("«", "»")
+
+
+def insert_snippet(line_edit: QLineEdit, template: str):
+    """Insert a snippet at the caret (replacing the selection, or wrapping it at "‸")."""
+    selected = line_edit.selectedText()
+    text = template.replace(_CARET, selected) if _CARET in template else template
+    placeholder = None
+    if _PLACEHOLDER[0] in text:
+        before, rest = text.split(_PLACEHOLDER[0], 1)
+        inside, after = rest.split(_PLACEHOLDER[1], 1)
+        placeholder = (len(before), len(inside))
+        text = before + inside + after
+    line_edit.insert(text)
+    start = line_edit.cursorPosition() - len(text)
+    if placeholder is not None:
+        line_edit.setSelection(start + placeholder[0], placeholder[1])
+    elif _CARET in template:
+        line_edit.setCursorPosition(start + template.index(_CARET) + len(selected))
+    line_edit.setFocus()
+
+
+class _SnippetMenu(QMenu):
+    """Clicking an item inserts it and keeps the menu open, so several pieces can be put together in one go."""
+
+    def mouseReleaseEvent(self, event):
+        action = self.activeAction()
+        if action is not None and action.isEnabled() and action.data() is not None:
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+
+def snippet_menu(parent, line_edit: QLineEdit, groups) -> QMenu:
+    menu = _SnippetMenu(parent)
+    menu.setToolTipsVisible(True)
+    for position, (heading, items) in enumerate(groups):
+        if position:
+            menu.addSeparator()
+        header = menu.addAction(i18n.T(heading))
+        header.setEnabled(False)
+        for label, template, hint in items:
+            shown = template.replace(_CARET, "").replace(_PLACEHOLDER[0], "").replace(_PLACEHOLDER[1], "")
+            action = menu.addAction(f"　{i18n.T(label)}\t{shown}")
+            action.setData(template)
+            action.setToolTip(i18n.T(hint))
+            action.triggered.connect(lambda _checked=False, t=template: insert_snippet(line_edit, t))
+    return menu
+
+
+def snippet_button(parent, line_edit, groups, tooltip: str) -> IconButton:
+    """The small "+" next to an input: a menu of building blocks inserted at the caret."""
+    button = IconButton("plus", tooltip, size=16)
+    tokens = active_tokens()          # windows re-colour their own icon buttons when the theme changes
+    button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
+    menu = snippet_menu(parent, line_edit, groups)
+    # popup, not exec: nothing waits on the menu (it stays open while snippets are picked)
+    button.clicked.connect(lambda: menu.popup(button.mapToGlobal(button.rect().bottomLeft())))
+    return button
+
+
+class GroupCheckBox(QCheckBox):
+    """A section title that is itself the checkbox for a group of checkboxes (detect types, check items): a click
+    checks all of them — or, when all are checked, unchecks all; some checked shows the partial mark. Saves a row
+    of "select all / none" buttons next to the result table's own. A click on the title changes the members
+    silently and emits members_changed once, so the window rescans once instead of once per member."""
+
+    members_changed = Signal()
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("groupCheck")
+        self.setTristate(True)
+        self._members: list = []
+
+    def add_member(self, box: QCheckBox):
+        self._members.append(box)
+        box.toggled.connect(self._sync)
+        self._sync()
+
+    def nextCheckState(self):
+        on = self.checkState() != Qt.CheckState.Checked
+        for box in self._members:
+            box.blockSignals(True)
+            box.setChecked(on)
+            box.blockSignals(False)
+        self._sync()
+        self.members_changed.emit()
+
+    def _sync(self, *_args):
+        count = sum(box.isChecked() for box in self._members)
+        if count and count == len(self._members):
+            state = Qt.CheckState.Checked
+        else:
+            state = Qt.CheckState.PartiallyChecked if count else Qt.CheckState.Unchecked
+        self.blockSignals(True)
+        self.setCheckState(state)
+        self.blockSignals(False)
+

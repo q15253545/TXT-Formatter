@@ -51,13 +51,6 @@ FILENAME_VARIABLES = (("title", "書名"), ("author", "作者"), ("volume", "最
                       ("status", "連載狀態"))
 # 整段【更新至…】也包在 [ ] 裡：目錄還沒有章節時不會寫出「【更新至第章】」
 DEFAULT_ONGOING_TEMPLATE = "《{title}》[【更新至[第{volume}卷]第{chapter}章[+{extra}]】]作者：{author}"
-# 以前的預設格式：設定檔裡存的是這個就換成現在的預設（使用者自己改過的不動）
-_OLD_DEFAULT_TEMPLATES = {"《{title}》【更新至[第{volume}卷]第{chapter}章[+{extra}]】作者：{author}":
-                          DEFAULT_ONGOING_TEMPLATE}
-
-
-def upgrade_template(template: str) -> str:
-    return _OLD_DEFAULT_TEMPLATES.get(template, template)
 DEFAULT_COMPLETED_TEMPLATE = "《{title}》（完結[+{extra}]）作者：{author}"
 
 _NUMBER_REGEX = re.compile(r"[0-9０-９]+(?:[.．][0-9０-９]+)?|[零〇一二兩两三四五六七八九十百千万萬億亿兆]+")
@@ -125,9 +118,21 @@ def filename_template_for(status: str, ongoing: str, completed: str) -> str:
     return (completed or DEFAULT_COMPLETED_TEMPLATE) if status == "已完結" else (ongoing or DEFAULT_ONGOING_TEMPLATE)
 
 
+FILENAME_MAX_LENGTH = 200
+
+
 def build_smart_filename(fields: dict, template: str) -> str:
     """組出建議的匯出檔名（含 .txt），並把檔名不能用的字元換成底線。
     簡繁轉換是另一件事，呼叫端自己決定要不要再套 core.script_convert.convert_script。"""
-    name = re.sub(r"\s+", " ", render_filename_template(template, fields)).strip()
-    name = name or fields.get("title") or "未命名"
-    return _FILENAME_UNSAFE_REGEX.sub("_", name) + ".txt"
+    def render(values):
+        text = re.sub(r"\s+", " ", render_filename_template(template, values)).strip()
+        return text or values.get("title") or "未命名"
+
+    name = render(fields)
+    # Windows allows 255 characters per name (leave room for "- 複製" and the like): shorten the title first,
+    # so the latest chapter and the author stay in the name
+    title = fields.get("title") or ""
+    while len(name) > FILENAME_MAX_LENGTH and len(title) > 1:
+        title = title[:max(1, len(title) - (len(name) - FILENAME_MAX_LENGTH) - 1)]
+        name = render(dict(fields, title=title + "…"))
+    return _FILENAME_UNSAFE_REGEX.sub("_", name[:FILENAME_MAX_LENGTH]) + ".txt"

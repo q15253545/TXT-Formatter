@@ -376,6 +376,13 @@ def plan_fix(lines, row: int, kind: str):
       破折號、波浪號    蹄聲————— → 蹄聲——；嘎吱——- → 嘎吱——；啊~~~~ → 啊～
       分隔線不一致      ===（使用者選了統一成 ---）→ ---（見 scan_quote_problems 的 separator_target）
     """
+    plan = _plan_fix(lines, row, kind)
+    if plan is not None:
+        plan["kind"], plan["row"] = kind, row
+    return plan
+
+
+def _plan_fix(lines, row: int, kind: str):
     line = lines[row]
     indent, text = _strip_indent(line)
     if not text:
@@ -449,22 +456,52 @@ def plan_fix(lines, row: int, kind: str):
     return None
 
 
+# Fixes that only rewrite characters inside one line: two of them on the same line are independent, so the
+# second one is re-planned on the line the first one produced instead of being dropped.
+_LINE_LOCAL_KINDS = frozenset({"separator_line", "repeated_punct", "dash_run"})
+
+
 def apply_fixes(lines, plans) -> tuple:
     """套用多個修正計畫，回傳（新的行, 實際套用了幾個）。
 
     兩個計畫改到同一行時只套用前面那一個（例如「對話中途斷行」與下一行的
     「少了開引號」其實是同一件事，接一次就好）。由後往前套，前面的行號才
-    不會被改掉。"""
-    accepted, last_end = [], -1
+    不會被改掉。只改一行裡的字的修正（重複標點、破折號…）例外：被擋下來的
+    那個照套完之後的那一行重新算一次，再套上去。"""
+    accepted, skipped, last_end = [], [], -1
     for plan in sorted(plans, key=lambda item: (item["start"], item["end"])):
         if plan["start"] < last_end:
+            skipped.append(plan)
             continue
         accepted.append(plan)
         last_end = plan["end"]
     result = list(lines)
     for plan in reversed(accepted):
         result[plan["start"]:plan["end"]] = plan["after"]
-    return result, len(accepted)
+    applied = len(accepted)
+
+    def new_rows(row):
+        """The lines an original row ended up in: one line, or every line of the block that replaced it
+        (a line split into two dialogues, two lines joined into one)."""
+        shift = 0
+        for plan in accepted:
+            if plan["end"] <= row:
+                shift += len(plan["after"]) - (plan["end"] - plan["start"])
+            elif plan["start"] <= row:
+                return range(plan["start"] + shift, plan["start"] + shift + len(plan["after"]))
+        return range(row + shift, row + shift + 1)
+
+    for plan in skipped:
+        if plan.get("kind") not in _LINE_LOCAL_KINDS or "row" not in plan:
+            continue
+        fixed_any = False
+        for row in new_rows(plan["row"]):
+            again = plan_fix(result, row, plan["kind"]) if 0 <= row < len(result) else None
+            if again is not None:          # line-local: one line in, one line out, so later rows don't move
+                result[again["start"]:again["end"]] = again["after"]
+                fixed_any = True
+        applied += fixed_any
+    return result, applied
 
 
 def _is_title_row(line: str) -> bool:

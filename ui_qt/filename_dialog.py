@@ -1,4 +1,5 @@
-"""匯出檔名設定：連載中／已完結兩個格式（各自即時預覽）、插入變數的小標籤、檔名繁簡。"""
+"""匯出設定（匯出 TXT 旁邊的箭頭）：連載中／已完結兩個檔名格式（各自即時預覽）、插入變數的小標籤、
+檔名繁簡，以及匯出時要不要移除章節標記。"""
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -10,7 +11,7 @@ from core.filename_meta import (
 )
 from core.script_convert import SCRIPT_CHOICES, convert_script
 from . import i18n
-from .widgets import dialog_frame, flow_container, keep_on_screen
+from .widgets import Divider, ToggleSwitch, dialog_frame, flow_container, keep_on_screen
 
 
 class _TemplateInput(QLineEdit):
@@ -23,18 +24,19 @@ class _TemplateInput(QLineEdit):
 
 
 class FilenameDialog(QDialog):
-    """接受後結果在 result_ongoing、result_completed、result_script。"""
+    """接受後結果在 result_ongoing、result_completed、result_script、result_strip_markers。"""
 
-    def __init__(self, ongoing: str, completed: str, script: str, fields: dict, status: str, parent=None):
+    def __init__(self, ongoing: str, completed: str, script: str, fields: dict, status: str, parent=None,
+                 strip_markers: bool = True):
         super().__init__(parent)
-        self.setWindowTitle("匯出檔名")
+        self.setWindowTitle("匯出設定")
         self.setMinimumWidth(660)
         keep_on_screen(self)
         self._fields = fields
-        self.result_ongoing = self.result_completed = self.result_script = None
+        self.result_ongoing = self.result_completed = self.result_script = self.result_strip_markers = None
 
         root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True,
-                                    intro="連載中、已完結各一種格式，照書籍資料組成。")
+                                    intro="檔名照書籍資料組成，連載中、已完結各一種格式。")
         root.setSpacing(6)
 
         using_completed = status == "已完結"
@@ -61,6 +63,14 @@ class FilenameDialog(QDialog):
         # 最小寬度照小標籤算：換字型、換縮放時也排得成一列
         chip_width = sum(chip_flow.itemAt(i).widget().sizeHint().width() + 6 for i in range(chip_flow.count()))
         self.setMinimumWidth(max(660, chip_width + 48))
+
+        # 章節標記（[::] 這類）只在匯出時有差：跟檔名放在一起
+        root.addSpacing(6)
+        root.addWidget(Divider())
+        root.addSpacing(6)
+        self.strip_markers_toggle = ToggleSwitch("匯出時移除章節標記", fill=False)
+        self.strip_markers_toggle.setChecked(strip_markers)
+        root.addWidget(self.strip_markers_toggle)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(10)
@@ -100,7 +110,7 @@ class FilenameDialog(QDialog):
         header.setSpacing(8)
         header.addWidget(QLabel(label_text))
         if in_use:
-            badge = QLabel("目前使用")
+            badge = QLabel("本書適用")
             badge.setObjectName("badge")
             header.addWidget(badge)
         header.addStretch(1)
@@ -143,9 +153,11 @@ class FilenameDialog(QDialog):
     def _reset(self):
         self.ongoing_input.setText(DEFAULT_ONGOING_TEMPLATE)
         self.completed_input.setText(DEFAULT_COMPLETED_TEMPLATE)
+        self.strip_markers_toggle.setChecked(True)
 
     def _accept(self):
         self.result_ongoing = self.ongoing_input.text().strip() or DEFAULT_ONGOING_TEMPLATE
         self.result_completed = self.completed_input.text().strip() or DEFAULT_COMPLETED_TEMPLATE
         self.result_script = i18n.combo_value(self.script_combo)
+        self.result_strip_markers = self.strip_markers_toggle.isChecked()
         self.accept()

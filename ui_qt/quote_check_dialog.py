@@ -21,7 +21,7 @@ from core.quote_check import (
 from . import dialogs, i18n
 from .sortable_table import PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
 from .theme import active_tokens
-from .widgets import ContextPreview, Divider, ScopeToggle, dialog_frame, flow_container, size_dialog
+from .widgets import ContextPreview, Divider, GroupCheckBox, ScopeToggle, dialog_frame, flow_container, size_dialog
 
 # 每種問題該怎麼看待，寫在勾選框的提示裡。
 _KIND_TIPS = {
@@ -223,9 +223,9 @@ class QuoteCheckDialog(QDialog):
         self.scope_check.toggled.connect(self._run_scan)
         root.addWidget(self.scope_check)
 
-        title = QLabel("檢查項目")
-        title.setObjectName("appTitle")
-        root.addWidget(title)
+        self.kind_group = GroupCheckBox("檢查項目")
+        self.kind_group.members_changed.connect(self._refresh)
+        root.addWidget(self.kind_group)
 
         kind_box, kind_flow = flow_container(uniform=True)
         self._kind_checks = {}
@@ -237,6 +237,7 @@ class QuoteCheckDialog(QDialog):
             checkbox.setToolTip(_KIND_TIPS.get(key, ""))
             checkbox.toggled.connect(self._refresh)
             self._kind_checks[key] = checkbox
+            self.kind_group.add_member(checkbox)
             kind_flow.addWidget(checkbox)
         root.addWidget(kind_box)
         # 分隔線統一：同一本書裡 --- 和 === 混用時，由使用者決定要不要統一、統一成哪一種。

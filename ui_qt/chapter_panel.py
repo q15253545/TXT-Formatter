@@ -13,11 +13,10 @@ from .widgets import Divider, HoverIconButton, IconButton, PanelScroll, ToggleSw
 
 MISSING_CHECK_MODES = ["僅檢查中間缺口", "每卷從第1章起算", "同作品跨卷接續"]
 
-# 「標註為非章節」「將所選文字加入目錄」針對的是特定一行／一個章節，
-# 放在目錄與本文各自的右鍵選單裡，操作對象才清楚；這裡只留整體性的動作。
+# 針對某一行／某幾章的動作（新增章節、移出目錄、加入目錄…）在目錄與本文各自的右鍵選單，
+# 操作對象才清楚；這裡只留整體性的動作。
 _ACTIONS = [
     ("file-search", "辨識章節", "recognition_requested"),
-    ("plus", "新增章節", "insert_requested"),
     ("list-ordered", "自訂章節規則", "rules_requested"),
     ("merge", "合併重複章節", "merge_duplicates_requested"),
 ]
@@ -26,15 +25,14 @@ _ACTIONS = [
 class ChapterPanel(QWidget):
     closed = Signal()
     recognition_requested = Signal()
-    insert_requested = Signal()
     rules_requested = Signal()
     merge_duplicates_requested = Signal()
     check_missing_requested = Signal()
     missing_mode_changed = Signal()
     merge_titles_toggled = Signal(bool)
-    skip_duplicates_toggled = Signal(bool)
     infer_volumes_toggled = Signal(bool)
-    infer_volume_names_toggled = Signal(bool)
+    show_markers_toggled = Signal(bool)
+    auto_apply_preview_toggled = Signal(bool)
     apply_volumes_requested = Signal()
     # 點檢查結果裡的某一筆：「群組索引|章號|gap 或 dup」
     report_link_activated = Signal(str)
@@ -70,24 +68,20 @@ class ChapterPanel(QWidget):
         root.addWidget(Divider())
 
         # 這一段的開關都只是預覽（目錄、本文用非原文色標出來），按「套用到本文」才真的寫進去。
-        # 自動合併下行標題：只有章號的標題（「第1章」）把下一行的章名接上來。
-        self.merge_titles_toggle = ToggleSwitch("自動合併下行標題")
+        # 自動合併標題：只有章號的標題（「第1章」）把下一行的章名接上來；同一章的標題重複出現、
+        # 中間只有幾行作者的話時只留第一個。兩種都是整理標題行，一起開、一起套用。
+        self.merge_titles_toggle = ToggleSwitch("自動合併標題")
         self.merge_titles_toggle.toggled.connect(self._on_merge_titles_toggled)
         root.addWidget(self.merge_titles_toggle)
-        # 自動合併重複標題：同一章的標題重複出現、中間只有幾行作者的話時，只留第一個。
-        self.skip_duplicates_toggle = ToggleSwitch("自動合併重複標題")
-        self.skip_duplicates_toggle.toggled.connect(self._on_skip_duplicates_toggled)
-        root.addWidget(self.skip_duplicates_toggle)
-        # 自動補齊卷號：本文沒寫卷標題時，從卷結尾行（第一卷終…）或章號重新從 1 起算
-        # 推出缺少的卷，只加在目錄上當預覽（說明見檔名列的「說明」）。
-        # 自動補齊卷名：補出來的卷找得到卷名時一起寫上；卷號沒開時不能開。
-        self.infer_volumes_toggle = ToggleSwitch("自動補齊卷號")
+        # 自動補齊卷號與卷名：本文沒寫卷標題時，從卷結尾行（第一卷終…）、章號重新從 1 起算、
+        # 每章前面帶的卷（「卷一 山路 第一章」）推出缺少的卷，只加在目錄上當預覽（說明見檔名列的「說明」）。
+        self.infer_volumes_toggle = ToggleSwitch("自動補齊卷號與卷名")
         self.infer_volumes_toggle.toggled.connect(self._on_infer_volumes_toggled)
         root.addWidget(self.infer_volumes_toggle)
-        self.infer_volume_names_toggle = ToggleSwitch("自動補齊卷名")
-        self.infer_volume_names_toggle.setEnabled(False)
-        self.infer_volume_names_toggle.toggled.connect(self.infer_volume_names_toggled.emit)
-        root.addWidget(self.infer_volume_names_toggle)
+        # 一鍵排版時先把上面幾個開關的預覽寫進本文，跟排版算同一步
+        self.auto_apply_toggle = ToggleSwitch("自動套用到一鍵排版")
+        self.auto_apply_toggle.clicked.connect(lambda checked: self.auto_apply_preview_toggled.emit(checked))
+        root.addWidget(self.auto_apply_toggle)
         # 開關只是預覽；確認後按這裡才寫進本文（合併標題、補上的卷一起寫）
         self.apply_volumes_button = QPushButton("套用到本文")
         self.apply_volumes_button.setEnabled(False)
@@ -95,15 +89,16 @@ class ChapterPanel(QWidget):
         root.addWidget(self.apply_volumes_button)
 
         root.addWidget(Divider())
+        # 章節標記（[::] 這類，寫在檔案裡保存目錄的手動調整）顯示與否；匯出時要不要拿掉在匯出設定
+        self.show_markers_toggle = ToggleSwitch("顯示章節標記")
+        self.show_markers_toggle.toggled.connect(self.show_markers_toggled.emit)
+        root.addWidget(self.show_markers_toggle)
+        root.addWidget(Divider())
 
-        # 缺章檢查：範圍設定跟執行按鈕放在同一組，先選範圍再按檢查。
-        mode_label = QLabel("缺章檢查範圍")
-        mode_label.setObjectName("fileLabel")
-        root.addWidget(mode_label)
+        # 缺章檢查：範圍只有看結果時才要選，放在結果區最上面，卡片上只留按鈕。
         self.missing_mode_combo = QComboBox()
         self.missing_mode_combo.addItems(MISSING_CHECK_MODES)
         self.missing_mode_combo.currentIndexChanged.connect(lambda _index: self.missing_mode_changed.emit())
-        root.addWidget(self.missing_mode_combo)
         self.check_missing_button = HoverIconButton("list-checks", "檢查缺章")
         self.check_missing_button.clicked.connect(self.check_missing_requested.emit)
         root.addWidget(self.check_missing_button)
@@ -120,26 +115,14 @@ class ChapterPanel(QWidget):
         self._refresh_apply_button()
         self.merge_titles_toggled.emit(on)
 
-    def _on_skip_duplicates_toggled(self, on: bool):
-        self._refresh_apply_button()
-        self.skip_duplicates_toggled.emit(on)
-
-    def set_skip_duplicates(self, on: bool):
-        self.skip_duplicates_toggle.blockSignals(True)
-        self.skip_duplicates_toggle.setChecked(on)
-        self.skip_duplicates_toggle.blockSignals(False)
-        self._refresh_apply_button()
-
     def _on_infer_volumes_toggled(self, on: bool):
-        self.infer_volume_names_toggle.setEnabled(on)
         self._refresh_apply_button()
         self.infer_volumes_toggled.emit(on)
 
     def _refresh_apply_button(self):
-        """合併標題或補齊卷號任一個開著，才有東西可以套用。"""
+        """合併標題或補齊卷任一個開著，才有東西可以套用。"""
         self.apply_volumes_button.setEnabled(
-            self.merge_titles_toggle.isChecked() or self.skip_duplicates_toggle.isChecked()
-            or self.infer_volumes_toggle.isChecked())
+            self.merge_titles_toggle.isChecked() or self.infer_volumes_toggle.isChecked())
 
     def set_merge_titles(self, on: bool):
         """還原上次的設定（不送出訊號）。"""
@@ -148,14 +131,15 @@ class ChapterPanel(QWidget):
         self.merge_titles_toggle.blockSignals(False)
         self._refresh_apply_button()
 
-    def set_infer_volumes(self, numbers: bool, names: bool):
+    def set_infer_volumes(self, on: bool):
         """還原上次的設定（不送出訊號）。"""
-        for toggle, value in ((self.infer_volumes_toggle, numbers), (self.infer_volume_names_toggle, names)):
-            toggle.blockSignals(True)
-            toggle.setChecked(value)
-            toggle.blockSignals(False)
-        self.infer_volume_names_toggle.setEnabled(numbers)
+        self.infer_volumes_toggle.blockSignals(True)
+        self.infer_volumes_toggle.setChecked(on)
+        self.infer_volumes_toggle.blockSignals(False)
         self._refresh_apply_button()
+
+    def set_auto_apply(self, on: bool):
+        self.auto_apply_toggle.setChecked(on)
 
     def _build_report_pane(self) -> QWidget:
         """檢查缺章的結果：固定顯示在按鈕下方，不再用狀態列（狀態列會被下
@@ -177,6 +161,7 @@ class ChapterPanel(QWidget):
         self.report_close_button.clicked.connect(self._close_report)
         title_row.addWidget(self.report_close_button)
         pane_layout.addLayout(title_row)
+        pane_layout.addWidget(self.missing_mode_combo)
 
         scroll = QScrollArea()
         scroll.setObjectName("panelScroll")

@@ -18,7 +18,7 @@ import re
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -32,21 +32,27 @@ from core.user_rules import is_risky_pattern, match_user_chapter_rule, preset_ru
 from . import dialogs, i18n
 from .sortable_table import PreviewTable, CONFIDENCE_ORDER, data_index, limit_rows, enable_sorting, make_item, resort, setup_columns
 from .recognition_dialog import managed_rule
-from .widgets import Divider, dialog_frame, fit_window_to_screen, size_dialog
+from .widgets import Divider, dialog_frame, fit_window_to_screen, size_dialog, snippet_button
 
 _LEVEL_LABELS = {1: "卷", 2: "章"}
 
-# 「快速插入」的片段：名稱 → （插入的正則, 說明）。寫給不熟正則的人看，
-# 所以說明一律用白話，不解釋語法本身。
-_SNIPPETS = [
-    ("章號", r"(?P<number>[0-9０-９]{1,8})", "數字章號（001、12…）；缺章檢查與連續編號都靠它"),
-    ("中文章號", r"(?P<number>[一二兩两三四五六七八九十百千零〇]{1,8})", "中文數字章號（一、十二…）"),
-    ("章名", r"(?P<title>\S.*?)", "章號後面那段標題文字"),
-    ("任意文字", ".*", "任何字都可以，長度不限"),
-    ("空白", r"\s*", "可有可無的空白"),
-    ("行首", "^", "從這一行的開頭開始比對"),
-    ("行尾", "$", "比對到這一行結束"),
-]
+# The "+" next to the regex input (same menu as find & replace): (heading, ((label, text, hint), ...)).
+# Hints are plain words for people who don't know regex; they don't explain the syntax.
+_SNIPPETS = (
+    ("編號", (
+        ("章號", r"(?P<number>[0-9０-９]{1,8})", "數字章號（001、12…）；缺章檢查與連續編號都靠它"),
+        ("中文章號", r"(?P<number>[一二兩两三四五六七八九十百千零〇]{1,8})", "中文數字章號（一、十二…）"),
+    )),
+    ("文字", (
+        ("章名", r"(?P<title>\S.*?)", "章號後面那段標題文字"),
+        ("任意文字", ".*", "任何字都可以，長度不限"),
+        ("空白", r"\s*", "可有可無的空白"),
+    )),
+    ("位置", (
+        ("行首", "^", "從這一行的開頭開始比對"),
+        ("行尾", "$", "比對到這一行結束"),
+    )),
+)
 
 _RULES_TAB, _CANDIDATES_TAB = 0, 1
 
@@ -245,36 +251,29 @@ class RulesDialog(QDialog):
         sample_row.addWidget(sample_button)
         editor_grid.addLayout(sample_row, 1, 1, 1, 3)
 
-        # 「清空欄位」放在正則欄右邊，跟上一列的「產生規則」同寬、上下對齊。
+        # 正則欄右邊是跟尋找取代一樣的「＋」：插入片段，一次可以接好幾個
         editor_grid.addWidget(QLabel("正則"), 2, 0)
         pattern_row = QHBoxLayout()
-        pattern_row.setSpacing(8)
+        pattern_row.setSpacing(6)
         self.pattern_input = QLineEdit()
         self.pattern_input.textChanged.connect(lambda _: self._validate_pattern(show_error=False))
+        # 打完正則按 Enter 就看本文有幾行符合（跟尋找框按 Enter 就搜尋同一個習慣）；不新增、不儲存
+        self.pattern_input.returnPressed.connect(self._test_current_document)
         pattern_row.addWidget(self.pattern_input, 1)
-        clear_button = QPushButton("清空欄位")
-        clear_button.clicked.connect(self._new_rule)
-        pattern_row.addWidget(clear_button)
+        self.snippet_button = snippet_button(self, self.pattern_input, _SNIPPETS, "插入正則寫法")
+        pattern_row.addWidget(self.snippet_button)
         editor_grid.addLayout(pattern_row, 2, 1, 1, 3)
-        side_width = max(sample_button.sizeHint().width(), clear_button.sizeHint().width())
-        sample_button.setFixedWidth(side_width)
-        clear_button.setFixedWidth(side_width)
 
-        # 快速插入用下拉選單（一排按鈕在窄視窗會換行）；同一列右邊放編輯區的動作。
+        # 編輯區的動作：左邊不改規則清單（清空欄位、測試目前文件），右邊寫進清單（儲存變更、新增規則）
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
-        self.snippet_button = QPushButton("快速插入")
-        self.snippet_button.setObjectName("menuButton")
-        snippet_menu = QMenu(self.snippet_button)
-        for label, snippet, _explanation in _SNIPPETS:
-            action = snippet_menu.addAction(label)
-            action.triggered.connect(lambda _checked=False, text=snippet: self._insert_snippet(text))
-        self.snippet_button.setMenu(snippet_menu)
-        action_row.addWidget(self.snippet_button)
-        action_row.addStretch(1)
+        clear_button = QPushButton("清空欄位")
+        clear_button.clicked.connect(self._new_rule)
+        action_row.addWidget(clear_button)
         test_button = QPushButton("測試目前文件")
         test_button.clicked.connect(self._test_current_document)
         action_row.addWidget(test_button)
+        action_row.addStretch(1)
         self.save_button = QPushButton("儲存變更")
         self.save_button.clicked.connect(lambda: self._save_editor(refresh=True))
         action_row.addWidget(self.save_button)
@@ -562,11 +561,6 @@ class RulesDialog(QDialog):
         self.name_input.setText(rule["name"])
         self.pattern_input.setText(rule["pattern"])
         i18n.set_combo_value(self.level_combo, _LEVEL_LABELS.get(rule["level"], "章"))
-
-    def _insert_snippet(self, snippet: str):
-        """把片段插在正則欄游標的位置，插完游標停在片段後面。"""
-        self.pattern_input.insert(snippet)
-        self.pattern_input.setFocus()
 
     def _build_from_sample(self):
         """貼一行真正的章節標題，直接推出規則，不用自己寫正則。"""

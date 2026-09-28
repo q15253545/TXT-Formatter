@@ -10,20 +10,10 @@ from pathlib import Path
 _CONFIG_ROOT = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
 APP_DATA_DIR = (Path(os.environ["TXT_TOOL_DATA_DIR"]) if os.environ.get("TXT_TOOL_DATA_DIR")
                 else _CONFIG_ROOT / "TXTFormatter")
-# 以前的資料夾名稱：還在、新的又還沒建立，就整個改名過來（規則、介面設定、記錄檔都留著）
-_OLD_DATA_DIR = _CONFIG_ROOT / "TXTFormatterV3"
-if not os.environ.get("TXT_TOOL_DATA_DIR") and _OLD_DATA_DIR.is_dir() and not APP_DATA_DIR.exists():
-    try:
-        _OLD_DATA_DIR.rename(APP_DATA_DIR)
-    except OSError:
-        pass                # 被佔用（例如舊版還開著）：這次先用新資料夾，下次啟動再搬
 RULES_FILE = APP_DATA_DIR / "chapter_rules.json"
 WINDOW_FILE = APP_DATA_DIR / "window.json"
 UI_STATE_FILE = APP_DATA_DIR / "ui_state.json"
 
-# 預設沒有任何自訂規則；常用格式改在「自訂章節規則」視窗裡勾選
-# （core.user_rules.PRESET_RULES），一種格式一條，不再一條規則包多種寫法。
-DEFAULT_USER_RULES = []
 
 
 def _load_json(path, fallback):
@@ -47,7 +37,7 @@ def _save_json(path, value):
 
 
 def load_user_chapter_rules():
-    rules = _load_json(RULES_FILE, DEFAULT_USER_RULES)
+    rules = _load_json(RULES_FILE, [])
     valid = []
     for rule in rules if isinstance(rules, list) else []:
         if not isinstance(rule, dict):
@@ -62,7 +52,7 @@ def load_user_chapter_rules():
         if name and pattern and level in (1, 2):
             item = {"name": name, "pattern": pattern, "level": level,
                     "enabled": bool(rule.get("enabled", True))}
-            from .title_blocks import migrate_preset_rule, refresh_block_rule
+            from .title_blocks import refresh_block_rule
             special = rule.get("special")
             if isinstance(special, str) and special.strip():
                 # 自訂特殊標題：照那個字重新產生正則（寫法跟著程式更新）
@@ -76,21 +66,13 @@ def load_user_chapter_rules():
                     item = refreshed
                 valid.append(item)
                 continue
-            migrated = migrate_preset_rule(rule) if isinstance(rule.get("preset"), str) else None
-            if migrated is not None:
-                # 以前打開的常用格式：換成對應的組合
-                if all(existing.get("pattern") != migrated["pattern"] for existing in valid):
-                    valid.append(migrated)
-                continue
             if isinstance(rule.get("preset"), str):
-                item["preset"] = rule["preset"]
-                # 常用格式的寫法會跟著程式更新；存檔裡的是當時的版本，照代號換成現在的
+                # 常用格式（「名稱＋篇」）：寫法跟著程式更新，照代號換成現在的；不認得的代號當一般的自訂規則
                 from .user_rules import PRESET_RULES
                 current = next((preset for preset in PRESET_RULES if preset["preset"] == rule["preset"]), None)
                 if current is not None:
+                    item["preset"] = rule["preset"]
                     item["pattern"] = current["pattern"]
-                else:
-                    del item["preset"]     # 拿掉的常用格式：留下規則本身，當成一般的自訂規則
             valid.append(item)
     return valid
 
@@ -111,7 +93,7 @@ def load_window_state():
 
 
 def load_ui_state() -> dict:
-    """上次關閉時的介面狀態（深色模式、各種勾選…）；沒有或壞掉就是空的。"""
+    """上次關閉時的介面狀態（主題、各種勾選…）；沒有或壞掉就是空的。各欄位的型別由讀的地方檢查。"""
     state = _load_json(UI_STATE_FILE, {})
     return state if isinstance(state, dict) else {}
 

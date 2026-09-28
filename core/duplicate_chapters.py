@@ -97,7 +97,10 @@ def merge_duplicate_groups(lines, groups) -> list:
     for group in groups:
         first = group["rows"][0]
         original = result[first]
-        _clean, marker, _data = _parse_title(original)
+        # a marker on any of the merged headings ([::] on the second copy) stays on the kept one: it is the
+        # user's "this is a heading", which must not disappear with the deleted line
+        markers = [_parse_title(result[row])[1] for row in group["rows"]]
+        marker = next((kind for kind in markers if kind in _MARKER_TEXT), "")
         indent = original[:len(original) - len(original.lstrip())]
         replace[first] = indent + group["keep_title"] + _MARKER_TEXT.get(marker, "")
         delete.update(group["rows"][1:])

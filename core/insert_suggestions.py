@@ -1,6 +1,6 @@
 """手動插入標題時的編號建議：依目錄已確認的原始行推算下一個合理編號。"""
 
-from .title_markers import strip_manual_title_marker
+from .title_markers import strip_persistent_title_marker
 from .chapter_parse import parse_lv1, parse_lv2, parse_special, suggest_number, render_chapter_number_like
 
 INSERTABLE_KINDS = ("章", "部", "卷", "篇", "集", "季", "前言", "序章", "楔子", "後記", "自訂標題")
@@ -15,7 +15,7 @@ def get_structure_records(raw_lines, recognized_indices):
     for raw_index in sorted(set(recognized_indices)):
         if not 0 <= raw_index < len(raw_lines):
             continue
-        line, _ = strip_manual_title_marker(raw_lines[raw_index].strip())
+        line, _ = strip_persistent_title_marker(raw_lines[raw_index].strip())
         lv2 = parse_lv2(line)
         lv1 = parse_lv1(line)
         special = parse_special(line)

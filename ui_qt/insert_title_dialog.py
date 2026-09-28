@@ -63,10 +63,10 @@ class InsertTitleDialog(QDialog):
         insert_button.clicked.connect(self._try_accept)
         footer.addWidget(buttons)
 
-        self.kind_combo.currentIndexChanged.connect(self._update_preview)
+        self.kind_combo.currentIndexChanged.connect(self._on_kind_changed)
         self.number_input.textChanged.connect(self._update_preview)
         self.title_input.textChanged.connect(self._update_preview)
-        self._update_preview()
+        self._on_kind_changed()
         self.title_input.setFocus()
         self.title_input.selectAll()
 
@@ -74,15 +74,19 @@ class InsertTitleDialog(QDialog):
         kind = i18n.combo_value(self.kind_combo)
         return kind, self._suggestions.get(kind, {"number": 1, "reference": f"第一{kind}"})
 
-    def _update_preview(self, *_args):
+    def _on_kind_changed(self, *_args):
+        """The suggested number is filled in only when the kind is chosen (and when the dialog opens):
+        a number the user typed must survive later edits of the title."""
         kind, data = self._current_data()
         self.number_input.setEnabled(kind in NUMERIC_KINDS)
-        if kind in NUMERIC_KINDS and not self.number_input.hasFocus():
-            suggested = str(data["number"])
-            if self.number_input.text() != suggested:
-                self.number_input.blockSignals(True)
-                self.number_input.setText(suggested)
-                self.number_input.blockSignals(False)
+        if kind in NUMERIC_KINDS:
+            self.number_input.blockSignals(True)
+            self.number_input.setText(str(data["number"]))
+            self.number_input.blockSignals(False)
+        self._update_preview()
+
+    def _update_preview(self, *_args):
+        kind, data = self._current_data()
         try:
             preview = build_inserted_title(kind, self.number_input.text(), self.title_input.text(),
                                             data.get("reference", ""))
