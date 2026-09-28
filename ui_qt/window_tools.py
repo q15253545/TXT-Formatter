@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QTableWidget, QTextEdit
 
 from core.ad_scan import (
     AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, FIX_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT,
-    REPEAT_MIN_LENGTH, scan_ad_candidates,
+    REPEAT_MIN_LENGTH, apply_candidates, scan_ad_candidates,
 )
 from core.quote_check import QUOTE_PROBLEM_LABELS
 from core.script_convert import convert_body_text, opencc_available
@@ -265,12 +265,14 @@ class ToolWindowsMixin:
                                   selected_count=self._selected_chapter_count(),
                                   enabled_categories=enabled,
                                   title_rows=set(self.chapter_raw_map.values()),
-                                  mode=mode, repeat_settings=self._saved_repeat_settings(), defer_scan=cold)
+                                  mode=mode, repeat_settings=self._saved_repeat_settings(), defer_scan=cold,
+                                  repeat_marking=bool(self._ui_state.get("repeat_marking")))
             if cold:
                 # the dialog may have been closed (and deleted) by the time the caches are warm
                 self._when_warm(lambda: dialog.start_scan() if shiboken6.isValid(dialog) else None)
             dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
             dialog.deletionReady.connect(lambda lines, d=dialog: self._apply_ad_deletion(d, lines))
+            dialog.repeatMarkingChanged.connect(self._on_repeat_marking_changed)
             return dialog
 
         def reload(dialog):
@@ -290,17 +292,102 @@ class ToolWindowsMixin:
         self._open_tool_dialog("ad_scan" if mode == "ads" else "note_scan", create, reload, on_closed)
 
     def _on_marking_changed(self):
-        """廣告、作者感言兩個開關任一個變了：先把關掉的那一種清掉，還有開著的就重掃。"""
+        """本文字色開關變了：關掉就清掉字色，打開就重掃。"""
         kinds = self.content_panel.marking()
-        for kind in ("ad", "note"):
-            if kind not in kinds:
-                self._mark_rows[kind] = set()
-        self._refresh_title_formats()
-        if kinds:
-            self._schedule_mark_scan(0)
-        else:
+        if not kinds:
+            self._mark_candidates = {"ad": [], "note": []}
+            self._mark_rows = {"ad": set(), "note": set()}
             self._mark_timer.stop()
             self._mark_rows_version = None
+            self._mark_current = -1
+        self._refresh_title_formats()
+        self._update_mark_position()
+        if kinds:
+            self._schedule_mark_scan(0)
+
+    def _on_repeat_marking_changed(self, on: bool):
+        self._ui_state["repeat_marking"] = on
+        if self.content_panel.marking():
+            self._schedule_mark_scan(0)
+
+    def _on_mark_confidence_changed(self):
+        """卡片的信心篩選：掃描結果不變，重新篩出要上色、要跳轉的那幾筆就好。"""
+        self._ui_state["mark_confidence"] = sorted(self.content_panel.mark_confidence())
+        self._mark_current = -1
+        self._refresh_mark_rows()
+        self._refresh_title_formats()
+        self._update_mark_position()
+
+    def _mark_targets(self) -> list:
+        """本文字色標出來、卡片可以一筆一筆跳過去的候選（照信心篩選），照位置排好。
+        掃描結果不是這一版本文的（剛改過、還在重掃）就沒有。"""
+        if self._mark_rows_version != self._text_version:
+            return []
+        levels = self.content_panel.mark_confidence()
+        found = [candidate for kind in ("ad", "note") for candidate in self._mark_candidates[kind]
+                 if candidate["confidence"] in levels]
+        return sorted(found, key=lambda candidate: (candidate["start"], candidate["end"]))
+
+    def _refresh_mark_rows(self):
+        """照信心篩選把候選換成要上色的行；同一行兩種都是用廣告的顏色。"""
+        levels = self.content_panel.mark_confidence()
+        rows = {}
+        for kind in ("ad", "note"):
+            rows[kind] = {row for candidate in self._mark_candidates[kind] if candidate["confidence"] in levels
+                          for row in range(candidate["start"], candidate["end"] + 1)}
+        self._mark_rows = {"ad": rows["ad"], "note": rows["note"] - rows["ad"]}
+
+    def _update_mark_position(self):
+        targets = self._mark_targets()
+        if not 0 <= self._mark_current < len(targets):
+            self._mark_current = -1
+        self.content_panel.set_mark_position(self._mark_current, len(targets))
+
+    @action
+    def goto_mark(self, forward: bool):
+        """卡片的上一筆／下一筆：從游標的位置接著找（跟尋找取代一樣），到底了繞回另一頭。"""
+        targets = self._mark_targets()
+        if not targets:
+            self._mark_current = -1
+            self._update_mark_position()
+            self._show_status("本文字色還在重新標示，稍等一下再按" if self._mark_scan_running or self._mark_timer.isActive()
+                              else "沒有標出來的內容（信心篩選、掃描視窗勾的類型都會影響）")
+            return
+        row = self.editor.textCursor().blockNumber()
+        current = targets[self._mark_current] if 0 <= self._mark_current < len(targets) else None
+        if current is not None and current["start"] <= row <= current["end"]:
+            index = (self._mark_current + (1 if forward else -1)) % len(targets)
+        elif forward:
+            index = next((i for i, candidate in enumerate(targets) if candidate["start"] > row
+                          or (candidate["start"] == row and current is None)), 0)
+        else:
+            index = next((i for i in range(len(targets) - 1, -1, -1) if targets[i]["start"] < row), len(targets) - 1)
+        self._mark_current = index
+        candidate = targets[index]
+        self._jump_to_line(candidate["start"] + 1)
+        self._highlight_ad_candidate(candidate["start"], candidate["end"])
+        self._update_mark_position()
+
+    @action
+    def delete_current_mark(self):
+        """卡片的「刪除這筆」：跟掃描視窗的刪除一樣處理（夾在正文裡的網址只刪那一段），重掃完自動跳到下一筆。"""
+        targets = self._mark_targets()
+        if not 0 <= self._mark_current < len(targets):
+            self._show_status("先按上一筆／下一筆選一筆")
+            return
+        candidate = targets[self._mark_current]
+        lines, removed, _replaced = apply_candidates(self.raw_lines, [candidate])
+        self.editor.setExtraSelections([])
+        self._replace_text_from_tool(lines)
+        cursor = self.editor.textCursor()
+        block = self.editor.document().findBlockByNumber(min(candidate["start"], self.editor.document().blockCount() - 1))
+        cursor.setPosition(block.position())
+        self.editor.setTextCursor(cursor)
+        self._mark_current = -1
+        self._mark_advance_pending = True
+        self._update_mark_position()
+        what = f"刪除 {removed} 行" if removed else "刪除夾在正文裡的那一段"
+        self._show_status(i18n.T(f"已{what}，可以按 Ctrl+Z 復原"), translated=True)
 
     def _schedule_mark_scan(self, delay_ms: int = MARK_SCAN_DELAY_MS):
         if not self.raw_lines or not any(line.strip() for line in self.raw_lines):
@@ -328,8 +415,9 @@ class ToolWindowsMixin:
                 self._build_context(), raw_lines=lines, user_chapter_rules=list(self.user_chapter_rules),
                 auto_titles=dict(self.auto_titles), force_lv1_chapters=set(self.force_lv1_chapters),
                 force_lv2_chapters=set(self.force_lv2_chapters))
-        # 網頁字元碼只是換字，不是廣告：不標廣告色
-        ad_categories = (self._saved_ad_categories() - FIX_CATEGORIES) | {"repeat"} if "ad" in kinds else set()
+        # 網頁字元碼只是換字，不是廣告：不標廣告色。重複段落要在掃描視窗的分頁打開才標（多半是作者慣用的句子）
+        repeat = {"repeat"} if self._ui_state.get("repeat_marking") else set()
+        ad_categories = (self._saved_ad_categories() - FIX_CATEGORIES) | repeat if "ad" in kinds else set()
         note_categories = self._saved_note_categories() if "note" in kinds else set()
         min_length, min_count = self._saved_repeat_settings()
         self._mark_scan_running = True
@@ -341,25 +429,20 @@ class ToolWindowsMixin:
                 if toc_ctx is not None:
                     structure = build_document_structure(toc_ctx, apply_format=False, write_text=False)
                     rows = set(structure.chapter_raw_map.values())
-                ad_rows, note_rows = set(), set()
-                if ad_categories:
-                    for candidate in scan_ad_candidates(lines, ad_categories, None, rows,
-                                                        repeat_min_length=min_length, repeat_min_count=min_count):
-                        ad_rows.update(range(candidate["start"], candidate["end"] + 1))
-                if note_categories:
-                    for candidate in scan_ad_candidates(lines, note_categories, None, rows):
-                        note_rows.update(range(candidate["start"], candidate["end"] + 1))
-                result = (version, ad_rows, note_rows, structure)
+                ad_found = scan_ad_candidates(lines, ad_categories, None, rows, repeat_min_length=min_length,
+                                              repeat_min_count=min_count) if ad_categories else []
+                note_found = scan_ad_candidates(lines, note_categories, None, rows) if note_categories else []
+                result = (version, ad_found, note_found, structure)
             except Exception:          # 背景執行緒的例外不會出現在畫面上：記下來、結束這一輪
                 log.exception("字色標示掃描失敗")
-                result = (-1, set(), set(), None)
+                result = (-1, [], [], None)
             # the window may have been closed while scanning (the app is quitting): nothing to report to then
             if shiboken6.isValid(self._mark_signals):
                 self._mark_signals.finished.emit(*result)
 
         threading.Thread(target=work, name="mark-scan", daemon=True).start()
 
-    def _on_mark_scan_finished(self, version: int, ad_rows, note_rows, structure=None):
+    def _on_mark_scan_finished(self, version: int, ad_found, note_found, structure=None):
         self._mark_scan_running = False
         if self._mark_scan_pending or version != self._text_version:
             self._mark_scan_pending = False
@@ -369,15 +452,19 @@ class ToolWindowsMixin:
         kinds = self.content_panel.marking()
         if not kinds:
             return
-        # 同一行兩種都是：用廣告的顏色。開關在掃描期間被關掉的那一種不畫。
-        ad_rows = set(ad_rows) if "ad" in kinds else set()
-        note_rows = set(note_rows) - ad_rows if "note" in kinds else set()
-        self._mark_rows = {"ad": ad_rows, "note": note_rows}
+        self._mark_candidates = {"ad": list(ad_found), "note": list(note_found)}
+        self._refresh_mark_rows()
         self._mark_rows_version = version
         if structure is not None and self._toc_text_version != version:
             self._populate_tree(structure)
             self._warn_timed_out_rules()
         self._refresh_title_formats()
+        self._update_mark_position()
+        if self._mark_advance_pending:
+            # 剛用「刪除這筆」刪掉一筆：重掃好了，接著停在下一筆
+            self._mark_advance_pending = False
+            if self._mark_targets():
+                self.goto_mark(True)
 
     def _apply_mark_colors(self, cursor: QTextCursor):
         """把掃描到的廣告／作者感言那幾行換成對應的字色（章節標題不動）。
@@ -577,7 +664,7 @@ class ToolWindowsMixin:
 
         def create():
             dialog = RecognitionDialog(self.user_chapter_rules, lambda: list(self.raw_lines), self,
-                                       known_rows=set(self.chapter_raw_map.values()),
+                                       known_rows=self._handled_title_rows(),
                                        title_tail_allowed=self.title_tail_allowed,
                                        title_tail_custom=self.title_tail_custom,
                                        disabled_words=self.disabled_words, max_title_length=self.max_title_length,
@@ -586,7 +673,7 @@ class ToolWindowsMixin:
             return dialog
 
         def reload(dialog):
-            dialog.reload(self.raw_lines, set(self.chapter_raw_map.values()))
+            dialog.reload(self.raw_lines, self._handled_title_rows())
 
         self._open_tool_dialog("recognition", create, reload, self._on_recognition_dialog_closed)
 
@@ -617,13 +704,13 @@ class ToolWindowsMixin:
 
         def create():
             dialog = RulesDialog(self.user_chapter_rules, lambda: list(self.raw_lines), self,
-                                 known_rows=set(self.chapter_raw_map.values()),
+                                 known_rows=self._handled_title_rows(),
                                  max_title_length=self.max_title_length)
             dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
             return dialog
 
         def reload(dialog):
-            dialog.reload(self.raw_lines, set(self.chapter_raw_map.values()))
+            dialog.reload(self.raw_lines, self._handled_title_rows())
 
         self._open_tool_dialog("rules", create, reload, self._on_rules_dialog_closed)
 

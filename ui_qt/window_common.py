@@ -196,7 +196,7 @@ MARK_SCAN_DELAY_MS = 800
 
 class _MarkScanSignals(QObject):
     """背景執行緒掃完後，透過這個訊號回到主執行緒（跨執行緒會自動排隊）。"""
-    finished = Signal(int, object, object, object)     # 本文版本、廣告行、作者感言行、目錄（沒重建是 None）
+    finished = Signal(int, object, object, object)     # 本文版本、廣告候選、作者感言候選、目錄（沒重建是 None）
 
 
 def _tree_depth(item) -> int:

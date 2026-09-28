@@ -25,7 +25,10 @@ from core.user_rules import (
 )
 from . import dialogs, i18n
 from .sortable_table import PreviewTable, make_item, setup_columns
-from .widgets import ToggleSwitch, dialog_frame, flow_container, size_dialog, slider_with_spin
+from .theme import active_tokens
+from .widgets import (
+    ContextPreview, IconTextButton, ToggleSwitch, dialog_frame, flow_container, size_dialog, slider_with_spin,
+)
 
 _COLUMN_NAMES = {"frame": "外框", "prefix": "前綴", "number": "數字", "unit": "單位", "sep": "分隔", "title": "章名"}
 _LEVEL_NAMES = {2: "章", 1: "卷"}
@@ -157,10 +160,11 @@ class _LevelPage(QWidget):
         self.count_label = QLabel("")
         self.count_label.setObjectName("fileLabel")
         bar_layout.addWidget(self.count_label)
-        self.lines_button = QPushButton("看本文的行")
-        self.lines_button.setObjectName("inlineLink")
-        self.lines_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lines_button.setCheckable(True)
+        # 展開、收起一段內容：跟檔名列的「書籍資料」同一種（文字＋上下箭頭）
+        self.lines_button = IconTextButton("chevron-down", "看本文的行", checkable=True, size=14)
+        self.lines_button.setObjectName("barToggle")
+        tokens = active_tokens()
+        self.lines_button.set_colors(tokens.icon, tokens.icon_hover, tokens.checked_text, tokens.text_faint)
         self.lines_button.toggled.connect(self._toggle_lines)
         bar_layout.addWidget(self.lines_button)
         right.addWidget(bar)
@@ -170,10 +174,13 @@ class _LevelPage(QWidget):
         self.lines_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.lines_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         setup_columns(self.lines_table, {0: 80})
-        self.lines_table.setFixedHeight(180)
         self.lines_table.itemSelectionChanged.connect(self._on_line_selected)
-        self.lines_table.hide()
-        right.addWidget(self.lines_table)
+        # 選到一列：下面顯示那一行加上前後文（跟掃描視窗、本文可疑章節一樣）
+        self.lines_preview = ContextPreview()
+        self.lines_box = self.lines_preview.stacked_under(self.lines_table)
+        self.lines_box.setFixedHeight(300)
+        self.lines_box.hide()
+        right.addWidget(self.lines_box)
         right_host.setMinimumWidth(right_host.minimumSizeHint().width())
         self.splitter.addWidget(right_host)
         self.splitter.setStretchFactor(0, 0)
@@ -491,8 +498,8 @@ class _LevelPage(QWidget):
             self._fill_lines()
 
     def _toggle_lines(self, shown: bool):
-        self.lines_table.setVisible(shown)
-        i18n.set_text(self.lines_button, "收起" if shown else "看本文的行")
+        self.lines_box.setVisible(shown)
+        self.lines_button.set_icon_name("chevron-up" if shown else "chevron-down")
         if shown:
             self._fill_lines()
 
@@ -508,9 +515,12 @@ class _LevelPage(QWidget):
 
     def _on_line_selected(self):
         items = self.lines_table.selectedItems()
-        if items:
-            row = self.lines_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-            self._dialog.candidateHighlighted.emit(row, row)
+        if not items:
+            self.lines_preview.hide()
+            return
+        row = self.lines_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+        self.lines_preview.show_rows(self._dialog._lines, row, row, active_tokens().accent)
+        self._dialog.candidateHighlighted.emit(row, row)
 
 
 class RecognitionDialog(QDialog):

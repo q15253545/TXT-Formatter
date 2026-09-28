@@ -869,6 +869,27 @@ def scan_ad_candidates(lines, enabled_categories=None, line_ranges=None, title_r
     return _clip_to_ranges(candidates, lines, line_ranges)
 
 
+def apply_candidates(lines, candidates):
+    """把候選處理掉，回傳（新的整份行, 刪了幾行, 換了幾行）：有 fix 的（網頁字元碼、夾在正文裡的網址片段）
+    那一行換成 fix，其餘刪掉 start～end 整段（重疊、相鄰的併成一段）。那一行跟掃描時不一樣（本文改過）的
+    fix 不套用。掃描視窗的「處理已勾選項目」與內容檢查卡片的「刪除這筆」共用。"""
+    result = list(lines)
+    replaced = 0
+    for candidate in candidates:
+        if candidate.get("fix") is not None and result[candidate["start"]] == candidate["preview"]:
+            result[candidate["start"]] = candidate["fix"]
+            replaced += 1
+    merged = []
+    for start, end in sorted((c["start"], c["end"]) for c in candidates if c.get("fix") is None):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    for start, end in reversed(merged):
+        del result[start:end + 1]
+    return result, len(lines) - len(result), replaced
+
+
 def _drop_front_matter(candidates, lines, title_rows):
     """第一章之前的書名、作者、簡介、又名……是 TXT 常見的開頭資訊，不是要刪的
     東西：只由「作品資訊／作者感言」組成、而且整段在第一個章節標題之前的候選

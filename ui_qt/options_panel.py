@@ -4,9 +4,9 @@
 「合併下行標題」在章節管理（預覽＋套用到本文），不在這裡；只排選取的章在目錄右鍵。
 """
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSize, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QGridLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QGridLayout, QLabel, QPushButton, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
 from core.format_options import FormatOptions
@@ -105,7 +105,7 @@ class OptionsPanel(QWidget):
         root.addWidget(header)
 
         # 視窗矮時選項要能捲動；「套用格式」固定在捲動區外面的底部，不會被捲走。
-        scroll = PanelScroll()
+        scroll = self._scroll = PanelScroll()
         root.addWidget(scroll, 1)
 
         body = QVBoxLayout(scroll.content)
@@ -180,6 +180,24 @@ class OptionsPanel(QWidget):
         grid.addWidget(label, row, 0)
         grid.addWidget(combo, row, 1)
         return combo
+
+    def fit_combos(self):
+        """下拉框至少放得下最長的選項。全域規則是下拉框不照選項撐寬（見 widgets.AppWidgetPolisher），
+        但這張卡片的選項都短，照實際字寬（含樣式表的內距）算，字型變大時卡片跟著變寬、不截字。
+        套用主題、切換繁簡之後由主視窗重算卡片寬度前呼叫。"""
+        for combo in self.findChildren(QComboBox):
+            metrics = combo.fontMetrics()
+            longest = max(metrics.horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
+            option = QStyleOptionComboBox()
+            combo.initStyleOption(option)
+            size = combo.style().sizeFromContents(QStyle.ContentsType.CT_ComboBox, option,
+                                                  QSize(longest, metrics.height()), combo)
+            combo.setMinimumWidth(size.width())
+        # the combos sit in the scroll area's own layout, which re-lays out only on its next event:
+        # do it now so the card's minimum width measured right after already counts them
+        layout = self._scroll.content.layout()
+        layout.invalidate()
+        layout.activate()
 
     def current_options(self, structure_mode: str) -> FormatOptions:
         punct = i18n.combo_value(self.punct_combo)

@@ -21,12 +21,13 @@ from PySide6.QtWidgets import (
 
 from core.ad_scan import (
     AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, FIX_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT, REPEAT_MIN_LENGTH,
-    scan_ad_candidates,
+    apply_candidates, scan_ad_candidates,
 )
 from . import dialogs, i18n
 from .theme import active_tokens
 from .widgets import (
-    ContextPreview, Divider, GroupCheckBox, ScopeToggle, dialog_frame, flow_container, size_dialog, slider_with_spin,
+    ContextPreview, Divider, GroupCheckBox, ScopeToggle, ToggleSwitch, dialog_frame, flow_container, size_dialog,
+    slider_with_spin,
 )
 from .sortable_table import (
     PreviewTable,
@@ -237,10 +238,11 @@ class _CandidatePane(QWidget):
 class AdScanDialog(QDialog):
     candidateHighlighted = Signal(int, int)  # start_line, end_line（0-indexed，含首尾）
     deletionReady = Signal(list)             # 刪除後的整份本文
+    repeatMarkingChanged = Signal(bool)      # 重複段落要不要標在本文上（字色、內容檢查卡片的快速跳轉）
 
     def __init__(self, raw_lines: list, parent=None, selected_ranges=None, selected_count: int = 0,
                  enabled_categories=None, title_rows=None, mode: str = "ads", repeat_settings=None,
-                 defer_scan: bool = False):
+                 defer_scan: bool = False, repeat_marking: bool = False):
         """defer_scan: show the dialog first and scan when start_scan() is called (the main window does that once
         its idle-time cache warming is done — scanning a large file cold would freeze the window for seconds)."""
         super().__init__(parent)
@@ -255,6 +257,7 @@ class AdScanDialog(QDialog):
         self._selected_count = selected_count
         self.result_lines: list | None = None
         self.result_summary = (0, 0)          # （刪掉幾行, 換回網頁字元碼的行數）
+        self._repeat_marking = repeat_marking
 
         root, footer = dialog_frame(self, intro=_INTROS[mode])
         root.setSpacing(12)
@@ -338,6 +341,12 @@ class AdScanDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(12)
+
+        # 重複段落多半是作者慣用的句子，預設不標在本文上：標了字色、放進卡片的快速跳轉，找廣告反而變慢
+        self.repeat_marking_toggle = ToggleSwitch("標在本文上（字色、快速跳轉）", fill=False)
+        self.repeat_marking_toggle.setChecked(self._repeat_marking)
+        self.repeat_marking_toggle.clicked.connect(lambda on: self.repeatMarkingChanged.emit(on))
+        layout.addWidget(self.repeat_marking_toggle)
 
         # 兩個設定同一種樣子：標籤、拉桿、可以直接輸入也有上下箭頭的數字框（單位寫在框裡）。
         controls = QHBoxLayout()
@@ -452,22 +461,7 @@ class AdScanDialog(QDialog):
         ):
             return
 
-        lines = list(self._raw_lines)
-        replaced = 0
-        for candidate in replacements:
-            if lines[candidate["start"]] == candidate["preview"]:
-                lines[candidate["start"]] = candidate["fix"]
-                replaced += 1
-        ranges = sorted((candidate["start"], candidate["end"]) for candidate in deletions)
-        merged = []
-        for start, end in ranges:
-            if merged and start <= merged[-1][1] + 1:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-
-        for start, end in reversed(merged):
-            del lines[start:end + 1]
+        lines, _removed, replaced = apply_candidates(self._raw_lines, selected)
         while lines and not lines[0].strip():
             lines.pop(0)
         while lines and not lines[-1].strip():

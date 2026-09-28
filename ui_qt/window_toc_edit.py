@@ -24,8 +24,8 @@ class TocEditMixin:
     def _on_merge_titles_toggled(self, on: bool):
         self._merge_titles = on
         self._rebuild_preview_toc()
-        self._show_status("已開啟自動合併標題：「第1章」接上下一行的章名，連續出現兩次的同一章標題只留第一個"
-                          + _PREVIEW_NOTE if on else "已關閉自動合併標題")
+        self._show_status("已開啟自動合併標題：「第1章」接上下一行的章名；同一章的標題連續出現兩次只留第一個；"
+                          "只有章號、底下緊接著另一章標題的只留有章名的" + _PREVIEW_NOTE if on else "已關閉自動合併標題")
 
     def _rebuild_preview_toc(self):
         if self.raw_lines and any(line.strip() for line in self.raw_lines):
@@ -158,7 +158,8 @@ class TocEditMixin:
     def _toc_preview_lines(self):
         """章節管理預覽開關的結果寫進本文後的整份行，與做了哪些事；沒有東西可以套用時回傳 None。
 
-        - 自動合併標題：章名接到標題行後面，原本放章名的行（和中間的空行）拿掉；重複的標題那一行拿掉。
+        - 自動合併標題：章名接到標題行後面，原本放章名的行（和中間的空行）拿掉；重複的標題、
+          只有章號又緊接著另一章標題的那一行拿掉。
         - 推算出來的卷（斜體）：卷標題插在卷內第一個項目前面，前後留空行。
         - 每章都帶著卷的寫法（「卷一 山路 第一章 出發」）：換卷的地方插一行卷標題，章節行只留
           「第一章 出發」。卷標題寫成正式的「第一卷 山路」——單獨一行的「卷一」預設不算卷（避免誤判），
@@ -204,7 +205,7 @@ class TocEditMixin:
         if self.merged_titles:
             done.append(f"合併 {len(self.merged_titles)} 個標題")
         if self.absorbed_titles:
-            done.append(f"刪掉 {len(self.absorbed_titles)} 行重複標題")
+            done.append(f"刪掉 {len(self.absorbed_titles)} 行多餘的標題")
         if inserts:
             done.append(f"寫入 {len(inserts)} 個卷標題")
         result = []

@@ -673,6 +673,8 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         border: 1px solid {t.border};
         border-radius: 10px;
         padding: 6px;
+        /* 螢幕放不下時捲動：不然 Qt 會把選單拆成好幾欄，分組標題跟底下的項目被拆到不同欄 */
+        menu-scrollable: 1;
     }}
     QMenu::item {{
         padding: 6px 14px;

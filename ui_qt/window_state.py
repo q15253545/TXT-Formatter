@@ -149,6 +149,7 @@ class WindowStateMixin:
             "title_tail_custom": self.title_tail_custom,
             "find_regex": self.find_bar.regex_button.isChecked(),
             "mark_colors": sorted(self.content_panel.marking()),
+            "mark_confidence": sorted(self.content_panel.mark_confidence()),
             "infer_volumes": self._infer_volumes,
             "auto_apply_preview": self._auto_apply_preview,
             "merge_titles": self._merge_titles,
@@ -222,6 +223,9 @@ class WindowStateMixin:
         for key in ("filename_ongoing", "filename_completed"):
             if isinstance(state.get(key), str) and state[key].strip():
                 setattr(self, key, state[key])
+        levels = state.get("mark_confidence")
+        if isinstance(levels, list):
+            self.content_panel.set_mark_confidence(set(levels))
         marks = state.get("mark_colors")
         if isinstance(marks, list):
             # 有檔案之後才會真的掃描、上色

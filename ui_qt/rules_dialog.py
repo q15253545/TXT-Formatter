@@ -32,7 +32,8 @@ from core.user_rules import is_risky_pattern, match_user_chapter_rule, preset_ru
 from . import dialogs, i18n
 from .sortable_table import PreviewTable, CONFIDENCE_ORDER, data_index, limit_rows, enable_sorting, make_item, resort, setup_columns
 from .recognition_dialog import managed_rule
-from .widgets import Divider, dialog_frame, fit_window_to_screen, size_dialog, snippet_button
+from .theme import active_tokens
+from .widgets import ContextPreview, Divider, dialog_frame, fit_window_to_screen, size_dialog, snippet_button
 
 _LEVEL_LABELS = {1: "卷", 2: "章"}
 
@@ -113,7 +114,16 @@ class RulesDialog(QDialog):
         self._rules_scroll.setWidget(rules_page)
         self._fitted = False
         self.tabs.addTab(self._rules_scroll, "規則")
-        self.tabs.addTab(self._build_candidates_tab(), f"本文可疑章節（{len(self._candidates)}）")
+        # 可疑章節頁也一樣（勾選按鈕、表格、前後文）
+        self._candidates_scroll = QScrollArea()
+        self._candidates_scroll.setObjectName("panelScroll")
+        self._candidates_scroll.setWidgetResizable(True)
+        self._candidates_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._candidates_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        candidates_page = self._build_candidates_tab()
+        candidates_page.setObjectName("panelScrollContent")
+        self._candidates_scroll.setWidget(candidates_page)
+        self.tabs.addTab(self._candidates_scroll, f"本文可疑章節（{len(self._candidates)}）")
         root.addWidget(self.tabs, 1)
 
         buttons = QDialogButtonBox()
@@ -304,11 +314,19 @@ class RulesDialog(QDialog):
         i18n.skip(self.format_combo)   # 內容是算出來的，切換繁簡時由 _format_label 重組
         self.format_combo.currentIndexChanged.connect(lambda _index: self._refresh_candidates())
         filter_row.addWidget(self.format_combo, 1)
-        for label, slot in (("勾選高信心", self._check_high_confidence), ("全部取消", self._uncheck_all)):
+        root.addLayout(filter_row)
+        # 勾選按鈕跟掃描視窗同一組（表格有「信心」欄的都一樣）
+        select_row = QHBoxLayout()
+        select_row.setSpacing(8)
+        for label, slot in (("勾選高信心", lambda: self._check_confidence("高")),
+                            ("勾選中信心", lambda: self._check_confidence("中")),
+                            ("勾選低信心", lambda: self._check_confidence("低")),
+                            ("全選", self._check_all), ("全部取消", self._uncheck_all)):
             button = QPushButton(label)
             button.clicked.connect(slot)
-            filter_row.addWidget(button)
-        root.addLayout(filter_row)
+            select_row.addWidget(button)
+        select_row.addStretch(1)
+        root.addLayout(select_row)
 
         self.candidate_status = QLabel("")
         self.candidate_status.setObjectName("fileLabel")
@@ -323,7 +341,9 @@ class RulesDialog(QDialog):
         self.candidate_table.itemChanged.connect(self._on_candidate_changed)
         self.candidate_table.itemSelectionChanged.connect(self._on_candidate_selected)
         enable_sorting(self.candidate_table)
-        root.addWidget(self.candidate_table, 1)
+        # 選到一列：下面顯示那一行加上前後文，比較好判斷是不是標題（跟掃描視窗一樣）
+        self.candidate_preview = ContextPreview()
+        root.addWidget(self.candidate_preview.stacked_under(self.candidate_table), 1)
 
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
@@ -334,7 +354,7 @@ class RulesDialog(QDialog):
         self.save_format_button.clicked.connect(self._save_format_as_rule)
         action_row.addWidget(self.save_format_button)
         action_row.addStretch(1)
-        self.add_lines_button = QPushButton("把已勾選的行加入目錄")
+        self.add_lines_button = QPushButton("加入已勾選項目")
         self.add_lines_button.setObjectName("primary")
         self.add_lines_button.setToolTip("只處理勾選的行（行尾加上 [::]），同時保存規則並關閉視窗")
         self.add_lines_button.clicked.connect(self._add_checked_lines)
@@ -451,13 +471,19 @@ class RulesDialog(QDialog):
     def _on_candidate_selected(self):
         rows = self.candidate_table.selectionModel().selectedRows()
         if not rows:
+            self.candidate_preview.hide()
             return
         candidate = self._candidates[data_index(self.candidate_table, rows[0].row())]
+        self.candidate_preview.show_rows(self._lines, candidate["index"], candidate["index"], active_tokens().accent)
         self.candidateHighlighted.emit(candidate["index"], candidate["index"])
 
-    def _check_high_confidence(self):
+    def _check_confidence(self, level: str):
         self._checked |= {index for index in self._visible_candidates()
-                          if self._candidates[index]["confidence"] == "高"}
+                          if self._candidates[index]["confidence"] == level}
+        self._refresh_candidates()
+
+    def _check_all(self):
+        self._checked |= set(self._visible_candidates())
         self._refresh_candidates()
 
     def _uncheck_all(self):
@@ -490,7 +516,7 @@ class RulesDialog(QDialog):
             return
         if fmt == "weak:odd_number":
             dialogs.info(self, "不能存成規則", "章號不是數字的標題沒辦法做成規則（沒有章號可以排序）；"
-                                              "請勾選要加入的行，按「把勾選的行加入目錄」。")
+                                              "請勾選要加入的行，按「加入已勾選項目」。")
             return
         candidate = next(c for c in self._candidates if c["format"] == fmt)
         rule = weak_candidate_to_user_rule(candidate)

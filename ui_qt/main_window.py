@@ -200,9 +200,13 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 目錄、搜尋結果、raw_lines 各自記下自己是在哪一版算出來的，過期的
         # 位置就不能再拿去改文字。
         self._text_version = 0
-        # 字色標示：掃描結果的行號（跟哪一版本文對應）、延遲重掃的計時器、背景掃描
+        # 字色標示：掃描到的候選、照信心篩選後要上色的行（跟哪一版本文對應）、延遲重掃的計時器、背景掃描；
+        # 內容檢查卡片的快速處理目前停在哪一筆、刪掉一筆之後重掃完要不要自動跳到下一筆
+        self._mark_candidates = {"ad": [], "note": []}
         self._mark_rows = {"ad": set(), "note": set()}
         self._mark_rows_version = None
+        self._mark_current = -1
+        self._mark_advance_pending = False
         self._mark_scan_running = False
         self._mark_scan_pending = False
         self._warm_lines = None
@@ -300,6 +304,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.content_panel.word_count_requested.connect(self.open_word_count_dialog)
         self.content_panel.script_convert_requested.connect(self.open_script_convert_dialog)
         self.content_panel.marking_changed.connect(self._on_marking_changed)
+        self.content_panel.confidence_changed.connect(self._on_mark_confidence_changed)
+        self.content_panel.previous_mark_requested.connect(lambda: self.goto_mark(False))
+        self.content_panel.next_mark_requested.connect(lambda: self.goto_mark(True))
+        self.content_panel.delete_mark_requested.connect(self.delete_current_mark)
         self.content_panel.show_whitespace_toggle.toggled.connect(self._on_whitespace_toggled)
         self.content_panel.show_whitespace_toggle.clicked.connect(
             lambda on: self._show_status("顯示內文空格：半形 ·、全形 □、Tab →，行尾多餘的空白標紅"
@@ -1632,9 +1640,14 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         i18n.set_text(self.toc_hint_button, "查看可疑章節" if self._toc_hint_format else "加入辨識章節")
         self.toc_hint.show()
 
+    def _handled_title_rows(self) -> set:
+        """目錄裡的標題，加上「自動合併標題」預覽合併掉的那幾行：找「像標題卻不在目錄」的行（可疑章節、
+        缺章報告的「沒被認成章節」、目錄上方的提示）時都不算，不然合併掉的網站編號「第40章」會被當成漏掉的章。"""
+        return set(self.chapter_raw_map.values()) | set(self.absorbed_titles)
+
     def _find_toc_hint(self):
         """（提示文字, 要加的內建組合, 要看的可疑章節格式）；沒有要提示的回傳 (None, None, None)。"""
-        known = set(self.chapter_raw_map.values())
+        known = self._handled_title_rows()
         kinds = Counter(record.get("kind") for record in self.chapter_records.values())
         # 目錄是空的或太稀（只認到零星幾個「第N章」，整本其實是另一種寫法）：看整本最多的常用寫法。
         # 平常的書每章幾十到一兩百行，不用整本掃（開檔時快取還沒算好，整本掃會卡）
@@ -2045,7 +2058,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         一般只看正式章號（第N章）。目錄裡有常用格式、自訂規則認出來的章（「72 標題」這種書）時，
         也看常用格式的寫法：同一本書常混著「71. 標題」「35 標題。」，沒收錄的原因多半是寫法或結尾標點。"""
-        known = set(self.chapter_raw_map.values())
+        known = self._handled_title_rows()
         tail = self._title_check()
         by_rule = any(record.get("source") == "rule" for record in self.chapter_records.values())
         enabled = {rule["preset"] for rule in self.user_chapter_rules
@@ -2172,6 +2185,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         for panel in panels:
             panel.setMinimumWidth(0)
             _settle(panel)
+        self.options_panel.fit_combos()
+        _settle(self.options_panel)             # the combos' new minimum reaches the panel's size hint
         width = max(panel.minimumSizeHint().width() for panel in panels)
         for panel in panels:
             panel.setMinimumWidth(width)

@@ -295,6 +295,20 @@ def _find_duplicate_heading(ctx: BuildContext, start: int, identity, body: str):
     return None
 
 
+def _next_named_chapter(ctx: BuildContext, state):
+    """下一個非空行是有章名的章節標題（不是卷、特殊標題、使用者指定的標題）：回傳那一行，否則 None。"""
+    for row in range(state.idx + 1, state.total):
+        text, marker = strip_persistent_title_marker(ctx.raw_lines[row].strip())
+        if not text:
+            continue
+        if marker or ctx._protected_title(row) or not is_valid_auto_title(text, state.invalid_tail_regex) \
+                or parse_lv1(text) or parse_special(text) or is_weak_numbered_title(text):
+            return None
+        parsed = parse_lv2(text)
+        return row if parsed and strip_title_body(parsed[5] or "") else None
+    return None
+
+
 _PERIOD_TAIL = re.compile(r"[。.．]\s*$")
 _SENTENCE_MARK = re.compile(r"[。！？!?；;]")
 _FIRST_HEAD = re.compile(r"^\s*第\s*[1１一]\s*[章回節节][ 　:：\-—·、]")
@@ -736,6 +750,16 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
     if is_phantom:
         state.idx += 1
         return
+    # 只有章號、沒有正文，底下緊接著另一章有章名的標題：同一章的兩個標題（網站的貼文編號＋作者的章名，
+    # 「第40章」「第32章 過河」）。「自動合併標題」開著時只留有章名的那個，跟重複標題一樣記在 absorbed_titles。
+    # 有章名的空章（書裡自帶的目錄、正文遺失的章）不動：那不是多出來的標題。
+    if (ctx.skip_duplicate_titles and not apply_format and m_lv2 and not custom_title and not ch_body
+            and not merged and not manual_marked and not forced_level and not ctx._protected_title(title_raw_idx)):
+        named = _next_named_chapter(ctx, state)
+        if named is not None:
+            state.absorbed_titles[title_raw_idx] = named
+            state.idx += 1
+            return
     dup_cands, peek = ([(line_str, ch_body, title_raw_idx)], state.idx + 1)
     while peek < state.total:
         nxt, nxt_marker = strip_persistent_title_marker(ctx.raw_lines[peek].strip())

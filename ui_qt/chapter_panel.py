@@ -69,7 +69,8 @@ class ChapterPanel(QWidget):
 
         # 這一段的開關都只是預覽（目錄、本文用非原文色標出來），按「套用到本文」才真的寫進去。
         # 自動合併標題：只有章號的標題（「第1章」）把下一行的章名接上來；同一章的標題重複出現、
-        # 中間只有幾行作者的話時只留第一個。兩種都是整理標題行，一起開、一起套用。
+        # 中間只有幾行作者的話時只留第一個；只有章號、沒有正文又緊接著另一章有章名的標題
+        # （網站的貼文編號）只留有章名的。都是整理標題行，一起開、一起套用。
         self.merge_titles_toggle = ToggleSwitch("自動合併標題")
         self.merge_titles_toggle.toggled.connect(self._on_merge_titles_toggled)
         root.addWidget(self.merge_titles_toggle)
