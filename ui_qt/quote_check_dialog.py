@@ -446,17 +446,21 @@ class QuoteCheckDialog(QDialog):
             self.problemSelected.emit(problem["line"])
 
     def _update_preview(self):
-        """前後文預覽跟著目前選的那一列（問題那幾行標成修正後的紅字）；沒有選取就藏起來。"""
+        """前後文預覽跟著目前選的那一列；沒有選取就藏起來。"""
         rows = self.table.selectionModel().selectedRows()
         if not rows or not self._raw_lines:
             self.preview.hide()
             return None
         problem = self._all_problems[data_index(self.table, rows[0].row())]
         fix = problem["fix"]
-        # problem["line"] 是從 1 起算的行號，fix 的範圍是 raw_lines 的索引（不含 end）
-        row = problem["line"] - 1
-        start, end = (fix["start"], max(fix["start"], fix["end"] - 1)) if fix else (row, row)
-        self.preview.show_rows(self._raw_lines, start, end, active_tokens().diff_text)
+        tokens = active_tokens()
+        if fix:
+            # 可以修正的：直接顯示修正後的樣子，同一行標出改動（fix 的範圍是 raw_lines 的索引，不含 end）
+            self.preview.show_fix(self._raw_lines, fix["start"], fix["end"] - 1, fix["after"], tokens.diff_text)
+        else:
+            # 只是提醒的：那一行加底色，字不換色（problem["line"] 從 1 起算）
+            row = problem["line"] - 1
+            self.preview.show_rows(self._raw_lines, row, row, tokens.text)
         return problem
 
     def _check_fixable(self):

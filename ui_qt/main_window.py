@@ -26,7 +26,7 @@ from PySide6.QtGui import (
     QTextCursor, QTextFormat,
 )
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPlainTextEdit,
+    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QPushButton, QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -41,11 +41,12 @@ from core.collection import (
     chapter_gap_report, group_formal_chapters, missed_middle_chapters, missed_tail_chapters, missed_volumes,
     scan_chapter_candidates,
 )
+from core.docx_reader import DocxError, is_docx, read_docx_text
 from core.encoding import detect_line_ending, smart_detect_encoding, strip_stray_bom
 from core.file_io import read_text, read_text_lossy, write_text_atomic
 from core.filename_meta import (
     DEFAULT_COMPLETED_TEMPLATE, DEFAULT_ONGOING_TEMPLATE, build_smart_filename, extract_filename_metadata,
-    filename_fields, filename_template_for,
+    filename_fields, filename_template_for, same_book_files,
 )
 from core.format_options import FormatOptions
 from core.script_convert import SCRIPT_SIMP, SCRIPT_TRAD, convert_script
@@ -66,21 +67,23 @@ from .chapter_panel import ChapterPanel
 from .find_bar import FindBar
 from .filename_dialog import FilenameDialog
 from .metadata_bar import ENCODING_CODECS, MetadataBar
+from . import old_files_dialog
+from .old_files_dialog import OldFilesDialog
 from .options_panel import OptionsPanel, describe_options
 from .text_positions import PositionMap
 from .theme import DARK, DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
-    AppWidgetPolisher, Card, ClickableLabel, Editor, IconButton, IconTextButton, LanguageToggle, ElidedLabel,
-    ThemeButton, VDivider, make_card_header,
+    AppWidgetPolisher, Card, ClickableLabel, DropOverlay, Editor, IconButton, IconTextButton, LanguageToggle,
+    ElidedLabel, ScrollEndButtons, ThemeButton, VDivider, dropped_paths, make_card_header,
 )
 from . import __version__
 from .window_common import (
     DEFAULT_STRUCTURE_MODE, EDITOR_BASE_FONT_PX, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, MARKER_GUIDE,
     MARK_SCAN_DELAY_MS, MAX_HIGHLIGHT_SPANS, MAX_HISTORY_CHARS, MAX_HISTORY_STEPS, MIN_HISTORY_STEPS,
-    MIN_WINDOW_WIDTH, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
+    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
     WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals,
     _NUMBER_WITHOUT_UNIT, _ToolDialogWatcher, _chapter_line_mapper, _diff_line_mapper, _format_line_mapper,
-    _line_opcodes, _settle, _tree_depth, short_toc_label,
+    WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
 )
 from .window_state import WindowStateMixin
 from .window_tools import ToolWindowsMixin
@@ -186,6 +189,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._show_title_markers = False
         # 匯出時要不要移除標記：只看章節標記說明裡的勾選，跟「顯示章節標記」無關。
         self._strip_markers_on_export = True
+        self._ask_old_files_on_export = True
         # 缺章檢查結果：按過一次「檢查缺章」之後，每次目錄重建都自動重算。
         self._missing_report_active = False
         self._missing_groups: list = []
@@ -380,7 +384,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             self._icon_buttons.append(button)
             tree_header_layout.addWidget(button)
         # 目錄只顯示章號：開關型圖示，開著時用互動色
-        self.toc_compact_button = IconButton("list-filter", "", size=16)
+        self.toc_compact_button = IconButton("list-filter", "只顯示章號", size=16)
         self.toc_compact_button.setCheckable(True)
         self.toc_compact_button.clicked.connect(self._on_toc_compact_clicked)
         tree_header_layout.addWidget(self.toc_compact_button)
@@ -414,6 +418,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._toc_hint_timer.timeout.connect(self._update_toc_hint)
         tree_body.addWidget(self.toc_hint)
         tree_body.addWidget(self.tree)
+        # 目錄右下角：到最前面／到最後面，本文的游標一起到開頭／最後一個字
+        self.toc_ends = ScrollEndButtons(self.tree)
+        self.toc_ends.top_clicked.connect(lambda: self._jump_to_document_end(False))
+        self.toc_ends.bottom_clicked.connect(lambda: self._jump_to_document_end(True))
+        self._icon_buttons.extend(self.toc_ends.buttons())
         tree_layout.addLayout(tree_body, 1)
         splitter.addWidget(self.tree_card)
 
@@ -467,19 +476,42 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 每次移動游標都會重寫；切換繁簡時由 _update_cursor_position_label 自己重畫。
         i18n.skip(self.cursor_position_label)
         footer_layout.addWidget(self.cursor_position_label)
+        footer_layout.addSpacing(14)
+        # 選取文字時顯示幾個字（檢查廣告長度、抓一段的字數）；沒選取就不顯示
+        self.selection_label = QLabel("")
+        self.selection_label.setObjectName("footerLabel")
+        i18n.skip(self.selection_label)
+        self.selection_label.hide()
+        footer_layout.addWidget(self.selection_label)
         footer_layout.addStretch(1)
+        # 編碼·換行｜－ 縮放 ＋：沒開檔時編碼跟分隔線都不顯示，不會留下孤零零的符號
         self.encoding_footer_label = QLabel("")
         self.encoding_footer_label.setObjectName("footerLabel")
+        self.encoding_footer_label.hide()
         footer_layout.addWidget(self.encoding_footer_label)
-        footer_layout.addSpacing(6)
-        footer_separator = QLabel("／")
-        footer_separator.setObjectName("footerLabel")
-        footer_layout.addWidget(footer_separator)
-        footer_layout.addSpacing(6)
+        footer_layout.addSpacing(10)
+        self.footer_divider = VDivider()
+        self.footer_divider.setFixedHeight(14)
+        self.footer_divider.hide()
+        footer_layout.addWidget(self.footer_divider)
+        footer_layout.addSpacing(10)
+        self.zoom_out_button = IconButton("minus", "縮小（Ctrl＋滾輪）", size=14)
+        self.zoom_out_button.clicked.connect(lambda: self._on_editor_zoom(-1))
+        footer_layout.addWidget(self.zoom_out_button)
         self.zoom_label = ClickableLabel("100%")
         self.zoom_label.setObjectName("footerLabel")
+        # 點得下去的百分比要說明點了會怎樣（使用者要求；其他純顯示的小標籤照舊不放提示）
+        self.zoom_label.setToolTip("點一下回到 100%")
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_label.setMinimumWidth(self.zoom_label.fontMetrics().horizontalAdvance("300%") + 12)
+        self.zoom_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.zoom_label.clicked.connect(lambda: self._on_editor_zoom(0))
         self.zoom_label.double_clicked.connect(lambda: self._on_editor_zoom(0))
         footer_layout.addWidget(self.zoom_label)
+        self.zoom_in_button = IconButton("plus", "放大（Ctrl＋滾輪）", size=14)
+        self.zoom_in_button.clicked.connect(lambda: self._on_editor_zoom(1))
+        footer_layout.addWidget(self.zoom_in_button)
+        self._icon_buttons.extend((self.zoom_out_button, self.zoom_in_button))
         editor_layout.addWidget(editor_footer)
         splitter.addWidget(self.editor_card)
         # 卡片內容變寬（本文底部的編碼文字在開檔後才填上、換主題換字型…）就重算視窗最小寬度：
@@ -499,11 +531,20 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         root.addWidget(splitter_wrap, 1)
 
         self.setCentralWidget(central)
+        # 已經開著檔案時拖檔案進來：蓋一層放置區，放在哪一區就做哪一件
+        self.drop_overlay = DropOverlay([
+            ("open", "開啟新檔", "換成這個檔案"),
+            ("update", "接續更新章節", "跟本文比對，只加入本文沒有的章節"),
+        ], central)
+        self.drop_overlay.dropped.connect(self._on_overlay_dropped)
+        self.editor.file_drag_entered.connect(self._show_drop_overlay)
         # 工具列縮成只有圖示時，版面本身的最小寬度是 677；設成 680 剛好塞得進
         # 直立螢幕（200% 縮放下只有 720）。開著功能卡片時卡片要更寬，見 _update_minimum_width。
-        self.setMinimumSize(MIN_WINDOW_WIDTH, 420)
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+        self.metadata_bar.details_height_changed.connect(self._update_minimum_height)
         self._show_status("準備就緒")
         self.editor.cursorPositionChanged.connect(self._update_cursor_position_label)
+        self.editor.selectionChanged.connect(self._update_selection_label)
 
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self.toggle_find_bar)
         QShortcut(QKeySequence("Ctrl+H"), self, activated=self.open_replace)
@@ -527,8 +568,21 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 中間的伸縮空間隔開。
         layout.setSpacing(8)
 
+        # 選擇檔案旁邊的箭頭：開啟檔案、接續更新章節（跟匯出 TXT 的箭頭同一種，兩顆像同一顆分兩半）
+        open_group = QHBoxLayout()
+        open_group.setSpacing(2)
         self.open_button = self._add_text_button(
-            layout, "folder-open", "選擇檔案", "", self.open_file, "Ctrl+O", primary=True)
+            open_group, "folder-open", "選擇檔案", "", self.open_file, "Ctrl+O", primary=True)
+        self.open_button.setProperty("split", "left")
+        self.open_menu_button = self._add_text_button(
+            open_group, "chevron-down", "", "開啟檔案、接續更新章節", self._show_open_menu, None, primary=True)
+        self.open_menu_button.setProperty("split", "right")
+        layout.addLayout(open_group)
+        self.open_menu = QMenu(self)
+        self.open_file_action = self.open_menu.addAction("開啟檔案…")
+        self.open_file_action.triggered.connect(lambda: self.open_file())
+        self.update_chapters_action = self.open_menu.addAction("接續更新章節…")
+        self.update_chapters_action.triggered.connect(lambda: self.import_chapter_update())
         self.one_click_button = self._add_text_button(
             layout, "wand-sparkles", "一鍵排版", "", self.one_click_format, None, primary=True)
         # 左邊是動作（開檔、一鍵排版），右邊是開關側邊卡片：中間用一條直線分開
@@ -550,14 +604,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             layout, "text-search", "尋找取代", "", self.toggle_find_bar, None, checkable=True)
         layout.addStretch(1)
 
-        self.undo_button = self._add_header_button(layout, "undo-2", "", self._undo, None)
-        self.redo_button = self._add_header_button(layout, "redo-2", "", self._redo, None)
-        self.clear_button = self._add_header_button(layout, "eraser", "", self.clear_all, None)
+        # 只有圖示的按鈕放滑鼠提示（名稱＋快捷鍵）；有文字的按鈕不放，文字已經說了（UI_RULES.md）
+        self.undo_button = self._add_header_button(layout, "undo-2", "上一步（Ctrl+Z）", self._undo, None)
+        self.redo_button = self._add_header_button(layout, "redo-2", "下一步（Ctrl+Y）", self._redo, None)
+        self.clear_button = self._add_header_button(layout, "eraser", "清空", self.clear_all, None)
         # 編輯動作（上一步、下一步、清空）跟外觀設定（主題、繁簡）之間一條直線
         layout.addSpacing(4)
         layout.addWidget(VDivider())
         layout.addSpacing(4)
-        self.theme_button = ThemeButton(THEMES.values(), "")
+        self.theme_button = ThemeButton(THEMES.values(), "主題")
         self.theme_button.themeSelected.connect(self.set_theme)
         layout.addWidget(self.theme_button)
         self.language_toggle = LanguageToggle()
@@ -573,7 +628,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             save_group, "download", "匯出 TXT", "", self.save_file_as, "Ctrl+S", primary=True)
         self.save_button.setProperty("split", "left")
         self.filename_button = self._add_text_button(
-            save_group, "chevron-down", "", "", self.open_filename_dialog, None, primary=True)
+            save_group, "chevron-down", "", "匯出設定", self.open_filename_dialog, None, primary=True)
         self.filename_button.setProperty("split", "right")
         layout.addLayout(save_group)
         return header
@@ -699,7 +754,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 準），寬度沿用設計稿的比例（118×52）。
         # 工具列上所有控制項同一個高度（UI_RULES.md）：純圖示按鈕的 sizeHint 比有文字的
         # 按鈕高，「匯出 TXT」夾在圖示按鈕和繁簡切換旁邊就顯得矮一截。
-        header_buttons = ([self.open_button, self.one_click_button, self.format_toggle_button,
+        header_buttons = ([self.open_button, self.open_menu_button, self.one_click_button, self.format_toggle_button,
                            self.chapter_toggle_button, self.content_toggle_button, self.find_toggle_button,
                            self.save_button, self.filename_button,
                            self.undo_button, self.redo_button, self.clear_button, self.theme_button])
@@ -795,8 +850,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             return
         with native_dialog():
             path, _ = QFileDialog.getOpenFileName(
-                self, i18n.T("開啟 TXT 檔案"), self._remembered_dir("last_open_dir"),
-                i18n.T("文字檔 (*.txt);;所有檔案 (*)"))
+                self, i18n.T("開啟 TXT 檔案"), self._remembered_dir("last_open_dir"), i18n.T(OPEN_FILE_FILTER))
         if not path:
             return
         self._ui_state["last_open_dir"] = os.path.dirname(path)
@@ -809,30 +863,49 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @action
     def _open_dropped_file(self, path: str):
-        """拖曳到本文卡片：跟拖到視窗其他地方一樣，只接受 TXT。"""
-        if not path.lower().endswith(".txt"):
-            dialogs.error(self, "無法載入", "請拖曳一個有效的 TXT 檔案。")
+        """拖曳到本文卡片（還沒開檔、放置區沒有出現時）：跟拖到視窗其他地方一樣。"""
+        if not openable(path):
+            dialogs.error(self, "無法載入", "請拖曳 TXT 或 Word（.docx）檔案。")
             return
         if self._confirm_discard_changes():
             self.load_file_path(path)
 
+    def _has_document(self) -> bool:
+        return not self.editor.document().isEmpty()
+
+    def _show_drop_overlay(self):
+        """開著檔案時拖檔案進來：放置區蓋上來，接下來的拖曳都由它處理。"""
+        if self._has_document():
+            self.drop_overlay.cover()
+
+    @action
+    def _on_overlay_dropped(self, zone: str, path: str):
+        if not openable(path):
+            dialogs.error(self, "無法載入", "請拖曳 TXT 或 Word（.docx）檔案。")
+        elif zone == "update":
+            self.import_chapter_update(path)
+        elif self._confirm_discard_changes():
+            self.load_file_path(path)
+
+    def _show_open_menu(self):
+        self.update_chapters_action.setEnabled(self._has_document())
+        self.open_menu.popup(self.open_menu_button.mapToGlobal(self.open_menu_button.rect().bottomLeft()))
+
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if dropped_paths(event):
             event.acceptProposedAction()
+            self._show_drop_overlay()
 
     def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path and path.lower().endswith(".txt"):
-                event.acceptProposedAction()
-                if self._confirm_discard_changes():
-                    self.load_file_path(path)
-                return
-        dialogs.error(self, "無法載入", "請拖曳一個有效的 TXT 檔案。")
+        paths = dropped_paths(event)
+        if paths:
+            event.acceptProposedAction()
+            self._open_dropped_file(paths[0])
 
     @action
     def load_file_path(self, path: str, encoding: str | None = None):
-        encoding = encoding or smart_detect_encoding(path)
+        word = is_docx(path)
+        encoding = WORD_ENCODING if word else encoding or smart_detect_encoding(path)
         try:
             content, damaged, encoding = self._read_document(path, encoding)
         except OSError as error:
@@ -863,6 +936,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.metadata_bar.set_structure(DEFAULT_STRUCTURE_MODE)
         encoding_choice = next((label for label, codec in ENCODING_CODECS.items() if codec == encoding), "自動")
         self.metadata_bar.set_encoding_choice(encoding_choice)
+        # Word 檔沒有文字編碼可選（讀出來就是 Unicode）
+        self.metadata_bar.encoding_combo.setEnabled(not word)
 
         self._history = []
         self._history_position = -1
@@ -876,11 +951,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         try:
             size_mb = os.path.getsize(path) / (1024 * 1024)
         except OSError:      # 讀完之後檔案被移走或改名
-            size_mb = len(content.encode(encoding, "replace")) / (1024 * 1024)
+            size_mb = len(content.encode("utf-8" if word else encoding, "replace")) / (1024 * 1024)
         self.metadata_bar.set_filename(os.path.basename(path), f"{size_mb:.2f} MB")
         self.metadata_bar.set_encoding_badge(self.detected_encoding.upper())
-        self.encoding_footer_label.setText(
-            f"{self.detected_encoding.upper()} · {detect_line_ending(path)}")
+        self._set_footer_encoding(
+            "DOCX" if word else f"{self.detected_encoding.upper()} · {detect_line_ending(path)}")
         status = i18n.T("已載入：") + os.path.basename(path)
         if damaged:
             status += i18n.T(f"；有 {damaged} 個字元無法以 {encoding.upper()} 解碼（顯示為 �），存檔會永久遺失")
@@ -959,6 +1034,16 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._warm_timer.start(0)
 
     def _read_document(self, path: str, encoding: str):
+        if is_docx(path):
+            try:
+                return read_docx_text(path), 0, WORD_ENCODING
+            except DocxError as error:
+                log.warning("讀取 Word 檔失敗：%s", error)
+                dialogs.error(self, "讀取失敗", f"無法讀取這個 Word 檔：\n{path}\n\n{error}")
+                return None, 0, encoding
+        return self._read_text_document(path, encoding)
+
+    def _read_text_document(self, path: str, encoding: str):
         """先嚴格解碼；編碼不符時問過使用者才容錯開啟。
 
         不預設容錯：解不開的位元組會變成「�」，一旦照這樣編輯、匯出，原本
@@ -1171,7 +1256,29 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._editor_zoom = zoom
         self._apply_editor_style()
         self.zoom_label.setText(f"{zoom}%")
+        self._update_zoom_buttons()
         self._format_refresh_timer.start()
+
+    def _update_zoom_buttons(self):
+        self.zoom_out_button.setEnabled(self._editor_zoom > EDITOR_ZOOM_MIN)
+        self.zoom_in_button.setEnabled(self._editor_zoom < EDITOR_ZOOM_MAX)
+
+    def _set_footer_encoding(self, text: str):
+        self.encoding_footer_label.setText(text)
+        self.encoding_footer_label.setVisible(bool(text))
+        self.footer_divider.setVisible(bool(text))
+
+    def _update_selection_label(self):
+        """選取的字數：用位置相減、扣掉跨過的換行，不把選取的文字整段複製出來（整本全選的大檔也不卡）。"""
+        cursor = self.editor.textCursor()
+        if not cursor.hasSelection():
+            self.selection_label.hide()
+            return
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        document = self.editor.document()
+        breaks = document.findBlock(end).blockNumber() - document.findBlock(start).blockNumber()
+        self.selection_label.setText(i18n.T("已選取 {count} 字").format(count=f"{end - start - breaks:,}"))
+        self.selection_label.show()
 
     def _apply_editor_style(self):
         """本文的字級與文字選取色。
@@ -1328,12 +1435,48 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             # 關閉前還是會提醒一次，要留住目錄狀態的話可以再存一份沒移除的。
             note = i18n.T("（已移除 %d 個章節標記，這份檔案重新開啟時不會保留手動調整過的"
                           "目錄；本文仍算未存檔）")
-            self._show_status(i18n.T("已匯出：") + path + note % stripped, translated=True)
+            self._show_status(i18n.T("已匯出：") + path + note % stripped + self._offer_old_file_cleanup(path),
+                              translated=True)
             return True
         self._document_dirty = False
         self._saved_text_hash = hash(content)
-        self._show_status(i18n.T("已匯出：") + path, translated=True)
+        self._show_status(i18n.T("已匯出：") + path + self._offer_old_file_cleanup(path), translated=True)
         return True
+
+    def _offer_old_file_cleanup(self, new_path: str) -> str:
+        """匯出後：資料夾裡同一本書的舊檔（檔名的書名、作者一樣）、剛才開啟的檔案，問過才移到資源回收筒。
+        回傳要接在狀態列後面的說明（沒做什麼就是空字串）。"""
+        if not self._ask_old_files_on_export:
+            return ""
+        title, author, _status = extract_filename_metadata(new_path)
+        title = self.metadata_bar.book_title() or title
+        author = self.metadata_bar.author() or author
+        opened = self.input_file if self.input_file and os.path.isfile(self.input_file) else None
+        same_path = lambda a, b: os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+        files = []
+        for path, same_author in same_book_files(os.path.dirname(new_path), title, author, exclude=[new_path]):
+            is_opened = opened is not None and same_path(path, opened)
+            files.append((path, "剛才開啟的檔案" if is_opened else "", same_author))
+        # 只看匯出的資料夾：開的檔案在別的地方（下載資料夾的原檔）不問，不然每次匯出到別的資料夾都會跳出來
+        if not files:
+            return ""
+        dialog = OldFilesDialog(os.path.basename(new_path), files, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return ""
+        moved, failed = [], []
+        for path in dialog.chosen():
+            (moved if old_files_dialog.move_to_trash(path) else failed).append(path)
+        if opened and any(same_path(path, opened) for path in moved):
+            # 開的那個檔已經丟進資源回收筒：之後就當成開的是剛匯出的新檔
+            self.input_file = new_path
+            try:
+                size_mb = os.path.getsize(new_path) / (1024 * 1024)
+            except OSError:
+                size_mb = 0.0
+            self.metadata_bar.set_filename(os.path.basename(new_path), f"{size_mb:.2f} MB")
+        if failed:
+            dialogs.error(self, "無法移到資源回收筒", "這些檔案沒有移動：\n" + "\n".join(failed))
+        return i18n.T(f"；已把 {len(moved)} 個舊檔移到資源回收筒") if moved else ""
 
     def _filename_fields(self) -> dict:
         """匯出檔名的變數：書籍資料的欄位，加上目錄裡的卷數與番外章數
@@ -1353,7 +1496,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     def _suggest_export_filename(self) -> str:
         if not self.metadata_bar.book_title():
-            return os.path.basename(self.input_file) if self.input_file else "未命名.txt"
+            if not self.input_file:
+                return "未命名.txt"
+            # 開的是 Word 檔也存成 TXT
+            return os.path.splitext(os.path.basename(self.input_file))[0] + ".txt"
         template = filename_template_for(self.metadata_bar.status(), self.filename_ongoing, self.filename_completed)
         return convert_script(build_smart_filename(self._filename_fields(), template), self.filename_script)
 
@@ -1361,9 +1507,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     def open_filename_dialog(self):
         dialog = FilenameDialog(self.filename_ongoing, self.filename_completed, self.filename_script,
                                 self._filename_fields(), self.metadata_bar.status(), self,
-                                strip_markers=self._strip_markers_on_export)
+                                strip_markers=self._strip_markers_on_export,
+                                ask_old_files=self._ask_old_files_on_export)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._ask_old_files_on_export = dialog.result_ask_old_files
         self.filename_ongoing, self.filename_completed = dialog.result_ongoing, dialog.result_completed
         self.filename_script = dialog.result_script
         self._strip_markers_on_export = dialog.result_strip_markers
@@ -1434,7 +1582,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._pending_line_maps = []
         self.metadata_bar.reset()
         self.breadcrumb_label.setText("")
-        self.encoding_footer_label.setText("")
+        self._set_footer_encoding("")
         self._history = []
         self._history_position = -1
         self._checkpoint_document()
@@ -2176,6 +2324,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if screen is not None:
             needed = min(needed, screen.availableGeometry().width())
         self.setMinimumWidth(max(MIN_WINDOW_WIDTH, needed))
+
+    def _update_minimum_height(self):
+        """書籍資料展開時，最矮的高度加上它的高度：欄位不會被壓扁，由下面的卡片讓出空間。"""
+        details = self.metadata_bar.details
+        needed = MIN_WINDOW_HEIGHT + (details.sizeHint().height() if not details.isHidden() else 0)
+        screen = self.screen()
+        if screen is not None:
+            needed = min(needed, screen.availableGeometry().height())
+        self.setMinimumHeight(needed)
 
     def _sync_side_panel_widths(self):
         """左側卡片裡的三個面板用同一個最小寬度（以最寬的那個為準）：

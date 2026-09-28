@@ -6,17 +6,23 @@ MainWindow 的一部分（mixin），只用 MainWindow 的屬性與方法。"""
 
 import bisect
 import dataclasses
+import os
 import threading
 
 import shiboken6
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor, QTextFormat
-from PySide6.QtWidgets import QApplication, QDialog, QTableWidget, QTextEdit
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QTableWidget, QTextEdit
 
 from core.ad_scan import (
     AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, FIX_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT,
     REPEAT_MIN_LENGTH, apply_candidates, scan_ad_candidates,
 )
+from core.chapter_update import (
+    LONGER, MISSING, NEW, append_all, apply_update, dominant_script, plan_update, toc_entries,
+)
+from core.docx_reader import is_docx
+from core.encoding import smart_detect_encoding, strip_stray_bom
 from core.quote_check import QUOTE_PROBLEM_LABELS
 from core.script_convert import convert_body_text, opencc_available
 from core.word_count import chapter_word_counts
@@ -24,8 +30,9 @@ from core.structure_builder import build_document_structure
 from core.insert_suggestions import get_insert_suggestions
 
 from . import dialogs, i18n
-from .app_log import action, log
+from .app_log import action, log, native_dialog
 from .ad_scan_dialog import AdScanDialog
+from .chapter_update_dialog import APPEND_ALL, OTHER_FILE, ChapterUpdateDialog
 from .duplicate_chapters_dialog import DuplicateChaptersDialog
 from .insert_title_dialog import InsertTitleDialog
 from .quote_check_dialog import QuoteCheckDialog
@@ -33,7 +40,7 @@ from .script_convert_dialog import ScriptConvertDialog
 from .recognition_dialog import RecognitionDialog
 from .rules_dialog import RulesDialog
 from .word_count_dialog import WordCountDialog
-from .window_common import MARK_SCAN_DELAY_MS
+from .window_common import MARK_SCAN_DELAY_MS, OPEN_FILE_FILTER
 
 
 class ToolWindowsMixin:
@@ -650,6 +657,128 @@ class ToolWindowsMixin:
             self._long_task_running = False
             self.setEnabled(True)
         return lines
+
+    def _jump_to_document_end(self, end: bool):
+        """目錄右下角的到最前面／到最後面：目錄捲到頭，本文的游標也到開頭／最後一個字。"""
+        if end:
+            self.tree.scrollToBottom()
+        else:
+            self.tree.scrollToTop()
+        cursor = self.editor.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End if end else QTextCursor.MoveOperation.Start)
+        self.editor.setTextCursor(cursor)
+        self.editor.ensureCursorVisible()
+        self.editor.setFocus()
+
+    # ------------------------------------------------------------------ 接續更新章節
+
+    @action
+    def import_chapter_update(self, path: str | None = None):
+        """把新下載的同一本書跟本文比對，勾選的章節加入本文（core/chapter_update.py）。
+        path 是 None 時先開選檔視窗；視窗裡按「換一個檔案」也回到選檔。"""
+        if not self._has_document():
+            return
+        while True:
+            if path is None:
+                with native_dialog():
+                    path, _ = QFileDialog.getOpenFileName(
+                        self, i18n.T("接續更新章節"), self._remembered_dir("last_open_dir"),
+                        i18n.T(OPEN_FILE_FILTER))
+                if not path:
+                    return
+                self._ui_state["last_open_dir"] = os.path.dirname(path)
+            loaded = self._load_update_source(path)
+            if loaded is None:
+                return
+            new_lines, new_entries, plan, convert_mode = loaded
+            convert_label = None
+            if convert_mode:
+                convert_label = "加入時轉成繁體" if convert_mode != "繁體轉簡體" else "加入時轉成簡體"
+            dialog = ChapterUpdateDialog(os.path.basename(path), plan, new_lines,
+                                         [entry["row"] for entry in new_entries], convert_label, self)
+            dialog.exec()
+            if dialog.choice == OTHER_FILE:
+                path = None
+                continue
+            if dialog.choice is None:
+                return
+            mode = convert_mode if dialog.convert_enabled() else None
+            if dialog.choice == APPEND_ALL:
+                self._append_whole_update(new_lines, mode)
+            else:
+                self._apply_chapter_update(new_lines, new_entries, plan, dialog.checked(), mode)
+            return
+
+    def _load_update_source(self, path: str):
+        """讀新檔、辨識章節（照目前的辨識設定）、跟本文比對：回傳（新檔的行, 目錄項目, 比對結果, 繁簡轉換）。"""
+        content, _damaged, _encoding = self._read_document(
+            path, None if is_docx(path) else smart_detect_encoding(path))
+        if content is None:
+            return None
+        content, _removed = strip_stray_bom(content)
+        new_lines = content.split("\n")
+        self._sync_raw_lines()
+        self._ensure_toc_current()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            body_entries = toc_entries(self.raw_lines, self.chapter_raw_map, self.chapter_records)
+            # 新檔沒有本文的人工調整（強制層級、自動標題記錄），其他辨識設定一樣
+            ctx = dataclasses.replace(self._build_context(), raw_lines=new_lines, auto_titles={},
+                                      force_lv1_chapters=set(), force_lv2_chapters=set())
+            result = build_document_structure(ctx, apply_format=False, write_text=False)
+            new_entries = toc_entries(new_lines, result.chapter_raw_map, result.chapter_records)
+            plan = plan_update(self.raw_lines, body_entries, new_lines, new_entries)
+            body_script, new_script = dominant_script(self.raw_lines), dominant_script(new_lines)
+        finally:
+            QApplication.restoreOverrideCursor()
+        convert_mode = None
+        if body_script == "trad" and new_script == "simp":
+            # 照繁簡轉換視窗上次選的方式（有沒有換成台灣用語）
+            saved = self._ui_state.get("script_mode")
+            convert_mode = saved if saved in ("簡體轉繁體", "簡體轉繁體（台灣用語）") else "簡體轉繁體"
+        elif body_script == "simp" and new_script == "trad":
+            convert_mode = "繁體轉簡體"
+        return new_lines, new_entries, plan, convert_mode
+
+    def _apply_chapter_update(self, new_lines, new_entries, plan, checked, convert_mode):
+        body_entries = toc_entries(self.raw_lines, self.chapter_raw_map, self.chapter_records)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            lines, added_rows = apply_update(self.raw_lines, body_entries, new_lines, new_entries, plan, checked,
+                                             convert_mode)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._replace_text_from_tool(lines)
+        # 目錄選好加入的章：直接按右鍵「套用格式到這幾章」
+        items = [item for item, row in self.chapter_raw_map.items() if row in set(added_rows)]
+        self.tree.clearSelection()
+        for item in items:
+            item.setSelected(True)
+        if added_rows:
+            self._jump_to_line(added_rows[0] + 1)
+            if items:
+                self.tree.scrollToItem(min(items, key=lambda item: self.chapter_raw_map[item]))
+        counts = {status: sum(1 for item in plan if item["index"] in checked and item["status"] == status)
+                  for status in (MISSING, NEW, LONGER)}
+        parts = []
+        if counts[MISSING]:
+            parts.append(f"補上本文缺少的 {counts[MISSING]} 章")
+        if counts[NEW]:
+            parts.append(f"加入 {counts[NEW]} 章新章節")
+        if counts[LONGER]:
+            parts.append(f"換掉 {counts[LONGER]} 章的正文")
+        self._show_status("、".join(parts) + "；目錄已選好這幾章，可以按右鍵「套用格式到這幾章」；"
+                          "可以按 Ctrl+Z 復原")
+
+    def _append_whole_update(self, new_lines, convert_mode):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            lines, start = append_all(self.raw_lines, new_lines, convert_mode)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._replace_text_from_tool(lines)
+        self._jump_to_line(start + 1)
+        self._show_status(f"已把新檔整份接到最後（從第 {start + 1} 行起）；可以按 Ctrl+Z 復原")
 
     def _jump_to_line(self, line_number: int):
         """跳到某一行並整行反白（檢查清單點選用，1 起算）。"""

@@ -147,7 +147,18 @@ class _LevelPage(QWidget):
         self.delete_button.clicked.connect(self._delete_current)
         name_row.addWidget(self.delete_button)
         right.addLayout(name_row)
-        right.addWidget(self._build_blocks(), 1)
+        # 積木在上、「看本文的行」在下，中間的分隔可以拖：展開看本文的行時積木區自己捲動，
+        # 改積木時下面的行數、表格跟著變，兩邊一起看得到。
+        blocks_scroll = QScrollArea()
+        blocks_scroll.setWidgetResizable(True)
+        blocks_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        blocks_scroll.setWidget(self._build_blocks())
+        blocks_scroll.setMinimumHeight(140)
+        top = QWidget()
+        top_layout = QVBoxLayout(top)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(10)
+        top_layout.addWidget(blocks_scroll, 1)
 
         bar = QFrame()
         bar.setObjectName("resultBar")
@@ -167,7 +178,7 @@ class _LevelPage(QWidget):
         self.lines_button.set_colors(tokens.icon, tokens.icon_hover, tokens.checked_text, tokens.text_faint)
         self.lines_button.toggled.connect(self._toggle_lines)
         bar_layout.addWidget(self.lines_button)
-        right.addWidget(bar)
+        top_layout.addWidget(bar)
         self.lines_table = PreviewTable(0, 2)
         self.lines_table.setHorizontalHeaderLabels(["狀態", "內容"])
         self.lines_table.verticalHeader().setVisible(False)
@@ -178,9 +189,14 @@ class _LevelPage(QWidget):
         # 選到一列：下面顯示那一行加上前後文（跟掃描視窗、本文可疑章節一樣）
         self.lines_preview = ContextPreview()
         self.lines_box = self.lines_preview.stacked_under(self.lines_table)
-        self.lines_box.setFixedHeight(300)
+        self.lines_box.setMinimumHeight(160)
         self.lines_box.hide()
-        right.addWidget(self.lines_box)
+        self.blocks_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.blocks_splitter.setChildrenCollapsible(False)
+        self.blocks_splitter.setHandleWidth(10)
+        self.blocks_splitter.addWidget(top)
+        self.blocks_splitter.addWidget(self.lines_box)
+        right.addWidget(self.blocks_splitter, 1)
         right_host.setMinimumWidth(right_host.minimumSizeHint().width())
         self.splitter.addWidget(right_host)
         self.splitter.setStretchFactor(0, 0)
@@ -501,6 +517,9 @@ class _LevelPage(QWidget):
         self.lines_box.setVisible(shown)
         self.lines_button.set_icon_name("chevron-up" if shown else "chevron-down")
         if shown:
+            # 打開時上下大約各一半（本文的行多一點）；之後使用者拖過就照拖過的
+            total = sum(self.blocks_splitter.sizes()) or self.blocks_splitter.height()
+            self.blocks_splitter.setSizes([total * 9 // 20, total - total * 9 // 20])
             self._fill_lines()
 
     def _fill_lines(self):

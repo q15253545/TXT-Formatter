@@ -26,5 +26,6 @@ bug/
 pending/
 txtissue/
 adtemplate/
+doc-demo/
 *.png
 !docs/**/*.png

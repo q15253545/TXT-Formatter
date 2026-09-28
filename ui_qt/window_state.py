@@ -11,7 +11,7 @@ from core.persistence import load_window_state
 from . import i18n, icons
 from .theme import THEMES
 from .window_common import (
-    COMPACT_TOOLBAR_WIDTH, DEFAULT_WINDOW_SIZE, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, FULL_TOOLBAR_WIDTH,
+    COMPACT_ARROW_WIDTH, COMPACT_TOOLBAR_WIDTH, DEFAULT_WINDOW_SIZE, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, FULL_TOOLBAR_WIDTH,
 )
 
 
@@ -113,15 +113,43 @@ class WindowStateMixin:
         if compact == self._toolbar_compact:
             return
         self._toolbar_compact = compact
-        # 只顯示圖示時間距、左右留白也收一點：要能塞進 800 寬的視窗
+        # 只顯示圖示時間距、左右留白、兩個箭頭都收一點：要能塞進 800 寬的視窗
         layout = self.open_button.parentWidget().layout()
-        layout.setSpacing(4 if compact else 8)
+        layout.setSpacing(3 if compact else 8)
         margin = 8 if compact else 20
         layout.setContentsMargins(margin, 0, margin, 0)
+        # 只剩圖示時用滑鼠提示補上原本的文字（有文字時不放，文字已經說了）
+        shortcuts = {self.open_button: "Ctrl+O", self.find_toggle_button: "Ctrl+F", self.save_button: "Ctrl+S"}
         for button in (self.open_button, self.one_click_button, self.format_toggle_button,
                        self.chapter_toggle_button, self.content_toggle_button, self.find_toggle_button,
                        self.save_button):
             button.set_compact(compact)
+            shortcut = shortcuts.get(button)
+            button.setToolTip(button.text() + (f"（{shortcut}）" if shortcut else "") if compact else "")
+        # 只有圖示的按鈕做成正方形、兩個箭頭再窄一點：最窄的視窗（MIN_WINDOW_WIDTH）也要放得下，
+        # 不然版面會把按鈕擠在一起、繁簡切換被蓋住
+        side = self.open_button.height()
+        for button in self._toolbar_icon_buttons():
+            if compact:
+                button.setFixedWidth(side)
+            else:
+                button.setMinimumWidth(0)
+                button.setMaximumWidth(16777215)
+            button.setProperty("compact", compact)
+            button.style().unpolish(button)
+            button.style().polish(button)
+        for arrow in (self.open_menu_button, self.filename_button):
+            if compact:
+                arrow.setFixedWidth(COMPACT_ARROW_WIDTH)
+            else:
+                arrow.setMinimumWidth(0)
+                arrow.setMaximumWidth(16777215)
+
+    def _toolbar_icon_buttons(self) -> tuple:
+        """工具列上只顯示圖示時是單一圖示的按鈕（不含兩個箭頭、繁簡切換）。"""
+        return (self.open_button, self.one_click_button, self.format_toggle_button, self.chapter_toggle_button,
+                self.content_toggle_button, self.find_toggle_button, self.save_button, self.undo_button,
+                self.redo_button, self.clear_button, self.theme_button)
 
     def _collect_ui_state(self) -> dict:
         """關閉前的介面狀態。只記「怎麼用這個程式」的偏好，不記跟某個檔案
@@ -136,6 +164,7 @@ class WindowStateMixin:
             "editor_zoom": self._editor_zoom,
             "show_title_markers": self.marker_button.isChecked(),
             "strip_markers_on_export": self._strip_markers_on_export,
+            "ask_old_files_on_export": self._ask_old_files_on_export,
             "show_whitespace": self.content_panel.show_whitespace_toggle.isChecked(),
             "metadata_expanded": self.metadata_bar.toggle_button.isChecked(),
             "side_panel": side_panel if self.raw_lines and any(self.raw_lines) else
@@ -175,7 +204,9 @@ class WindowStateMixin:
             self._editor_zoom = zoom
             self._apply_editor_style()
             self.zoom_label.setText(f"{zoom}%")
+            self._update_zoom_buttons()
         self._strip_markers_on_export = bool(state.get("strip_markers_on_export", True))
+        self._ask_old_files_on_export = bool(state.get("ask_old_files_on_export", True))
         if state.get("show_title_markers"):
             self.marker_button.setChecked(True)
         if state.get("show_whitespace"):

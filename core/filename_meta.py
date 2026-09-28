@@ -10,9 +10,9 @@ _FILENAME_UNSAFE_REGEX = re.compile(r'[\\/:*?"<>|]')
 
 def extract_filename_metadata(filename):
     """從常見 TXT 檔名擷取書名、作者與連載狀態。"""
-    # 只移除真正的 .txt 副檔名。呼叫端可能已經去過一次副檔名，
+    # 只移除真正的 .txt／.docx 副檔名。呼叫端可能已經去過一次副檔名，
     # 不能再用 splitext 把 [example.org]後半部誤當成副檔名。
-    base = re.sub(r"(?i)\.txt$", "", os.path.basename(filename).strip()).strip()
+    base = re.sub(r"(?i)\.(?:txt|docx)$", "", os.path.basename(filename).strip()).strip()
     author_match = re.search(r"作者\s*[：:]\s*(.+?)(?=(?:[◎（(【\[]|$))", base)
     author = author_match.group(1).strip(" _-，,。") if author_match else ""
 
@@ -136,3 +136,38 @@ def build_smart_filename(fields: dict, template: str) -> str:
         title = title[:max(1, len(title) - (len(name) - FILENAME_MAX_LENGTH) - 1)]
         name = render(dict(fields, title=title + "…"))
     return _FILENAME_UNSAFE_REGEX.sub("_", name[:FILENAME_MAX_LENGTH]) + ".txt"
+
+
+def _book_key(text: str) -> str:
+    """比對書名、作者用：去掉空白，繁簡一律轉成簡體（檔名可能轉過繁簡）。"""
+    from core.script_convert import get_opencc_converter
+    text = re.sub(r"\s+", "", text or "")
+    converter = get_opencc_converter("t2s")
+    return converter.convert(text) if converter is not None and text else text
+
+
+def same_book_files(folder: str, title: str, author: str, exclude=()) -> list:
+    """資料夾裡檔名是同一本書的 TXT／Word 檔：[(路徑, 作者也對得上)]。
+
+    書名一樣才算；兩邊都有作者時作者也要一樣（同名的別本書）。有一邊沒寫作者的也列出來，
+    但 same_author 是 False（呼叫端預設不勾）。exclude：不列的路徑（剛匯出的那個檔）。"""
+    title_key = _book_key(title)
+    if not title_key or not folder or not os.path.isdir(folder):
+        return []
+    author_key = _book_key(author)
+    excluded = {os.path.normcase(os.path.abspath(path)) for path in exclude}
+    found = []
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if not name.lower().endswith((".txt", ".docx")) or not os.path.isfile(path):
+            continue
+        if os.path.normcase(os.path.abspath(path)) in excluded:
+            continue
+        other_title, other_author, _status = extract_filename_metadata(name)
+        if _book_key(other_title) != title_key:
+            continue
+        other_key = _book_key(other_author)
+        if author_key and other_key and other_key != author_key:
+            continue
+        found.append((path, bool(author_key and other_key)))
+    return found

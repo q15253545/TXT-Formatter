@@ -24,16 +24,17 @@ class _TemplateInput(QLineEdit):
 
 
 class FilenameDialog(QDialog):
-    """接受後結果在 result_ongoing、result_completed、result_script、result_strip_markers。"""
+    """接受後結果在 result_ongoing、result_completed、result_script、result_strip_markers、result_ask_old_files。"""
 
     def __init__(self, ongoing: str, completed: str, script: str, fields: dict, status: str, parent=None,
-                 strip_markers: bool = True):
+                 strip_markers: bool = True, ask_old_files: bool = True):
         super().__init__(parent)
         self.setWindowTitle("匯出設定")
         self.setMinimumWidth(660)
         keep_on_screen(self)
         self._fields = fields
         self.result_ongoing = self.result_completed = self.result_script = self.result_strip_markers = None
+        self.result_ask_old_files = None
 
         root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True,
                                     intro="檔名照書籍資料組成，連載中、已完結各一種格式。")
@@ -71,6 +72,10 @@ class FilenameDialog(QDialog):
         self.strip_markers_toggle = ToggleSwitch("匯出時移除章節標記", fill=False)
         self.strip_markers_toggle.setChecked(strip_markers)
         root.addWidget(self.strip_markers_toggle)
+        # 接續更新章節之後檔名會換（更新至第20章 → 第30章），舊檔留在旁邊：匯出後問要不要移到資源回收筒
+        self.ask_old_files_toggle = ToggleSwitch("匯出後詢問是否移除同一本書的舊檔", fill=False)
+        self.ask_old_files_toggle.setChecked(ask_old_files)
+        root.addWidget(self.ask_old_files_toggle)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(10)
@@ -154,10 +159,12 @@ class FilenameDialog(QDialog):
         self.ongoing_input.setText(DEFAULT_ONGOING_TEMPLATE)
         self.completed_input.setText(DEFAULT_COMPLETED_TEMPLATE)
         self.strip_markers_toggle.setChecked(True)
+        self.ask_old_files_toggle.setChecked(True)
 
     def _accept(self):
         self.result_ongoing = self.ongoing_input.text().strip() or DEFAULT_ONGOING_TEMPLATE
         self.result_completed = self.completed_input.text().strip() or DEFAULT_COMPLETED_TEMPLATE
         self.result_script = i18n.combo_value(self.script_combo)
         self.result_strip_markers = self.strip_markers_toggle.isChecked()
+        self.result_ask_old_files = self.ask_old_files_toggle.isChecked()
         self.accept()

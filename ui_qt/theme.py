@@ -470,6 +470,10 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         padding: 8px 14px;
         font-weight: 500;
     }}
+    /* 工具列只顯示圖示時按鈕是正方形：左右不留內距，圖示才不會被縮小 */
+    QToolButton#toolbarButton[compact="true"] {{
+        padding: 8px 0px;
+    }}
     /* 滑鼠移上去：能按的按鈕文字跟圖示一起變成 icon_hover。開啟中的按鈕照下面
        :checked 的顏色（寫在後面，同樣權重時後面的規則優先）。 */
     QToolButton#toolbarButton:hover, QPushButton#toolbarButton:hover {{
@@ -965,6 +969,35 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     /* 自訂章節規則 → 辨識格式的分類清單：跟目錄樹同一套 hover／選取色 */
     /* 辨識章節左邊的組合清單：每一列是自己畫的（名稱、信心、開關），選到的那一列加淡底 */
     /* 目錄是空的時候，目錄卡片最上面那段提示（加成辨識章節的組合） */
+    /* 目錄右下角的到最前面／到最後面：視窗底色的小膠囊（跟白色卡片有色差），浮在清單上 */
+    QFrame#scrollEnds {{
+        background: {t.bg};
+        border: 1px solid {t.button_border};
+        border-radius: 15px;
+    }}
+    /* 拖檔案進視窗時的放置區：蓋住整個視窗，滑鼠所在的那一區用「開啟中」的顏色 */
+    QWidget#dropOverlay {{
+        background: {t.bg};
+    }}
+    QFrame#dropZone {{
+        background: {t.surface};
+        border: 2px dashed {t.accent};
+        border-radius: 14px;
+    }}
+    QFrame#dropZone[hot="true"] {{
+        background: {t.checked_bg};
+        border: 2px solid {t.accent};
+    }}
+    QLabel#dropZoneTitle {{
+        font-size: 20px;
+        font-weight: 600;
+        color: {t.text};
+        background: transparent;
+    }}
+    QLabel#dropZoneText {{
+        color: {t.text_muted};
+        background: transparent;
+    }}
     QFrame#tocHint {{
         background: {t.selection_bg};
         border-radius: 8px;

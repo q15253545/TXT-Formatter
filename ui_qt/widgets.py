@@ -1,18 +1,21 @@
 """共用的小型元件：圓角卡片容器、依主題與 hover 狀態換色的圖示按鈕、
 攔截 Ctrl+Z/Ctrl+Shift+Z 交給自訂復原系統的編輯器、繁／簡切換鈕。"""
 
+import difflib
+
 from PySide6.QtCore import (
     Property, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetricsF, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen, QTextCharFormat,
-    QTextCursor,
+    QColor, QFont, QFontMetricsF, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen, QTextBlockFormat,
+    QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit,
+    QAbstractButton, QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit,
     QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
+    QSizePolicy, QSplitter, QTabBar, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from . import i18n, icons
@@ -426,7 +429,8 @@ class AppWidgetPolisher(QObject):
        截斷顯示中的文字，展開的清單仍然完整。
     5. 按鈕不接受滑鼠點擊取得焦點（只接受 Tab）：「測試目前文件」這類一次動作的
        按鈕按完會一直掛著焦點框，看起來像還開著。按鈕行為的規則見 UI_RULES.md。
-    6. 捲動區一律預留直向捲軸的位置（見 reserve_scrollbar_gutter）。"""
+    6. 捲動區一律預留直向捲軸的位置（見 reserve_scrollbar_gutter）。
+    7. 點得下去的元件用手指游標。"""
 
     _HINTING = QFont.HintingPreference.PreferFullHinting
     _FONT_EVENTS = (QEvent.Type.Polish, QEvent.Type.FontChange)
@@ -453,7 +457,15 @@ class AppWidgetPolisher(QObject):
                 watched.setMinimumContentsLength(3)
         if event.type() == QEvent.Type.Polish and isinstance(watched, QAbstractScrollArea):
             reserve_scrollbar_gutter(watched)
+        # 7. 點得下去的一律是手指游標（按鈕、勾選框、開關、分頁、下拉框），在這裡統一套，
+        #    新元件不用各自設定；輸入框、本文是文字游標，表格、目錄這種選取清單維持箭頭。
+        if (event.type() == QEvent.Type.Polish and isinstance(watched, _CLICKABLE)
+                and not watched.testAttribute(Qt.WidgetAttribute.WA_SetCursor)):
+            watched.setCursor(Qt.CursorShape.PointingHandCursor)
         return False
+
+
+_CLICKABLE = (QAbstractButton, QComboBox, QTabBar)
 
 
 def reserve_scrollbar_gutter(area):
@@ -612,9 +624,17 @@ class Divider(QFrame):
 
 
 class ClickableLabel(QLabel):
-    """可以按兩下的標籤（例如本文右下角的縮放比例：按兩下回到 100%）。"""
+    """點得下去的標籤（例如本文右下角的縮放比例：點一下回到 100%）。"""
 
+    clicked = Signal()
     double_clicked = Signal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -804,6 +824,7 @@ class Editor(QPlainTextEdit):
     zoom_requested = Signal(int)
     # 把 TXT 檔拖進本文：交給主視窗開檔，而不是把檔案路徑當文字插進本文。
     file_dropped = Signal(str)
+    file_drag_entered = Signal()        # 拖著檔案進到本文：開著檔案時主視窗會蓋上放置區
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -833,6 +854,7 @@ class Editor(QPlainTextEdit):
     def dragEnterEvent(self, event):
         if self._dropped_files(event):
             event.acceptProposedAction()
+            self.file_drag_entered.emit()
             return
         super().dragEnterEvent(event)
 
@@ -1165,8 +1187,11 @@ class LanguageToggle(QWidget):
 
 
 class ContextPreview(QTextEdit):
-    """工具視窗表格下面的「前後文」：選到的那幾行加上前後幾行，找到的部分照本文的字色標出來，
-    比對得出跟正文的差別。沒有選取時藏起來。"""
+    """工具視窗表格下面的「前後文」：選到的那幾行加上前後幾行。選到的那段加淡底色，
+    找到的部分照本文的字色標出來；可以修正的（標點校對）直接在同一行標出改動。沒有選取時藏起來。
+
+    選到的那段一律放在第二行：上面露出前一段的最後一行，往上捲還看得到更前面的內容
+    （從最上面開始顯示的話，前面幾段很長時選到的那段會被擠到最下面、甚至看不到）。"""
 
     CONTEXT = 3           # 前後各幾行（空行不算）
     MAX_BODY = 20         # 選到的段落太長時只列頭尾
@@ -1176,6 +1201,7 @@ class ContextPreview(QTextEdit):
         self.setObjectName("contextPreview")
         self.setReadOnly(True)
         self.setMinimumHeight(90)
+        self._anchor = -1         # 選到的那段是第幾個段落（捲動定位用）
         self.hide()
 
     def stacked_under(self, table) -> QWidget:
@@ -1189,15 +1215,7 @@ class ContextPreview(QTextEdit):
         splitter.setStretchFactor(1, 2)
         return splitter
 
-    def show_rows(self, lines, start: int, end: int, color: str, spans=None):
-        """lines 的 start～end 行（含）用 color 標出，前後各帶 CONTEXT 行。
-        spans＝{行號: (起, 迄)}：那一行只標這一段（網址片段、網頁字元碼），其餘照正文。"""
-        start, end = max(0, start), min(len(lines) - 1, end)
-        if start > end:
-            self.hide()
-            return
-        spans = spans or {}
-
+    def _context(self, lines, start: int, end: int):
         def neighbours(rows):
             found = []
             for row in rows:
@@ -1207,39 +1225,137 @@ class ContextPreview(QTextEdit):
                         break
             return found
 
-        before = neighbours(range(start - 1, -1, -1))[::-1]
-        after = neighbours(range(end + 1, len(lines)))
+        return neighbours(range(start - 1, -1, -1))[::-1], neighbours(range(end + 1, len(lines)))
+
+    def _formats(self, color: str = ""):
+        tokens = active_tokens()
+        plain, marked, faint = QTextCharFormat(), QTextCharFormat(), QTextCharFormat()
+        plain.setForeground(QColor(tokens.text))
+        marked.setForeground(QColor(color or tokens.text))
+        faint.setForeground(QColor(tokens.text_muted))
+        target = QTextBlockFormat()
+        target.setBackground(QColor(tokens.jump_bg))
+        return plain, marked, faint, target
+
+    def _begin(self):
+        self.clear()
+        self._cursor = QTextCursor(self.document())
+        self._first_block = True
+
+    def _block(self, block_format=None):
+        if not self._first_block:
+            self._cursor.insertBlock(block_format or QTextBlockFormat())
+        else:
+            self._cursor.setBlockFormat(block_format or QTextBlockFormat())
+        self._first_block = False
+
+    def _finish(self):
+        self.show()
+        self.moveCursor(QTextCursor.MoveOperation.Start)
+        QTimer.singleShot(0, self._scroll_to_anchor)
+
+    def _scroll_to_anchor(self):
+        """前一段的最後一行放在最上面，選到的那段就在第二行。後面的內容不多時也要捲得到那裡：
+        底下留一段跟預覽一樣高的空白。"""
+        document = self.document()
+        root = document.rootFrame()
+        frame_format = root.frameFormat()
+        if frame_format.bottomMargin() != self.viewport().height():
+            frame_format.setBottomMargin(self.viewport().height())
+            root.setFrameFormat(frame_format)
+        block = document.findBlockByNumber(self._anchor)
+        if self._anchor <= 0 or not block.isValid():
+            self.verticalScrollBar().setValue(0)
+            return
+        previous = block.previous()
+        layout = previous.layout()
+        top = document.documentLayout().blockBoundingRect(previous).top()
+        if layout is not None and layout.lineCount():
+            top += layout.lineAt(layout.lineCount() - 1).y()
+        self.verticalScrollBar().setValue(int(top))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._anchor >= 0 and self.isVisible():
+            QTimer.singleShot(0, self._scroll_to_anchor)
+
+    def show_rows(self, lines, start: int, end: int, color: str, spans=None):
+        """lines 的 start～end 行（含）加淡底色、字用 color，前後各帶 CONTEXT 行。
+        spans＝{行號: (起, 迄)}：那一行只有這一段用 color（網址片段、網頁字元碼），其餘照正文。"""
+        start, end = max(0, start), min(len(lines) - 1, end)
+        if start > end:
+            self.hide()
+            return
+        spans = spans or {}
+        before, after = self._context(lines, start, end)
         body = list(range(start, end + 1))
         skipped = 0
         if len(body) > self.MAX_BODY:
             skipped = len(body) - self.MAX_BODY
             body = body[:self.MAX_BODY - 5] + [None] + body[-5:]
-        tokens = active_tokens()
-        plain, marked, faint = QTextCharFormat(), QTextCharFormat(), QTextCharFormat()
-        plain.setForeground(QColor(tokens.text))
-        marked.setForeground(QColor(color))
-        faint.setForeground(QColor(tokens.text_muted))
-        self.clear()
-        cursor = QTextCursor(self.document())
-        first = True
-        for row, is_body in [(row, False) for row in before] + [(row, True) for row in body] +                 [(row, False) for row in after]:
-            if not first:
-                cursor.insertBlock()
-            first = False
+        plain, marked, faint, target = self._formats(color)
+        self._begin()
+        for row in before:
+            self._block()
+            self._cursor.insertText(lines[row], plain)
+        self._anchor = len(before)
+        for row in body:
+            self._block(target)
             if row is None:
-                cursor.insertText(i18n.T(f"……（中間 {skipped} 行）……"), faint)
-                continue
-            text = lines[row]
-            if not is_body:
-                cursor.insertText(text, plain)
+                self._cursor.insertText(i18n.T(f"……（中間 {skipped} 行）……"), faint)
             elif row in spans:
                 left, right = spans[row]
-                cursor.insertText(text[:left], plain)
-                cursor.insertText(text[left:right], marked)
-                cursor.insertText(text[right:], plain)
+                text = lines[row]
+                self._cursor.insertText(text[:left], plain)
+                self._cursor.insertText(text[left:right], marked)
+                self._cursor.insertText(text[right:], plain)
             else:
-                cursor.insertText(text, marked)
-        self.moveCursor(QTextCursor.MoveOperation.Start)
+                self._cursor.insertText(lines[row], marked)
+        for row in after:
+            self._block()
+            self._cursor.insertText(lines[row], plain)
+        self._finish()
+
+    def show_fix(self, lines, start: int, end: int, after_lines: list, changed_color: str):
+        """可以修正的問題：start～end 行（含）換成修正後的樣子，同一行標出改動——刪掉的字灰色加刪除線、
+        補上的字用 changed_color；接起來的兩行在接縫畫一個刪掉的「↵」。前後各帶 CONTEXT 行。"""
+        start, end = max(0, start), min(len(lines) - 1, end)
+        before, after = self._context(lines, start, end)
+        plain, changed, faint, target = self._formats(changed_color)
+        changed.setFontWeight(QFont.Weight.Bold)
+        removed = QTextCharFormat(faint)
+        removed.setFontStrikeOut(True)
+        old, new = "\n".join(lines[start:end + 1]), "\n".join(after_lines)
+        self._begin()
+        for row in before:
+            self._block()
+            self._cursor.insertText(lines[row], plain)
+        self._anchor = len(before)
+        self._block(target)
+
+        def put(text, char_format, deleted=False):
+            for index, part in enumerate(text.split("\n")):
+                if index:
+                    if deleted:
+                        self._cursor.insertText("↵", char_format)
+                    else:
+                        self._block(target)
+                if part:
+                    self._cursor.insertText(part, char_format)
+
+        matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                put(new[j1:j2], plain)
+                continue
+            if i2 > i1:
+                put(old[i1:i2], removed, deleted=True)
+            if j2 > j1:
+                put(new[j1:j2], changed)
+        for row in after:
+            self._block()
+            self._cursor.insertText(lines[row], plain)
+        self._finish()
         self.show()
         # 捲到選到的那幾行
         block = self.document().findBlockByNumber(len(before))
@@ -1349,3 +1465,133 @@ class GroupCheckBox(QCheckBox):
         self.setCheckState(state)
         self.blockSignals(False)
 
+
+
+def dropped_paths(event) -> list:
+    """拖進來的本機檔案路徑（拖的是文字不是檔案就是空的）。"""
+    mime = event.mimeData()
+    if not mime.hasUrls():
+        return []
+    return [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
+
+
+class DropOverlay(QWidget):
+    """拖檔案進視窗時蓋在上面的放置區：每一區一個動作，放在哪一區就做哪一件，不用再跳一個詢問視窗。
+    拖出視窗（或按 Esc 取消拖曳）就收起來。zones：[(代號, 標題, 說明)]，由左到右排。"""
+
+    dropped = Signal(str, str)        # 放在哪一區（代號）、檔案路徑
+
+    def __init__(self, zones, parent=None):
+        super().__init__(parent)
+        self.setObjectName("dropOverlay")
+        self.setAcceptDrops(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setSpacing(20)
+        self._zones = {}
+        for key, title, text in zones:
+            zone = QFrame()
+            zone.setObjectName("dropZone")
+            zone_layout = QVBoxLayout(zone)
+            zone_layout.addStretch(1)
+            for label_text, name in ((title, "dropZoneTitle"), (text, "dropZoneText")):
+                label = QLabel(label_text)
+                label.setObjectName(name)
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                label.setWordWrap(True)
+                zone_layout.addWidget(label)
+            zone_layout.addStretch(1)
+            layout.addWidget(zone, 1)
+            self._zones[key] = zone
+        self._hot = None
+        self.hide()
+
+    def cover(self):
+        """蓋滿父元件、放到最上面。"""
+        self.setGeometry(self.parentWidget().rect())
+        self.raise_()
+        self.show()
+
+    def zone_at(self, pos) -> str | None:
+        for key, zone in self._zones.items():
+            if zone.geometry().contains(pos):
+                return key
+        return None
+
+    def _set_hot(self, key):
+        if key == self._hot:
+            return
+        self._hot = key
+        for zone_key, zone in self._zones.items():
+            zone.setProperty("hot", zone_key == key)
+            zone.style().unpolish(zone)
+            zone.style().polish(zone)
+
+    def dragEnterEvent(self, event):
+        if dropped_paths(event):
+            event.acceptProposedAction()
+            self._set_hot(self.zone_at(event.position().toPoint()))
+
+    def dragMoveEvent(self, event):
+        if dropped_paths(event):
+            key = self.zone_at(event.position().toPoint())
+            self._set_hot(key)
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._set_hot(None)
+        self.hide()
+
+    def dropEvent(self, event):
+        paths = dropped_paths(event)
+        key = self.zone_at(event.position().toPoint())
+        self._set_hot(None)
+        self.hide()
+        if paths and key:
+            event.acceptProposedAction()
+            self.dropped.emit(key, paths[0])
+
+
+class ScrollEndButtons(QFrame):
+    """捲動區右下角浮著的「到最前面／到最後面」兩顆小按鈕：內容長到需要捲動時才出現，
+    不佔卡片標題列的位置。按下去做什麼由呼叫端決定（top／bottom 訊號）。"""
+
+    top_clicked = Signal()
+    bottom_clicked = Signal()
+
+    MARGIN = 10
+
+    def __init__(self, area: QAbstractScrollArea):
+        # 掛在捲動區本身、不是 viewport 上：清單捲動時 viewport 會把自己的子元件一起捲走
+        super().__init__(area)
+        self.setObjectName("scrollEnds")
+        self._area = area
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(3, 4, 3, 4)
+        layout.setSpacing(2)
+        self.top_button = IconButton("chevron-up", "到最前面", size=16)
+        self.bottom_button = IconButton("chevron-down", "到最後面", size=16)
+        self.top_button.clicked.connect(self.top_clicked.emit)
+        self.bottom_button.clicked.connect(self.bottom_clicked.emit)
+        layout.addWidget(self.top_button)
+        layout.addWidget(self.bottom_button)
+        area.viewport().installEventFilter(self)
+        area.verticalScrollBar().rangeChanged.connect(lambda *_args: self._update())
+        self._update()
+
+    def buttons(self) -> tuple:
+        return self.top_button, self.bottom_button
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize:
+            self._update()
+        return False
+
+    def _update(self):
+        self.setVisible(self._area.verticalScrollBar().maximum() > 0)
+        self.adjustSize()
+        viewport = self._area.viewport().geometry()
+        self.move(viewport.right() + 1 - self.width() - self.MARGIN,
+                  viewport.bottom() + 1 - self.height() - self.MARGIN)
+        self.raise_()

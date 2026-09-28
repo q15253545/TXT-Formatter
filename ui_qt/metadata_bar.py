@@ -6,7 +6,7 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QApplication, QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QSizePolicy,
     QVBoxLayout, QWidget,
 )
 
@@ -20,6 +20,7 @@ ENCODING_CODECS = {"UTF-8": "utf-8", "UTF-16": "utf-16", "Big5": "big5", "GB1803
 
 
 class MetadataBar(QWidget):
+    details_height_changed = Signal()      # 書籍資料展開、收起、換成兩行：主視窗重算最矮的高度
     structure_changed = Signal(str)
     encoding_changed = Signal(str)
 
@@ -81,9 +82,13 @@ class MetadataBar(QWidget):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(10)
         details_layout.addLayout(grid)
+        # 視窗矮的時候由下面的卡片讓出高度，欄位不能被壓扁
+        self.details.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.details.hide()
         root.addWidget(self.details)
 
+        self._grid = grid
+        self._boxes = []            # 七個欄位（標籤＋輸入框），照順序
         self.title_input = QLineEdit()
         self._add_field(grid, 0, 0, "書名", self.title_input)
         self.author_input = QLineEdit()
@@ -116,15 +121,13 @@ class MetadataBar(QWidget):
             lambda _index: self.encoding_changed.emit(i18n.combo_value(self.encoding_combo)))
         self._add_field(grid, 0, 8, "讀取編碼", self.encoding_combo)
         # 三組用直線隔開：書的基本資料｜從目錄帶出來、寫進檔名的｜怎麼讀這個檔
+        self._dividers = []
         for column in (2, 6):
             divider = VDivider()
             divider.setMinimumHeight(0)
             divider.setMaximumHeight(16777215)
             grid.addWidget(divider, 0, column)
-        # 全部排成一行：書名最長、作者其次，其他欄位平分剩下的空間。視窗窄時每一欄至少
-        # 放得下常見的內容（下拉框照選項、輸入框照幾個字），不會被壓到看不到字。
-        for column, stretch in enumerate((4, 3, 0, 2, 2, 2, 0, 2, 2)):
-            grid.setColumnStretch(column, stretch)
+            self._dividers.append(divider)
         char = self.fontMetrics().horizontalAdvance("字")
         for field, chars in ((self.title_input, 4), (self.author_input, 3), (self.last_vol_label, 3),
                              (self.last_ch_label, 4)):
@@ -133,10 +136,45 @@ class MetadataBar(QWidget):
         for combo in (self.status_combo, self.structure_combo, self.encoding_combo):
             longest = max(metrics.horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
             combo.setMinimumWidth(longest + 80)       # 左右內距＋下拉箭頭（theme.py 的 QComboBox）
+        self._two_rows = None
+        self._arrange(False)
+        self._one_row_width = grid.minimumSize().width() + 40     # details 左右各 20 的邊距
+
+    # 全部排成一行：書名最長、作者其次，其他欄位平分剩下的空間。每一欄至少放得下常見的內容
+    # （下拉框照選項、輸入框照幾個字），不會被壓到看不到字。視窗窄到一行放不下時改成兩行
+    # （書名、作者、最新卷、最新章／狀態、結構、讀取編碼），不然欄位會疊在一起。
+    _ONE_ROW = ((0, 0, 1), (0, 1, 1), (0, 3, 1), (0, 4, 1), (0, 5, 1), (0, 7, 1), (0, 8, 1))
+    _ONE_ROW_STRETCH = (4, 3, 0, 2, 2, 2, 0, 2, 2)
+    _TWO_ROWS = ((0, 0, 1), (0, 1, 1), (0, 2, 1), (0, 3, 1), (1, 0, 1), (1, 1, 1), (1, 2, 2))
+    _TWO_ROWS_STRETCH = (1, 1, 1, 1, 0, 0, 0, 0, 0)
+
+    def _arrange(self, two_rows: bool):
+        if two_rows == self._two_rows:
+            return
+        first = self._two_rows is None
+        self._two_rows = two_rows
+        grid = self._grid
+        for box in self._boxes:
+            grid.removeItem(box)
+        for divider in self._dividers:
+            grid.removeWidget(divider)
+            divider.setVisible(not two_rows)
+        for box, (row, column, span) in zip(self._boxes, self._TWO_ROWS if two_rows else self._ONE_ROW):
+            grid.addLayout(box, row, column, 1, span)
+        if not two_rows:
+            for divider, column in zip(self._dividers, (2, 6)):
+                grid.addWidget(divider, 0, column)
+        for column, stretch in enumerate(self._TWO_ROWS_STRETCH if two_rows else self._ONE_ROW_STRETCH):
+            grid.setColumnStretch(column, stretch)
+        if not first:
+            self.details_height_changed.emit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._arrange(self.width() < self._one_row_width)
 
 
-    @staticmethod
-    def _add_field(grid: QGridLayout, row: int, col: int, label_text: str, widget):
+    def _add_field(self, grid: QGridLayout, row: int, col: int, label_text: str, widget):
         box = QVBoxLayout()
         box.setSpacing(4)
         label = QLabel(label_text)
@@ -144,9 +182,11 @@ class MetadataBar(QWidget):
         box.addWidget(label)
         box.addWidget(widget)
         grid.addLayout(box, row, col)
+        self._boxes.append(box)
 
     def _on_toggled(self, checked: bool):
         self.details.setVisible(checked)
+        self.details_height_changed.emit()
         self.toggle_button.set_icon_name("chevron-up" if checked else "chevron-down")
 
     # ------------------------------------------------------------------

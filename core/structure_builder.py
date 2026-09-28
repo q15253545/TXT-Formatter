@@ -22,8 +22,7 @@ from .simple_tree import SimpleTree
 from .format_options import FormatOptions
 from .title_markers import strip_persistent_title_marker, END_MARK_REGEX, parse_end_mark
 from .text_format import (
-    PUNCT_TRANS, HALF_PUNCT_TRANS, FULLWIDTH_DIGIT_TRANS, HALFWIDTH_DIGIT_TRANS,
-    normalize_dialogue_quotes,
+    PUNCT_TRANS, HALF_PUNCT_TRANS, FULLWIDTH_DIGIT_TRANS, HALFWIDTH_DIGIT_TRANS, QUOTE_KEEP, convert_quotes,
 )
 from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 from .chapter_parse import (
@@ -79,28 +78,21 @@ def format_custom_title(options: FormatOptions, extra_prefix: str, prefix_tag: s
     else: return f"{tag} {body}"
 
 
-def format_punctuation_and_dialogue(options: FormatOptions, text: str, dialogue_depth: int,
-                                     carry_depth: bool = True):
-    """回傳 (格式化後文字, 新的對話引號巢狀深度)。"""
+def format_punctuation_and_dialogue(options: FormatOptions, text: str) -> str:
+    """標點、對話引號、數字的全形半形（一行一行，不帶狀態到下一行）。"""
     text, marker = strip_persistent_title_marker(text)
     if options.normalize_punct:
         text = text.translate(PUNCT_TRANS)
     elif options.halfwidth_punct:
         text = text.translate(HALF_PUNCT_TRANS)
-    if options.format_dialogue:
-        # 對話常跨行，把上一行結束時的巢狀深度帶進來，避免第二行的內層
-        # 引號被誤判成外層。標題與中繼資料是獨立的行，不參與這個狀態。
-        if carry_depth:
-            text, dialogue_depth = normalize_dialogue_quotes(
-                text, dialogue_depth, return_depth=True)
-        else:
-            text = normalize_dialogue_quotes(text)
+    if options.quote_style != QUOTE_KEEP:
+        text = convert_quotes(text, options.quote_style)
     if options.fullwidth_digits:
         text = text.translate(FULLWIDTH_DIGIT_TRANS)
     elif options.halfwidth_digits:
         text = text.translate(HALFWIDTH_DIGIT_TRANS)
     return text + ({"include": "[::]", "exclude": "[::X]",
-                    "auto_work": "[::W]", "auto_title": "[::T]"}.get(marker, "")), dialogue_depth
+                    "auto_work": "[::W]", "auto_title": "[::T]"}.get(marker, ""))
 
 
 def find_merge_subtitle(raw_lines, start_index, total, invalid_tail_regex):
@@ -179,7 +171,6 @@ class BuildContext:
     chapter_raw_map: dict = field(default_factory=dict)
     chapter_index_map: dict = field(default_factory=dict)
     chapter_records: dict = field(default_factory=dict)
-    dialogue_depth: int = 0
 
     def match_custom_title(self, text):
         return match_user_chapter_rule(text, self.user_chapter_rules, self.invalid_tail_regex)
@@ -189,10 +180,8 @@ class BuildContext:
         return format_custom_title(self.options, extra_prefix, prefix_tag, num_val, unit_tag,
                                     body_title, apply_format, number_text)
 
-    def format_punctuation_and_dialogue(self, text, carry_depth=True):
-        result, self.dialogue_depth = format_punctuation_and_dialogue(
-            self.options, text, self.dialogue_depth, carry_depth)
-        return result
+    def format_punctuation_and_dialogue(self, text):
+        return format_punctuation_and_dialogue(self.options, text)
 
     def find_merge_subtitle(self, start_index, total):
         title, row = find_merge_subtitle(self.raw_lines, start_index, total, self.invalid_tail_regex)
@@ -439,9 +428,6 @@ def _resolve_record_numbers(ctx: BuildContext):
 def record_title(ctx: BuildContext, state: RenderState, item_id, title_text, processed_render_lines,
                   apply_format, raw_idx, manual_marked=False, auto_marker=""):
     options = state.opts
-    # 未閉合的引號不該跨章節延續——若某章漏了一個閉引號，之後所有章節的
-    # 內外層都會反過來。在章節邊界歸零，把影響侷限在單一章節內。
-    ctx.dialogue_depth = 0
     ctx.chapter_raw_map[item_id] = raw_idx
     original_marker = strip_persistent_title_marker(ctx.raw_lines[raw_idx].strip())[1]
     if not auto_marker and original_marker in {"auto_work", "auto_title"}:
@@ -451,7 +437,7 @@ def record_title(ctx: BuildContext, state: RenderState, item_id, title_text, pro
         if options.keep_separator:
             source_title = strip_persistent_title_marker(ctx.raw_lines[raw_idx].strip())[0]
             title_text = preserve_title_separator(title_text, source_title)
-        title_text = ctx.format_punctuation_and_dialogue(title_text, carry_depth=False)
+        title_text = ctx.format_punctuation_and_dialogue(title_text)
         ctx.tree.item(item_id, text=title_text)
         manage_spacing = (
             options.remove_extra_empty
@@ -1200,7 +1186,6 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
     if apply_format and ctx.options.reflow_paragraphs:
         return _build_with_reflow(ctx, write_text)
     state = RenderState()
-    ctx.dialogue_depth = 0
     ctx.tree = SimpleTree()
     ctx.chapter_index_map = {}
     ctx.chapter_raw_map = {}
@@ -1372,8 +1357,8 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
             state.processed_render_lines.append(ctx.raw_lines[state.idx])
         state.idx += 1
     if apply_format:
-        state.last_found_vol = ctx.format_punctuation_and_dialogue(state.last_found_vol, carry_depth=False)
-        state.last_found_ch = ctx.format_punctuation_and_dialogue(state.last_found_ch, carry_depth=False)
+        state.last_found_vol = ctx.format_punctuation_and_dialogue(state.last_found_vol)
+        state.last_found_ch = ctx.format_punctuation_and_dialogue(state.last_found_ch)
     build_chapter_records(ctx, state.collection_info)
     virtual_volumes = infer_virtual_volumes(ctx, state)
     if not (write_text and apply_format):

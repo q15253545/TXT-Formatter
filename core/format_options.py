@@ -21,7 +21,8 @@ class FormatOptions:
     reflow_paragraphs: bool = False
     normalize_punct: bool = False
     halfwidth_punct: bool = False
-    format_dialogue: bool = False
+    # 對話引號：保留原樣／「」『』／“”‘’（core/text_format.QUOTE_STYLES）
+    quote_style: str = "保留原樣"
     fullwidth_digits: bool = False
     halfwidth_digits: bool = False
     num_style: str = "保留原文"
