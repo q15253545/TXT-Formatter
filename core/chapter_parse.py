@@ -7,9 +7,11 @@ from functools import lru_cache
 from . import title_blocks
 from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 
-CN_NUM_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零]+"
+# 大寫數字（第壹章、第拾貳章）也算：cn_numerals 轉得了，辨識章節的積木也有「壹貳參」
+CN_UPPER_DIGITS = "壹貳贰參叁肆伍陸陆柒捌玖拾佰仟"
+CN_NUM_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零" + CN_UPPER_DIGITS + r"]+"
 CN_NUM_FLOAT_PATTERN = CN_NUM_PATTERN + r"(?:[\.．]\d+)?"
-CN_NUM_FLOAT_OPT_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零]*(?:[\.．]\d+)?"
+CN_NUM_FLOAT_OPT_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零" + CN_UPPER_DIGITS + r"]*(?:[\.．]\d+)?"
 
 SEP = r"[ \t:：]+"
 
@@ -429,19 +431,19 @@ _NOTE_TITLE_WORDS = re.compile(r"请假|請假|月票|求票|推荐票|推薦票
 
 # 單位字跟後面的字合起來是一個詞：「第二部分，是…」「第一集團軍」「第三季度」不是卷，
 # 「第三回合」「第一節課」「第二節自習課」「第一節晚自習」「第五節車廂」是正文的句子開頭，不是章節
-_UNIT_WORD = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*"
+_UNIT_WORD = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零" + CN_UPPER_DIGITS + r"]{1,8}\s*"
                         r"(?:部[分门門队隊长長落位]|集[团團中合体體]|篇幅|卷[入起子轴軸]|季[度节節末赛賽]|回合"
                         r"|[节節](?:[一-鿿]{0,2}[课課]|晚自[习習]|[车車][厢廂]))")
 
 
 # 單位後面直接接只會出現在句子中間的詞、後面還有逗號：「第三章會晚一點，先去山路」「第一章就寫好了，…」
-_SENTENCE_AFTER_UNIT = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*[章回節节]"
+_SENTENCE_AFTER_UNIT = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零" + CN_UPPER_DIGITS + r"]{1,8}\s*[章回節节]"
                                   r"(?:會|会|就|的時候|的时候|已經|已经)[^，,]{0,15}[，,]")
 
 
 # 季 is also a surname: 「第一季點頭，道：…」 is a character named 第一季. A season heading is written
 # 「第一季」「第一季 山路」「第一季：山路」, never with the text glued to the unit
-_GLUED_SEASON = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*季"
+_GLUED_SEASON = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零" + CN_UPPER_DIGITS + r"]{1,8}\s*季"
                            r"(?![完終终結结])[一-鿿A-Za-z]")
 
 
