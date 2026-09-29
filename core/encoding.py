@@ -69,6 +69,37 @@ def detect_line_ending(file_path: str) -> str:
     return "CRLF" if b"\r\n" in sample else "LF"
 
 
+NUL_SCAN_BYTES = 4096
+NUL_MIN_RATIO = 0.005         # 一般文字（UTF-8、Big5、GB18030）不會有 NUL；零星一兩個不算
+ENDIAN_DOMINANCE = 8          # NUL 幾乎都落在同一種奇偶位才判得出位元組順序
+
+
+def _utf16_without_bom(raw: bytes):
+    """沒有 BOM 的 UTF-16（PowerShell、部分 Windows 程式存出來的）：英數字、換行的另一個位元組是 0，
+    而且集中在奇數位（LE）或偶數位（BE）。中文本身幾乎不含 0，所以看比例不看密度，
+    再試解一次確認不是亂碼。判不出來回傳 None，交給下面的計分。"""
+    head = raw[:NUL_SCAN_BYTES]
+    even = head[0::2].count(0)
+    odd = head[1::2].count(0)
+    if even + odd < max(4, len(head) * NUL_MIN_RATIO):
+        return None
+    candidate = ("utf-16-le" if odd > even * ENDIAN_DOMINANCE else
+                 "utf-16-be" if even > odd * ENDIAN_DOMINANCE else None)
+    if candidate is None:
+        return None
+    sample = raw[:len(raw) - len(raw) % 2][:128 * 1024]
+    decoded = sample.decode(candidate, errors="replace")
+    return candidate if decoded and not looks_misdecoded(decoded) else None
+
+
+def looks_misdecoded(text: str, sample_chars: int = 200_000) -> bool:
+    """解出來的文字有一大片替換字元、私用區字元或 C1 控制碼：編碼多半不對。"""
+    sample = text[:sample_chars]
+    if not sample:
+        return False
+    return len(DECODE_NOISE_REGEX.findall(sample)) / len(sample) > 0.01
+
+
 def smart_detect_encoding(file_path: str) -> str:
     """全部試解後計分取最佳。
 
@@ -87,6 +118,9 @@ def smart_detect_encoding(file_path: str) -> str:
         return "utf-8-sig"
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return "utf-16"
+    utf16 = _utf16_without_bom(raw)
+    if utf16:
+        return utf16
 
     best, best_score = "utf-8", float("-inf")
     for encoding in ("utf-8", "big5", "gb18030"):

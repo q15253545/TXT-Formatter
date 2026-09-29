@@ -47,7 +47,7 @@ from core.docx_reader import DocxError, is_docx, read_docx_text
 from core.epub_reader import EpubError, is_epub, read_epub
 from core.epub_writer import EpubSection, build_epub
 from core.chapter_update import dominant_script
-from core.encoding import detect_line_ending, smart_detect_encoding, strip_invisible_chars
+from core.encoding import detect_line_ending, looks_misdecoded, smart_detect_encoding, strip_invisible_chars
 from core.file_io import read_text, read_text_lossy, write_text_atomic
 from core.filename_meta import (
     DEFAULT_COMPLETED_TEMPLATE, DEFAULT_ONGOING_TEMPLATE, build_smart_filename, extract_filename_metadata,
@@ -977,6 +977,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             status += i18n.T(f"；已移除 {removed_boms} 個夾在行首的 BOM 字元（多檔串接留下的，會讓章節辨識失敗）")
         if removed_zero_width:
             status += i18n.T(f"；已移除 {removed_zero_width} 個零寬字元（網頁複製留下的，會讓章節辨識失敗）")
+        if not packaged and looks_misdecoded(content):
+            status += i18n.T("；文字看起來像亂碼：編碼可能不對，在書籍資料的「讀取編碼」換一種")
         self._show_status(status, translated=True)
         log.info("載入 %s：%.2f MB、編碼 %s、%d 行、目錄 %d 項（推定卷 %d）、移除 BOM %d 個、零寬字元 %d 個",
                  os.path.basename(path), size_mb, encoding, len(self.raw_lines), len(self.chapter_raw_map),
