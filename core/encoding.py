@@ -19,6 +19,42 @@ def strip_stray_bom(text: str) -> tuple[str, int]:
     return (text.replace("\ufeff", ""), count) if count else (text, 0)
 
 
+# 從網頁複製的文字常夾著看不見的零寬空白（U+200B）、字詞連接符（U+2060）：跟 BOM 一樣，
+# strip() 不會去掉，行首有它時章節標題就認不出來。U+200C、U+200D 在表情符號組合裡有用，
+# 只拿掉夾在中文、全形字、行首行尾的。
+_ZERO_WIDTH = re.compile("[\u200b\u2060]")
+_JOINER_RUN = re.compile("[\u200c\u200d]+")
+_CJK_EDGE = re.compile("[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef\n]")
+
+
+def _strip_joiners(text: str) -> tuple[str, int]:
+    """只看找到的那幾處（整份逐字比對很慢）：前後有一邊是中文、全形字、換行或頭尾才拿掉。"""
+    parts, cursor, removed = [], 0, 0
+    for match in _JOINER_RUN.finditer(text):
+        start, end = match.span()
+        before = text[start - 1] if start else "\n"
+        after = text[end] if end < len(text) else "\n"
+        if _CJK_EDGE.match(before) or _CJK_EDGE.match(after):
+            parts.append(text[cursor:start])
+            cursor = end
+            removed += end - start
+    if not removed:
+        return text, 0
+    parts.append(text[cursor:])
+    return "".join(parts), removed
+
+
+def strip_invisible_chars(text: str) -> tuple[str, int, int]:
+    """移除 BOM（strip_stray_bom）與零寬字元，回傳（清理後文字, BOM 個數, 零寬字元個數）。"""
+    text, boms = strip_stray_bom(text)
+    zero_width = joiners = 0
+    if "\u200b" in text or "\u2060" in text:
+        text, zero_width = _ZERO_WIDTH.subn("", text)
+    if "\u200c" in text or "\u200d" in text:
+        text, joiners = _strip_joiners(text)
+    return text, boms, zero_width + joiners
+
+
 def detect_line_ending(file_path: str) -> str:
     """回傳 "CRLF" 或 "LF"。
 

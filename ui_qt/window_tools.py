@@ -23,7 +23,7 @@ from core.chapter_update import (
 )
 from core.docx_reader import is_docx
 from core.epub_reader import is_epub
-from core.encoding import smart_detect_encoding, strip_stray_bom
+from core.encoding import smart_detect_encoding, strip_invisible_chars
 from core.quote_check import QUOTE_PROBLEM_LABELS
 from core.script_convert import convert_body_text, opencc_available
 from core.word_count import chapter_word_counts
@@ -724,7 +724,7 @@ class ToolWindowsMixin:
             path, None if is_docx(path) or is_epub(path) else smart_detect_encoding(path))
         if content is None:
             return None
-        content, _removed = strip_stray_bom(content)
+        content, _boms, _zero_width = strip_invisible_chars(content)
         new_lines = content.split("\n")
         self._sync_raw_lines()
         self._ensure_toc_current()
