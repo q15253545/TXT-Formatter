@@ -9,6 +9,7 @@ from .title_blocks import TEMPLATES
 from .user_rules import PRESET_RULES, preset_match
 from .chapter_parse import (
     CN_NUM_PATTERN,
+    chapter_range_end,
     MAX_TITLE_LENGTH,
     is_noise_prefix,
     parse_lv1,
@@ -320,7 +321,7 @@ def missed_tail_chapters(lines, chapters, last_row, max_length=MAX_TITLE_LENGTH)
 
 
 def scan_chapter_candidates(lines, known_rows=frozenset(), max_length=MAX_TITLE_LENGTH):
-    """「本文可疑章節」：看起來像章節、但目前不在目錄裡的行。
+    """「可疑章節」：看起來像章節、但目前不在目錄裡的行。
     max_length 照「標題長度」的設定：常用格式本身不限章名長度，不擋的話正文裡一整句的條列
     （「4、依照規定應當…」）也會被列成高信心的可疑章節。
 
@@ -595,28 +596,117 @@ def _restart_segments(numbers) -> list:
     return [segment for segment in segments if segment]
 
 
+def _increasing_run(numbers, indices) -> set:
+    """indices 這幾個位置的章號裡，最長的嚴格遞增子序列（回傳位置）。"""
+    tails, tail_positions, parent = [], [], {}
+    for position in indices:
+        value = numbers[position]
+        slot = bisect.bisect_left(tails, value)
+        if slot == len(tails):
+            tails.append(value)
+            tail_positions.append(position)
+        else:
+            tails[slot] = value
+            tail_positions[slot] = position
+        parent[position] = tail_positions[slot - 1] if slot else None
+    run, position = set(), tail_positions[-1] if tail_positions else None
+    while position is not None:
+        run.add(position)
+        position = parent[position]
+    return run
+
+
+def misplaced_chapters(numbers) -> dict:
+    """照本文順序的章號裡，放錯位置的章：{索引: ("after"|"before", 應該放在哪一章的索引)}。
+
+    每一段（_restart_segments：卷裡重新數起的算另一段）取最長的遞增章號當成「位置對的章」，
+    其餘的章號剛好補得上那串的缺口（在中間缺的號碼、或比最小的少 1、比最大的多 1）才算放錯位置；
+    補不上缺口的是打錯、重複或不是章節，交給 number_anomalies 與重複檢查。
+    遞增的章不到一半時不判斷（亂得太厲害，多半是別的問題）。"""
+    found = {}
+    position = 0
+    for segment in _restart_segments(list(numbers)):
+        indices = list(range(position, position + len(segment)))
+        position += len(segment)
+        run = _increasing_run(numbers, indices)
+        if len(run) * 2 < len(indices) or len(run) == len(indices):
+            continue
+        ordered = sorted(run)
+        values = [numbers[index] for index in ordered]
+        present = set(values)
+        for index in indices:
+            value = numbers[index]
+            if index in run or value in present:
+                continue
+            if values[0] < value < values[-1] or value in (values[0] - 1, values[-1] + 1):
+                if value > 0 and float(value).is_integer():
+                    slot = bisect.bisect_left(values, value)
+                    found[index] = ("after", ordered[slot - 1]) if slot else ("before", ordered[0])
+    return found
+
+
+def move_chapter_blocks(lines, moves) -> list:
+    """moves：[(開始行, 結束行（不含）, 放到哪一行前面)]，行號都是搬之前的。
+
+    同一個位置有好幾章要放時照 moves 的順序放。搬走的那段原本沒有以空行結尾、
+    放進去的位置後面還有內容時補一個空行，免得跟下一章的標題黏在一起。"""
+    moving = {}
+    skip = set()
+    for start, end, destination in moves:
+        block = list(lines[start:end])
+        if destination < len(lines) and block and block[-1].strip():
+            block.append("")
+        moving.setdefault(destination, []).append(block)
+        skip.update(range(start, end))
+    result = []
+    for row in range(len(lines) + 1):
+        for block in moving.get(row, ()):
+            result.extend(block)
+        if row < len(lines) and row not in skip:
+            result.append(lines[row])
+    return result
+
+
 _MERGED_NUMBER = re.compile(r"第\s*[0-9０-９]+\s*[、，,]\s*([0-9]{1,4})\s*[章回節节]")
 
 
 def chapter_gap_report(numbers, label, mode="僅檢查中間缺口", previous_last=None, titles=None):
-    """numbers、titles 照本文順序。打錯、不像章節的號碼（number_anomalies）先照前後章修正或拿掉，
-    另外放在 anomalies：[(索引, 原本的號碼, "typo"|"stray", 應該是幾)]。"""
-    anomalies = number_anomalies(list(numbers))
-    kept = [(index, guess if kind == "typo" else numbers[index])
-            for index in range(len(numbers))
+    """numbers、titles 照本文順序。放錯位置的章（misplaced_chapters）先搬到該在的位置再檢查，
+    另外放在 misplaced：[(索引, 章號, "after"|"before", 應該放在哪一章的索引)]。
+    打錯、不像章節的號碼（number_anomalies）照前後章修正或拿掉，
+    另外放在 anomalies：[(索引, 原本的號碼, "typo"|"stray", 應該是幾)]；索引都是傳進來的 numbers 的索引。"""
+    original = list(numbers)
+    misplaced = misplaced_chapters(original)
+    order = [index for index in range(len(original)) if index not in misplaced]
+    # 放錯位置的章插回該在的位置（在那一章後面／前面），再照這個順序做其他檢查
+    for index, (where, target) in sorted(misplaced.items()):
+        slot = order.index(target) + (1 if where == "after" else 0)
+        while where == "after" and slot < len(order) and order[slot] in misplaced \
+                and original[order[slot]] < original[index]:
+            slot += 1
+        order.insert(slot, index)
+    reordered = [original[index] for index in order]
+    local = number_anomalies(reordered)
+    anomalies = {order[position]: value for position, value in local.items()}
+    kept = [(index, guess if kind == "typo" else original[index])
+            for index in order
             for kind, guess in [anomalies.get(index, ("", None))] if kind != "stray"]
-    anomaly_list = [(index, numbers[index], kind, guess) for index, (kind, guess) in sorted(anomalies.items())]
+    anomaly_list = [(index, original[index], kind, guess) for index, (kind, guess) in sorted(anomalies.items())]
+    misplaced_list = [(index, original[index], where, target) for index, (where, target) in sorted(misplaced.items())]
     if titles:
         titles = [titles[index] for index, _number in kept]
-    numbers = [number for _index, number in kept] or list(numbers)
+    numbers = [number for _index, number in kept] or original
     ordered = sorted(set(numbers))
     ranges, duplicates, position = [], set(), 0
     for segment_index, segment in enumerate(_restart_segments(numbers)):
         segment_titles = titles[position:position + len(segment)] if titles else None
         position += len(segment)
         covered = set(segment)
-        # 「第62、3章」一章裡有兩個章號：後面那章也算有
+        # 「第62、3章」一章裡有兩個章號：後面那章也算有；「第38-40章」整段都算有
         for number, title in zip(segment, segment_titles or ()):
+            range_end = chapter_range_end(title)
+            if range_end:
+                covered.update(range(int(number) + 1, range_end + 1))
             also = _MERGED_NUMBER.search(title or "")
             if also:
                 tail = also.group(1)
@@ -640,4 +730,5 @@ def chapter_gap_report(numbers, label, mode="僅檢查中間缺口", previous_la
                               [title for number, title in zip(segment, segment_titles) if number == n])))
     return {"label": label, "missing_ranges": ranges, "duplicates": sorted(duplicates),
             "first": ordered[0], "last": ordered[-1], "count": len(ordered),
-            "start_unverified": mode == "僅檢查中間缺口" and ordered[0] > 1, "anomalies": anomaly_list}
+            "start_unverified": mode == "僅檢查中間缺口" and ordered[0] > 1, "anomalies": anomaly_list,
+            "misplaced": misplaced_list}

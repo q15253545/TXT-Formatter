@@ -63,6 +63,11 @@ class MetadataBar(QWidget):
         # 說明（章節標記、本文字色、自動補齊卷、設定檔位置）
         self.help_button = IconButton("circle-help", "說明", size=16)
         summary_layout.addWidget(self.help_button)
+        # 關閉目前的檔案、回到剛啟動的樣子：講的是「這個檔案」，放在檔名旁邊，不跟上一步、下一步擠在工具列
+        self.close_file_button = IconTextButton("x", "關閉檔案", size=14)
+        self.close_file_button.setObjectName("barToggle")
+        self.close_file_button.hide()
+        summary_layout.addWidget(self.close_file_button)
         summary_layout.addStretch(1)
 
         self.toggle_button = IconTextButton("chevron-down", "書籍資料", checkable=True)

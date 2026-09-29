@@ -19,6 +19,42 @@ def strip_stray_bom(text: str) -> tuple[str, int]:
     return (text.replace("\ufeff", ""), count) if count else (text, 0)
 
 
+# 從網頁複製的文字常夾著看不見的零寬空白（U+200B）、字詞連接符（U+2060）：跟 BOM 一樣，
+# strip() 不會去掉，行首有它時章節標題就認不出來。U+200C、U+200D 在表情符號組合裡有用，
+# 只拿掉夾在中文、全形字、行首行尾的。
+_ZERO_WIDTH = re.compile("[\u200b\u2060]")
+_JOINER_RUN = re.compile("[\u200c\u200d]+")
+_CJK_EDGE = re.compile("[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef\n]")
+
+
+def _strip_joiners(text: str) -> tuple[str, int]:
+    """只看找到的那幾處（整份逐字比對很慢）：前後有一邊是中文、全形字、換行或頭尾才拿掉。"""
+    parts, cursor, removed = [], 0, 0
+    for match in _JOINER_RUN.finditer(text):
+        start, end = match.span()
+        before = text[start - 1] if start else "\n"
+        after = text[end] if end < len(text) else "\n"
+        if _CJK_EDGE.match(before) or _CJK_EDGE.match(after):
+            parts.append(text[cursor:start])
+            cursor = end
+            removed += end - start
+    if not removed:
+        return text, 0
+    parts.append(text[cursor:])
+    return "".join(parts), removed
+
+
+def strip_invisible_chars(text: str) -> tuple[str, int, int]:
+    """移除 BOM（strip_stray_bom）與零寬字元，回傳（清理後文字, BOM 個數, 零寬字元個數）。"""
+    text, boms = strip_stray_bom(text)
+    zero_width = joiners = 0
+    if "\u200b" in text or "\u2060" in text:
+        text, zero_width = _ZERO_WIDTH.subn("", text)
+    if "\u200c" in text or "\u200d" in text:
+        text, joiners = _strip_joiners(text)
+    return text, boms, zero_width + joiners
+
+
 def detect_line_ending(file_path: str) -> str:
     """回傳 "CRLF" 或 "LF"。
 
@@ -31,6 +67,37 @@ def detect_line_ending(file_path: str) -> str:
     except OSError:
         return "LF"
     return "CRLF" if b"\r\n" in sample else "LF"
+
+
+NUL_SCAN_BYTES = 4096
+NUL_MIN_RATIO = 0.005         # 一般文字（UTF-8、Big5、GB18030）不會有 NUL；零星一兩個不算
+ENDIAN_DOMINANCE = 8          # NUL 幾乎都落在同一種奇偶位才判得出位元組順序
+
+
+def _utf16_without_bom(raw: bytes):
+    """沒有 BOM 的 UTF-16（PowerShell、部分 Windows 程式存出來的）：英數字、換行的另一個位元組是 0，
+    而且集中在奇數位（LE）或偶數位（BE）。中文本身幾乎不含 0，所以看比例不看密度，
+    再試解一次確認不是亂碼。判不出來回傳 None，交給下面的計分。"""
+    head = raw[:NUL_SCAN_BYTES]
+    even = head[0::2].count(0)
+    odd = head[1::2].count(0)
+    if even + odd < max(4, len(head) * NUL_MIN_RATIO):
+        return None
+    candidate = ("utf-16-le" if odd > even * ENDIAN_DOMINANCE else
+                 "utf-16-be" if even > odd * ENDIAN_DOMINANCE else None)
+    if candidate is None:
+        return None
+    sample = raw[:len(raw) - len(raw) % 2][:128 * 1024]
+    decoded = sample.decode(candidate, errors="replace")
+    return candidate if decoded and not looks_misdecoded(decoded) else None
+
+
+def looks_misdecoded(text: str, sample_chars: int = 200_000) -> bool:
+    """解出來的文字有一大片替換字元、私用區字元或 C1 控制碼：編碼多半不對。"""
+    sample = text[:sample_chars]
+    if not sample:
+        return False
+    return len(DECODE_NOISE_REGEX.findall(sample)) / len(sample) > 0.01
 
 
 def smart_detect_encoding(file_path: str) -> str:
@@ -51,6 +118,9 @@ def smart_detect_encoding(file_path: str) -> str:
         return "utf-8-sig"
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return "utf-16"
+    utf16 = _utf16_without_bom(raw)
+    if utf16:
+        return utf16
 
     best, best_score = "utf-8", float("-inf")
     for encoding in ("utf-8", "big5", "gb18030"):

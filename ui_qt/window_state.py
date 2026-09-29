@@ -102,7 +102,7 @@ class WindowStateMixin:
     def _update_toolbar_compact(self):
         """視窗太窄時，工具列上有文字的按鈕改成只顯示圖示。
 
-        整排按鈕不會換行也不會縮，有文字時最小寬度約 1250；只顯示圖示時約 780，
+        整排按鈕不會換行也不會縮，有文字時最小寬度約 820；只顯示圖示時約 490，
         縮放比較大的小螢幕（800 寬）也放得下。"""
         width = self.width()
         compact = self._toolbar_compact
@@ -119,10 +119,8 @@ class WindowStateMixin:
         margin = 8 if compact else 20
         layout.setContentsMargins(margin, 0, margin, 0)
         # 只剩圖示時用滑鼠提示補上原本的文字（有文字時不放，文字已經說了）
-        shortcuts = {self.open_button: "Ctrl+O", self.find_toggle_button: "Ctrl+F", self.save_button: "Ctrl+S"}
-        for button in (self.open_button, self.one_click_button, self.format_toggle_button,
-                       self.chapter_toggle_button, self.content_toggle_button, self.find_toggle_button,
-                       self.save_button):
+        shortcuts = {self.open_button: "Ctrl+O", self.save_button: "Ctrl+S"}
+        for button in (self.open_button, self.one_click_button, self.save_button):
             button.set_compact(compact)
             shortcut = shortcuts.get(button)
             button.setToolTip(button.text() + (f"（{shortcut}）" if shortcut else "") if compact else "")
@@ -147,9 +145,8 @@ class WindowStateMixin:
 
     def _toolbar_icon_buttons(self) -> tuple:
         """工具列上只顯示圖示時是單一圖示的按鈕（不含兩個箭頭、繁簡切換）。"""
-        return (self.open_button, self.one_click_button, self.format_toggle_button, self.chapter_toggle_button,
-                self.content_toggle_button, self.find_toggle_button, self.save_button, self.undo_button,
-                self.redo_button, self.clear_button, self.theme_button)
+        return (self.open_button, self.one_click_button, self.save_button, self.undo_button,
+                self.redo_button, self.theme_button)
 
     def _collect_ui_state(self) -> dict:
         """關閉前的介面狀態。只記「怎麼用這個程式」的偏好，不記跟某個檔案
@@ -165,6 +162,8 @@ class WindowStateMixin:
             "show_title_markers": self.marker_button.isChecked(),
             "strip_markers_on_export": self._strip_markers_on_export,
             "ask_old_files_on_export": self._ask_old_files_on_export,
+            "export_format": self.export_format,
+            "export_split": self.export_split,
             "show_whitespace": self.content_panel.show_whitespace_toggle.isChecked(),
             "metadata_expanded": self.metadata_bar.toggle_button.isChecked(),
             "side_panel": side_panel if self.raw_lines and any(self.raw_lines) else
@@ -172,13 +171,13 @@ class WindowStateMixin:
             "splitter": bytes(self.splitter.saveState().toHex()).decode("ascii"),
             "side_width": self.side_card.width() if self.side_card.isVisible() else self._side_width,
             "toc_compact_mode": self.toc_compact_mode,
-            "format_options": self.options_panel.options_state(),
+            "one_click_format": self.options_panel.options_state(),
             "missing_mode": self.chapter_panel.missing_mode(),
             "title_tail_allowed": self.title_tail_allowed,
             "title_tail_custom": self.title_tail_custom,
             "find_regex": self.find_bar.regex_button.isChecked(),
-            "mark_colors": sorted(self.content_panel.marking()),
-            "mark_confidence": sorted(self.content_panel.mark_confidence()),
+            "review_types": sorted(self.review_bar.review_types()),
+            "mark_confidence": sorted(self.review_bar.mark_confidence()),
             "infer_volumes": self._infer_volumes,
             "auto_apply_preview": self._auto_apply_preview,
             "merge_titles": self._merge_titles,
@@ -207,6 +206,8 @@ class WindowStateMixin:
             self._update_zoom_buttons()
         self._strip_markers_on_export = bool(state.get("strip_markers_on_export", True))
         self._ask_old_files_on_export = bool(state.get("ask_old_files_on_export", True))
+        self._set_export_format(state.get("export_format", "TXT"))
+        self.export_split = bool(state.get("export_split", False)) and self.export_format == "TXT"
         if state.get("show_title_markers"):
             self.marker_button.setChecked(True)
         if state.get("show_whitespace"):
@@ -215,8 +216,11 @@ class WindowStateMixin:
             self.metadata_bar.toggle_button.setChecked(True)
         self.toc_compact_mode = bool(state.get("toc_compact_mode"))
         self.toc_compact_button.setChecked(self.toc_compact_mode)
-        if isinstance(state.get("format_options"), dict):
-            self.options_panel.restore_options_state(state["format_options"])
+        # 排版設定卡片就是一鍵排版的設定：沒存過就用內建的常用組合
+        if isinstance(state.get("one_click_format"), dict):
+            self.options_panel.restore_options_state(state["one_click_format"])
+        else:
+            self.options_panel.set_options(self._default_one_click_options())
         mode = state.get("missing_mode")
         if isinstance(mode, str) and self.chapter_panel.missing_mode_combo.findText(mode) >= 0:
             i18n.set_combo_value(self.chapter_panel.missing_mode_combo, mode)
@@ -256,11 +260,11 @@ class WindowStateMixin:
                 setattr(self, key, state[key])
         levels = state.get("mark_confidence")
         if isinstance(levels, list):
-            self.content_panel.set_mark_confidence(set(levels))
-        marks = state.get("mark_colors")
-        if isinstance(marks, list):
-            # 有檔案之後才會真的掃描、上色
-            self.content_panel.set_marking({kind for kind in marks if kind in ("ad", "note")})
+            self.review_bar.set_mark_confidence(set(levels))
+        # 逐筆檢查要看的類型（本文字色只在逐筆檢查時顯示，開程式時不會自己開始）
+        types = state.get("review_types")
+        if isinstance(types, list):
+            self.review_bar.set_review_types(set(types))
         # 還原過程中各項會在狀態列留下訊息，最後統一改回來。
         self._show_status("準備就緒")
 

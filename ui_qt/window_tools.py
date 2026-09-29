@@ -1,5 +1,5 @@
-"""主視窗：工具視窗（字數、合併重複章節、掃描無關連內容、作者感言、標點校對、繁簡轉換、
-辨識章節、自訂章節規則、新增章節）與本文字色標示。
+"""主視窗：工具視窗（字數、重複章節、非正文內容、標點校對、繁簡轉換、
+辨識章節（含可疑章節）、新增章節）與本文字色標示。
 
 工具視窗是非模式的：開著也能改本文，切回視窗時照文字版本決定要不要重算（_open_tool_dialog）。
 MainWindow 的一部分（mixin），只用 MainWindow 的屬性與方法。"""
@@ -22,9 +22,12 @@ from core.chapter_update import (
     LONGER, MISSING, NEW, append_all, apply_update, dominant_script, plan_update, toc_entries,
 )
 from core.docx_reader import is_docx
-from core.encoding import smart_detect_encoding, strip_stray_bom
-from core.quote_check import QUOTE_PROBLEM_LABELS
-from core.script_convert import convert_body_text, opencc_available
+from core.epub_reader import is_epub
+from core.encoding import smart_detect_encoding, strip_invisible_chars
+from core.quote_check import PROBLEM_LABELS
+from core.script_convert import (
+    DEFAULT_VOCABULARY, convert_with_word_lists, opencc_available, parse_keep_words, parse_vocabulary,
+)
 from core.word_count import chapter_word_counts
 from core.structure_builder import build_document_structure
 from core.insert_suggestions import get_insert_suggestions
@@ -38,9 +41,11 @@ from .insert_title_dialog import InsertTitleDialog
 from .quote_check_dialog import QuoteCheckDialog
 from .script_convert_dialog import ScriptConvertDialog
 from .recognition_dialog import RecognitionDialog
-from .rules_dialog import RulesDialog
 from .word_count_dialog import WordCountDialog
 from .window_common import MARK_SCAN_DELAY_MS, OPEN_FILE_FILTER
+
+# 標點校對預設不勾的檢查項目（只能列出、數量常很多）
+QUOTE_DEFAULT_OFF = frozenset({"masked"})
 
 
 class ToolWindowsMixin:
@@ -195,7 +200,7 @@ class ToolWindowsMixin:
 
     @action
     def open_duplicate_chapters_dialog(self):
-        """相鄰、章號相同的章節列成清單，勾選後合併（判斷規則見 core/duplicate_chapters.py）。"""
+        """相鄰、章號相同的章節一列一章，勾選要保留的（判斷規則見 core/duplicate_chapters.py）。"""
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
@@ -221,21 +226,13 @@ class ToolWindowsMixin:
         self.editor.setExtraSelections([])
         self._replace_text_from_tool(lines)
         self._refresh_tool_dialog(dialog)
-        self._show_status(f"已合併重複章節（刪除 {removed} 行標題與空行），可以按 Ctrl+Z 復原")
+        self._show_status(f"已刪除未保留的章節（共 {removed} 行），可以按 Ctrl+Z 復原")
 
     def _saved_ad_categories(self) -> set:
-        """掃描無關連內容視窗記住的偵測類型（不含重複段落，那在自己的分頁）。
-
-        記住的是「上次勾了哪些」；之後才新增的類型上次根本還沒有，不能當成
-        使用者取消了它——那些照預設勾起來。"""
+        """非正文內容視窗「廣告與網頁字元」分頁記住的偵測類型（不含重複段落，那在自己的分頁）；沒記過就全部。"""
         own = {key for key in AD_ONLY_CATEGORIES if key != "repeat"}
         saved = self._ui_state.get("ad_categories")
-        if not isinstance(saved, list):
-            return own
-        known = self._ui_state.get("ad_categories_known")
-        if not isinstance(known, list):
-            known = list(AD_CATEGORY_LABELS)
-        return (set(saved) | (set(AD_CATEGORY_LABELS) - set(known))) & own
+        return set(saved) & own if isinstance(saved, list) else own
 
     def _saved_note_categories(self) -> set:
         saved = self._ui_state.get("note_categories")
@@ -250,36 +247,28 @@ class ToolWindowsMixin:
 
     @action
     def open_ad_scan_dialog(self):
-        self._open_scan_dialog("ads")
-
-    @action
-    def open_note_scan_dialog(self):
-        self._open_scan_dialog("notes")
-
-    def _open_scan_dialog(self, mode: str):
-        """mode＝"ads"：掃描無關連內容（含重複段落分頁）；"notes"：作者感言與作品資訊。"""
+        """非正文內容視窗：廣告與網頁字元、作者感言與作品資訊、重複段落三個分頁。"""
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
         self._ensure_toc_current()
         spans = self._selected_section_spans()
-        enabled = self._saved_ad_categories() if mode == "ads" else self._saved_note_categories()
 
         def create():
             # Caches still warming (a large file opened moments ago): show the dialog now and scan when they're done
             cold = self._caches_cold()
             dialog = AdScanDialog(self.raw_lines, self, selected_ranges=spans,
                                   selected_count=self._selected_chapter_count(),
-                                  enabled_categories=enabled,
+                                  ad_categories=self._saved_ad_categories(),
+                                  note_categories=self._saved_note_categories(),
                                   title_rows=set(self.chapter_raw_map.values()),
-                                  mode=mode, repeat_settings=self._saved_repeat_settings(), defer_scan=cold,
-                                  repeat_marking=bool(self._ui_state.get("repeat_marking")))
+                                  repeat_settings=self._saved_repeat_settings(), defer_scan=cold)
             if cold:
                 # the dialog may have been closed (and deleted) by the time the caches are warm
                 self._when_warm(lambda: dialog.start_scan() if shiboken6.isValid(dialog) else None)
             dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
             dialog.deletionReady.connect(lambda lines, d=dialog: self._apply_ad_deletion(d, lines))
-            dialog.repeatMarkingChanged.connect(self._on_repeat_marking_changed)
+            dialog.reviewRequested.connect(lambda: (self._focus_editor_from_tool(), self.start_review()))
             return dialog
 
         def reload(dialog):
@@ -287,20 +276,47 @@ class ToolWindowsMixin:
             dialog.reload(self.raw_lines, ranges, count, title_rows=set(self.chapter_raw_map.values()))
 
         def on_closed(dialog, _accepted):
-            if mode == "ads":
-                self._ui_state["ad_categories"] = sorted(dialog.enabled_categories())
-                self._ui_state["ad_categories_known"] = sorted(AD_CATEGORY_LABELS)
-                self._ui_state["repeat_settings"] = list(dialog.repeat_settings())
-            else:
-                self._ui_state["note_categories"] = sorted(dialog.enabled_categories())
-            if self.content_panel.marking():
+            self._ui_state["ad_categories"] = sorted(dialog.enabled_categories())
+            self._ui_state["note_categories"] = sorted(dialog.note_categories())
+            self._ui_state["repeat_settings"] = list(dialog.repeat_settings())
+            if self.review_bar.marking():
                 self._schedule_mark_scan(0)      # 勾選的類型可能變了，照新的重標
 
-        self._open_tool_dialog("ad_scan" if mode == "ads" else "note_scan", create, reload, on_closed)
+        self._open_tool_dialog("ad_scan", create, reload, on_closed)
+
+    @action
+    def start_review(self):
+        """開始逐筆檢查：本文上方出現逐筆檢查列、用字色標出非正文內容，掃好就跳到游標後面的第一筆。
+        已經在檢查時就跳到下一筆。"""
+        if not self.raw_lines or not any(line.strip() for line in self.raw_lines):
+            return
+        if self.review_bar.is_active():
+            self.goto_mark(True)
+            return
+        self.review_bar.set_active(True)
+        self._mark_advance_pending = True
+        self._on_marking_changed()
+        self._show_status("逐筆檢查：F8 下一筆、Shift+F8 上一筆，Esc 結束；要看哪幾類在「篩選」裡勾（顏色定義見說明）")
+
+    def stop_review(self):
+        """結束逐筆檢查：逐筆檢查列收起來，本文的字色一起收掉。"""
+        if not self.review_bar.is_active():
+            return
+        self.review_bar.set_active(False)
+        self._mark_advance_pending = False
+        self.editor.setExtraSelections([])
+        self._on_marking_changed()
+        self._show_status("已結束逐筆檢查")
+
+    def _on_review_types_changed(self):
+        """逐筆檢查的「篩選」換了類型：記下來，照新的類型重掃（信心只要重新篩，見 _on_mark_confidence_changed）。"""
+        self._ui_state["review_types"] = sorted(self.review_bar.review_types())
+        self._mark_current = -1
+        self._on_marking_changed()
 
     def _on_marking_changed(self):
-        """本文字色開關變了：關掉就清掉字色，打開就重掃。"""
-        kinds = self.content_panel.marking()
+        """逐筆檢查開始、結束或換了類型：沒有要標的就清掉字色，否則重掃。"""
+        kinds = self.review_bar.marking()
         if not kinds:
             self._mark_candidates = {"ad": [], "note": []}
             self._mark_rows = {"ad": set(), "note": set()}
@@ -312,32 +328,27 @@ class ToolWindowsMixin:
         if kinds:
             self._schedule_mark_scan(0)
 
-    def _on_repeat_marking_changed(self, on: bool):
-        self._ui_state["repeat_marking"] = on
-        if self.content_panel.marking():
-            self._schedule_mark_scan(0)
-
     def _on_mark_confidence_changed(self):
-        """卡片的信心篩選：掃描結果不變，重新篩出要上色、要跳轉的那幾筆就好。"""
-        self._ui_state["mark_confidence"] = sorted(self.content_panel.mark_confidence())
+        """逐筆檢查的信心篩選：掃描結果不變，重新篩出要上色、要跳轉的那幾筆就好。"""
+        self._ui_state["mark_confidence"] = sorted(self.review_bar.mark_confidence())
         self._mark_current = -1
         self._refresh_mark_rows()
         self._refresh_title_formats()
         self._update_mark_position()
 
     def _mark_targets(self) -> list:
-        """本文字色標出來、卡片可以一筆一筆跳過去的候選（照信心篩選），照位置排好。
+        """本文字色標出來、逐筆檢查可以一筆一筆跳過去的候選（照信心篩選），照位置排好。
         掃描結果不是這一版本文的（剛改過、還在重掃）就沒有。"""
         if self._mark_rows_version != self._text_version:
             return []
-        levels = self.content_panel.mark_confidence()
+        levels = self.review_bar.mark_confidence()
         found = [candidate for kind in ("ad", "note") for candidate in self._mark_candidates[kind]
                  if candidate["confidence"] in levels]
         return sorted(found, key=lambda candidate: (candidate["start"], candidate["end"]))
 
     def _refresh_mark_rows(self):
         """照信心篩選把候選換成要上色的行；同一行兩種都是用廣告的顏色。"""
-        levels = self.content_panel.mark_confidence()
+        levels = self.review_bar.mark_confidence()
         rows = {}
         for kind in ("ad", "note"):
             rows[kind] = {row for candidate in self._mark_candidates[kind] if candidate["confidence"] in levels
@@ -348,17 +359,22 @@ class ToolWindowsMixin:
         targets = self._mark_targets()
         if not 0 <= self._mark_current < len(targets):
             self._mark_current = -1
-        self.content_panel.set_mark_position(self._mark_current, len(targets))
+        info = ""
+        if self._mark_current >= 0:
+            candidate = targets[self._mark_current]
+            labels = "、".join(i18n.T(AD_CATEGORY_LABELS[key]) for key in AD_CATEGORY_LABELS if key in candidate["types"])
+            info = f"{labels} · {i18n.T(candidate['confidence'] + '信心')}"
+        self.review_bar.set_position(self._mark_current, len(targets), info)
 
     @action
     def goto_mark(self, forward: bool):
-        """卡片的上一筆／下一筆：從游標的位置接著找（跟尋找取代一樣），到底了繞回另一頭。"""
+        """逐筆檢查的上一筆／下一筆：從游標的位置接著找（跟尋找取代一樣），到底了繞回另一頭。"""
         targets = self._mark_targets()
         if not targets:
             self._mark_current = -1
             self._update_mark_position()
-            self._show_status("本文字色還在重新標示，稍等一下再按" if self._mark_scan_running or self._mark_timer.isActive()
-                              else "沒有標出來的內容（信心篩選、掃描視窗勾的類型都會影響）")
+            self._show_status("還在找要檢查的內容，稍等一下再按" if self._mark_scan_running or self._mark_timer.isActive()
+                              else "沒有要檢查的內容（逐筆檢查的篩選、非正文內容視窗勾的偵測類型都會影響）")
             return
         row = self.editor.textCursor().blockNumber()
         current = targets[self._mark_current] if 0 <= self._mark_current < len(targets) else None
@@ -377,7 +393,7 @@ class ToolWindowsMixin:
 
     @action
     def delete_current_mark(self):
-        """卡片的「刪除這筆」：跟掃描視窗的刪除一樣處理（夾在正文裡的網址只刪那一段），重掃完自動跳到下一筆。"""
+        """逐筆檢查的「刪除這筆」：跟掃描視窗的刪除一樣處理（夾在正文裡的網址只刪那一段），重掃完自動跳到下一筆。"""
         targets = self._mark_targets()
         if not 0 <= self._mark_current < len(targets):
             self._show_status("先按上一筆／下一筆選一筆")
@@ -404,7 +420,7 @@ class ToolWindowsMixin:
     def _start_mark_scan(self):
         """在背景執行緒掃描（大檔要將近一秒），掃完才回到主執行緒上色。
         掃描期間本文又改了：結果作廢，等這一輪結束再掃一次。"""
-        kinds = self.content_panel.marking()
+        kinds = self.review_bar.marking()
         if not kinds:
             return
         if self._mark_scan_running:
@@ -422,10 +438,11 @@ class ToolWindowsMixin:
                 self._build_context(), raw_lines=lines, user_chapter_rules=list(self.user_chapter_rules),
                 auto_titles=dict(self.auto_titles), force_lv1_chapters=set(self.force_lv1_chapters),
                 force_lv2_chapters=set(self.force_lv2_chapters))
-        # 網頁字元碼只是換字，不是廣告：不標廣告色。重複段落要在掃描視窗的分頁打開才標（多半是作者慣用的句子）
-        repeat = {"repeat"} if self._ui_state.get("repeat_marking") else set()
-        ad_categories = (self._saved_ad_categories() - FIX_CATEGORIES) | repeat if "ad" in kinds else set()
-        note_categories = self._saved_note_categories() if "note" in kinds else set()
+        # 網頁字元碼只是換字，不是廣告：不標廣告色。重複段落要在逐筆檢查的篩選勾了才標（多半是作者慣用的句子）
+        types = self.review_bar.review_types()
+        ad_categories = ((self._saved_ad_categories() - FIX_CATEGORIES if "ad" in types else set())
+                         | ({"repeat"} if "repeat" in types else set()))
+        note_categories = self._saved_note_categories() if "note" in types else set()
         min_length, min_count = self._saved_repeat_settings()
         self._mark_scan_running = True
 
@@ -453,10 +470,10 @@ class ToolWindowsMixin:
         self._mark_scan_running = False
         if self._mark_scan_pending or version != self._text_version:
             self._mark_scan_pending = False
-            if self.content_panel.marking() and version != -1:
+            if self.review_bar.marking() and version != -1:
                 self._schedule_mark_scan()
             return
-        kinds = self.content_panel.marking()
+        kinds = self.review_bar.marking()
         if not kinds:
             return
         self._mark_candidates = {"ad": list(ad_found), "note": list(note_found)}
@@ -476,7 +493,7 @@ class ToolWindowsMixin:
     def _apply_mark_colors(self, cursor: QTextCursor):
         """把掃描到的廣告／作者感言那幾行換成對應的字色（章節標題不動）。
         只在掃描結果對應的就是目前這一版本文時才畫：行號過期會標錯行。"""
-        if not self.content_panel.marking() or self._mark_rows_version != self._text_version:
+        if not self.review_bar.marking() or self._mark_rows_version != self._text_version:
             return
         document = self.editor.document()
         title_rows = set(self.chapter_raw_map.values())
@@ -538,9 +555,11 @@ class ToolWindowsMixin:
         self._sync_raw_lines()
         self._ensure_toc_current()
         spans = self._selected_section_spans()
-        # 記的是「關掉了哪些」：之後新增的檢查項目預設是開的。
-        disabled = self._ui_state.get("quote_disabled_kinds")
-        enabled = set(QUOTE_PROBLEM_LABELS) - set(disabled if isinstance(disabled, list) else [])
+        # 記住勾了哪些；沒記過時星號遮字關著（只能列出、書裡常有上百處），其餘都開。
+        # 「分隔線不一致」不是勾選框（由視窗裡的下拉決定），一律開著。
+        saved = self._ui_state.get("quote_kinds")
+        enabled = ((set(saved) & set(PROBLEM_LABELS) if isinstance(saved, list)
+                    else set(PROBLEM_LABELS) - QUOTE_DEFAULT_OFF) | {"separator_style"})
 
         def create():
             dialog = QuoteCheckDialog(self.raw_lines, self, selected_ranges=spans,
@@ -556,9 +575,7 @@ class ToolWindowsMixin:
             dialog.reload(self.raw_lines, ranges, count, title_rows=set(self.chapter_raw_map.values()))
 
         def on_closed(dialog, _accepted):
-            # 「分隔線不一致」不是勾選框（由視窗裡的下拉決定），不記
-            self._ui_state["quote_disabled_kinds"] = sorted(
-                set(QUOTE_PROBLEM_LABELS) - dialog.enabled_kinds() - {"separator_style"})
+            self._ui_state["quote_kinds"] = sorted(dialog.enabled_kinds())
 
         self._open_tool_dialog("quote_check", create, reload, on_closed)
 
@@ -587,14 +604,25 @@ class ToolWindowsMixin:
         self._sync_raw_lines()
         self._ensure_toc_current()
         spans = self._selected_section_spans()
+        keep_text = self._ui_state.get("script_keep_words")
+        vocabulary_text = self._ui_state.get("script_vocabulary")
         dialog = ScriptConvertDialog(self, selected_count=self._selected_chapter_count() if spans else 0,
-                                     mode=self._ui_state.get("script_mode"))
+                                     mode=self._ui_state.get("script_mode"),
+                                     keep_words=keep_text if isinstance(keep_text, str) else "",
+                                     vocabulary=vocabulary_text if isinstance(vocabulary_text, str)
+                                     else DEFAULT_VOCABULARY)
         try:
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            # 詞表按取消也記住（改到一半關掉不會不見）
+            self._ui_state["script_keep_words"] = dialog.keep_words_text()
+            self._ui_state["script_vocabulary"] = dialog.vocabulary_text()
+            if not accepted:
                 return
             mode = dialog.mode()
             selected_only = dialog.selected_only()
             self._ui_state["script_mode"] = mode
+            keep_words = parse_keep_words(dialog.keep_words_text())
+            vocabulary = parse_vocabulary(dialog.vocabulary_text())
         finally:
             dialog.deleteLater()
 
@@ -605,13 +633,13 @@ class ToolWindowsMixin:
         else:
             rows = range(len(lines))
             scope_text = "全文"
-        generated = "\n".join(self._convert_lines_with_progress(lines, rows, mode))
+        generated = "\n".join(self._convert_lines_with_progress(lines, rows, mode, keep_words, vocabulary))
 
         # 自動辨識的作品／標題快取記著舊文字，重建目錄時會把舊名稱寫回去
         # ：轉換範圍內的一起轉，建新的 dict，不改到復原快照共用的。
         converted_rows = set(rows)
         self.auto_titles = {
-            row: ({**record, "title": convert_body_text(record.get("title", ""), mode)}
+            row: ({**record, "title": convert_with_word_lists(record.get("title", ""), mode, keep_words, vocabulary)}
                   if row in converted_rows else dict(record))
             for row, record in self.auto_titles.items()
         }
@@ -626,7 +654,8 @@ class ToolWindowsMixin:
         self._checkpoint_document()
         self._show_status(f"已將{scope_text}做「{mode}」轉換，可以按 Ctrl+Z 復原")
 
-    def _convert_lines_with_progress(self, lines: list, rows, mode: str) -> list:
+    def _convert_lines_with_progress(self, lines: list, rows, mode: str, keep_words=(),
+                                     vocabulary=()) -> list:
         """逐塊做繁簡轉換，中間更新狀態列。
 
         OpenCC 是逐字轉換，2.6 MB 實測要 6 秒、5.8 MB 的檔案十幾秒；
@@ -644,7 +673,8 @@ class ToolWindowsMixin:
         try:
             for index in range(0, total, chunk_size):
                 block = rows[index:index + chunk_size]
-                converted = convert_body_text("\n".join(lines[row] for row in block), mode)
+                converted = convert_with_word_lists("\n".join(lines[row] for row in block), mode,
+                                                    keep_words, vocabulary)
                 for row, text in zip(block, converted.split("\n")):
                     lines[row] = text
                 if total > chunk_size:
@@ -720,10 +750,10 @@ class ToolWindowsMixin:
     def _load_update_source(self, path: str):
         """讀新檔、辨識章節（照目前的辨識設定）、跟本文比對：回傳（新檔的行, 目錄項目, 比對結果, 繁簡轉換）。"""
         content, _damaged, _encoding = self._read_document(
-            path, None if is_docx(path) else smart_detect_encoding(path))
+            path, None if is_docx(path) or is_epub(path) else smart_detect_encoding(path))
         if content is None:
             return None
-        content, _removed = strip_stray_bom(content)
+        content, _boms, _zero_width = strip_invisible_chars(content)
         new_lines = content.split("\n")
         self._sync_raw_lines()
         self._ensure_toc_current()
@@ -814,10 +844,18 @@ class ToolWindowsMixin:
 
         self._open_tool_dialog("recognition", create, reload, self._on_recognition_dialog_closed)
 
+    def open_suspect_chapters(self, fmt=None):
+        """打開辨識章節的「可疑章節」分頁（目錄上方的提示「查看可疑章節」），只看某一種格式。"""
+        self.open_recognition_dialog()
+        dialog = self._tool_dialogs.get("recognition")
+        if dialog is not None:
+            dialog.show_candidates(fmt)
+
     @action
     def _on_recognition_dialog_closed(self, dialog, accepted: bool):
         if not accepted or dialog.result_rules is None:
             return
+        added = self._add_suspect_lines(dialog)
         new = (dialog.result_rules, dialog.result_title_tail, dialog.result_title_tail_custom or "",
                dialog.result_disabled_words, dialog.result_max_title_length, dialog.result_special_levels)
         old = (self.user_chapter_rules, self.title_tail_allowed, self.title_tail_custom, self.disabled_words,
@@ -829,61 +867,30 @@ class ToolWindowsMixin:
             self.auto_titles = {row: record for row, record in self.auto_titles.items()
                                 if record.get("kind") == "work"}
         self.rescan_toc()
-        self._show_status("已保存辨識章節的設定")
-
-    def open_rules_dialog(self):
-        """自訂章節規則（自己寫的正則、本文可疑章節）。非模式：開著時可以從本文複製一行貼到「從範例產生」。"""
-        self._sync_raw_lines()
-        # 目錄在打字之後可能還沒重建，行號會對不上：已經是章節的行被當成
-        # 「可疑章節」再列一次，或真正沒辨識到的反而被跳過。
-        if self.raw_lines and any(line.strip() for line in self.raw_lines):
-            self._ensure_toc_current()
-
-        def create():
-            dialog = RulesDialog(self.user_chapter_rules, lambda: list(self.raw_lines), self,
-                                 known_rows=self._handled_title_rows(),
-                                 max_title_length=self.max_title_length)
-            dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
-            return dialog
-
-        def reload(dialog):
-            dialog.reload(self.raw_lines, self._handled_title_rows())
-
-        self._open_tool_dialog("rules", create, reload, self._on_rules_dialog_closed)
-
-    @action
-    def _on_rules_dialog_closed(self, dialog, accepted: bool):
-        result_rules = dialog.result_rules
-        result_lines = dialog.result_lines
-        volume_rows = set(dialog.result_volume_rows)
-        if not accepted or result_rules is None:
-            return
-        if result_lines is not None and dialog._tool_version != self._text_version:
-            # 按下按鈕前本文又改了（理論上切回對話框時就會重算，這裡保險）：
-            # 勾選的行號已經對不上，只存規則，不動本文。
-            result_lines = None
-            self._show_status("本文在勾選之後改過了，只保存規則；要加入的行請重新勾選")
-        added = 0
-        if result_lines is not None:
-            # 只在行尾加 [::]，行數不變，章節狀態的行號也不用搬。
-            added = sum(1 for old, new in zip(self.raw_lines, result_lines) if old != new)
-            generated = "\n".join(result_lines)
-            self.raw_lines = list(result_lines)
-            self._set_editor_text(generated, lambda row: row)
-            self._mark_synced(generated)
-            # 卷級格式逐行加入時要設成卷；[::] 本身只代表「這一行是標題」。
-            self.force_lv1_chapters |= volume_rows
-            self.force_lv2_chapters -= volume_rows
-        detection_changed = result_rules != self.user_chapter_rules
-        self.user_chapter_rules = result_rules
-        if detection_changed:
-            # 排版時會把當時目錄裡的標題都記成自動標題，重掃時優先採用；規則、標題結尾改了，
-            # 就要照新的設定重新辨識，不然停用的規則、關掉的標點都改不動目錄。作品名稱照舊。
-            self.auto_titles = {row: record for row, record in self.auto_titles.items()
-                                if record.get("kind") == "work"}
-        self.rescan_toc()
-        if result_lines is not None:
+        if added is not None:
             self._checkpoint_document()
-            self._show_status(f"已把 {added} 行加入目錄，並保存 {len(self.user_chapter_rules)} 條自訂章節規則")
-        elif dialog._tool_version == self._text_version:
-            self._show_status(f"已保存 {len(self.user_chapter_rules)} 條自訂章節規則")
+            self._show_status(f"已把 {added} 行加入目錄，並保存辨識章節的設定")
+        elif dialog.result_lines is None or dialog._tool_version == self._text_version:
+            self._show_status("已保存辨識章節的設定")
+
+    def _add_suspect_lines(self, dialog):
+        """可疑章節勾選加入的行：行尾加 [::]、卷級格式設成卷。回傳加了幾行；沒有要加或本文已經改過時回傳 None。"""
+        result_lines = dialog.result_lines
+        if result_lines is None:
+            return None
+        if dialog._tool_version != self._text_version:
+            # 按下按鈕前本文又改了（理論上切回對話框時就會重算，這裡保險）：
+            # 勾選的行號已經對不上，只存設定，不動本文。
+            self._show_status("本文在勾選之後改過了，只保存設定；要加入的行請重新勾選")
+            return None
+        volume_rows = set(dialog.result_volume_rows)
+        # 只在行尾加 [::]，行數不變，章節狀態的行號也不用搬。
+        added = sum(1 for old, new in zip(self.raw_lines, result_lines) if old != new)
+        generated = "\n".join(result_lines)
+        self.raw_lines = list(result_lines)
+        self._set_editor_text(generated, lambda row: row)
+        self._mark_synced(generated)
+        # 卷級格式逐行加入時要設成卷；[::] 本身只代表「這一行是標題」。
+        self.force_lv1_chapters |= volume_rows
+        self.force_lv2_chapters -= volume_rows
+        return added

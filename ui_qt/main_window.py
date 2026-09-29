@@ -14,20 +14,20 @@ _restore_document_step），輸入文字時用計時器合併成一步，不是�
 """
 
 import bisect
-import dataclasses
 import os
 import sys
 import time
 from collections import Counter
 
-from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
+from PySide6.QtCore import QBuffer, QIODevice, QProcess, QRect, QTimer, Qt, QUrl
 from PySide6.QtGui import (
-    QAction, QColor, QDesktopServices, QFont, QKeySequence, QShortcut, QTextBlockFormat, QTextCharFormat,
+    QAction, QColor, QDesktopServices, QFont, QImage, QKeySequence, QPainter, QShortcut, QTextBlockFormat,
+    QTextCharFormat,
     QTextCursor, QTextFormat,
 )
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QPushButton, QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QProgressDialog, QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core.cn_numerals import chinese_to_arabic
@@ -39,10 +39,16 @@ from core.ad_scan import AD_CATEGORY_LABELS, FIX_CATEGORIES, scan_ad_candidates
 from core.user_rules import PRESET_RULES, pop_timed_out_rules, preset_match
 from core.collection import (
     chapter_gap_report, group_formal_chapters, missed_middle_chapters, missed_tail_chapters, missed_volumes,
+    move_chapter_blocks,
     scan_chapter_candidates,
 )
 from core.docx_reader import DocxError, is_docx, read_docx_text
-from core.encoding import detect_line_ending, smart_detect_encoding, strip_stray_bom
+from core.epub_reader import EpubError, is_epub, read_epub
+from core.epub_writer import EpubSection, build_epub
+from core.file_merge import merge_texts, natural_key
+from core.file_split import section_filenames, split_sections
+from core.chapter_update import dominant_script
+from core.encoding import detect_line_ending, looks_misdecoded, smart_detect_encoding, strip_invisible_chars
 from core.file_io import read_text, read_text_lossy, write_text_atomic
 from core.filename_meta import (
     DEFAULT_COMPLETED_TEMPLATE, DEFAULT_ONGOING_TEMPLATE, build_smart_filename, extract_filename_metadata,
@@ -64,26 +70,29 @@ from .app_log import action, log, native_dialog, timed
 from .help_dialog import HelpDialog
 from .content_panel import ContentPanel
 from .chapter_panel import ChapterPanel
+from .chapter_order_dialog import ChapterOrderDialog
+from .merge_files_dialog import MergeFilesDialog
 from .find_bar import FindBar
 from .filename_dialog import FilenameDialog
 from .metadata_bar import ENCODING_CODECS, MetadataBar
 from . import old_files_dialog
 from .old_files_dialog import OldFilesDialog
 from .options_panel import OptionsPanel, describe_options
+from .review_bar import ReviewBar
 from .text_positions import PositionMap
-from .theme import DARK, DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
+from .theme import DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
     AppWidgetPolisher, Card, ClickableLabel, DropOverlay, Editor, IconButton, IconTextButton, LanguageToggle,
-    ElidedLabel, ScrollEndButtons, ThemeButton, VDivider, dropped_paths, make_card_header,
+    ElidedLabel, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, VDivider, dropped_paths, make_card_header,
 )
 from . import __version__
 from .window_common import (
     DEFAULT_STRUCTURE_MODE, EDITOR_BASE_FONT_PX, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, MARKER_GUIDE,
     MARK_SCAN_DELAY_MS, MAX_HIGHLIGHT_SPANS, MAX_HISTORY_CHARS, MAX_HISTORY_STEPS, MIN_HISTORY_STEPS,
-    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
+    MERGE_WARN_BYTES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
     WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals,
     _NUMBER_WITHOUT_UNIT, _ToolDialogWatcher, _chapter_line_mapper, _diff_line_mapper, _format_line_mapper,
-    WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
+    EPUB_ENCODING, WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
 )
 from .window_state import WindowStateMixin
 from .window_tools import ToolWindowsMixin
@@ -95,10 +104,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     def tokens(self):
         """目前主題的配色。"""
         return theme_tokens(self.theme_name)
-
-    @property
-    def dark_mode(self) -> bool:
-        return self.tokens.is_dark
 
     def __init__(self):
         super().__init__()
@@ -112,13 +117,16 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         self.input_file = ""
         self.detected_encoding = "utf-8"
+        self._epub_info = None
+        self.export_format = "TXT"      # 匯出設定的「匯出格式」：TXT／EPUB
+        self.export_split = False       # 匯出設定的「匯出方式」：每章一個檔（只有 TXT）
         self.raw_lines: list[str] = []
         self.user_chapter_rules: list = load_user_chapter_rules()
         self.auto_titles: dict = {}
         self.force_lv1_chapters: set = set()
         self.force_lv2_chapters: set = set()
         self.structure_mode = DEFAULT_STRUCTURE_MODE
-        # 標題結尾允許字元（自訂章節規則 → 標題結尾）
+        # 標題結尾允許字元（辨識章節的「章名結尾可以是」）
         self.title_tail_allowed = DEFAULT_TITLE_TAIL_ALLOWED
         self.title_tail_custom = ""     # 使用者在「標題結尾」分頁自己加的標點
         self.disabled_words = frozenset()           # 「辨識章節」關掉的章節單位、特殊標題
@@ -144,7 +152,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.chapter_index_map: dict = {}
         self.chapter_records: dict = {}
         self.toc_boundary_map: dict = {}
-        # 開著的工具對話框（標點校對、掃描無關連內容、自訂章節規則）：非模式，
+        # 開著的工具對話框（標點校對、掃描非正文內容、辨識章節）：非模式，
         # 開著時也能編輯本文。同一種只開一個。
         self._tool_dialogs: dict = {}
         self._tool_dialog_watcher = _ToolDialogWatcher(self)
@@ -175,9 +183,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         # 主題：選過的記在 ui_state.json；第一次開啟用簡約藍，不跟系統設定走。
         self.theme_name = DEFAULT_THEME
-        # 快速切換（toggle_theme）在「最近用過的淺色系」與「深色系」之間來回。
-        self._last_light_theme = DEFAULT_THEME
-        self._last_dark_theme = DARK.name
         self._icon_buttons: list[IconButton] = []
         self._panel_toggle_buttons: list[IconTextButton] = []
         self._primary_buttons: list[IconTextButton] = []
@@ -190,7 +195,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 匯出時要不要移除標記：只看章節標記說明裡的勾選，跟「顯示章節標記」無關。
         self._strip_markers_on_export = True
         self._ask_old_files_on_export = True
-        # 缺章檢查結果：按過一次「檢查缺章」之後，每次目錄重建都自動重算。
+        # 檢查章節的結果：按過一次「檢查章節」之後，每次目錄重建都自動重算。
         self._missing_report_active = False
         self._missing_groups: list = []
         # 按「重新整理目錄」時，最新卷／最新章無條件重新填入。
@@ -276,6 +281,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.metadata_bar.structure_changed.connect(self._on_structure_changed)
         self.metadata_bar.encoding_changed.connect(self._on_encoding_changed)
         self._panel_toggle_buttons.append(self.metadata_bar.toggle_button)
+        self._panel_toggle_buttons.append(self.metadata_bar.close_file_button)
+        self.metadata_bar.close_file_button.clicked.connect(self.clear_all)
         root.addWidget(self.metadata_bar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -285,54 +292,38 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 是三張不同的卡片。
         splitter.setHandleWidth(10)
 
-        # 左側常駐一張卡片，裡面疊放兩個面板（格式選項／章節管理），一次只
-        # 顯示一個：格式選項由工具列「排版設定」開關，章節管理從目錄標題列的
-        # 「…」開關；預設全部收起，不需要的設定不用一直佔畫面。
+        # 左側常駐一張卡片，裡面疊放幾個功能面板，一次只顯示一個，由最左邊的
+        # 圖示列開關；預設全部收起，不需要的設定不用一直佔畫面。
         self.side_card = Card()
         side_layout = QVBoxLayout(self.side_card)
         side_layout.setContentsMargins(0, 0, 0, 0)
         self.options_panel = OptionsPanel(self.format_options)
-        self.options_panel.apply_requested.connect(self.apply_formatting)
         self.options_panel.option_toggled.connect(self._on_format_option_toggled)
-        self.options_panel.save_one_click_requested.connect(self.save_one_click_options)
-        self.options_panel.closed.connect(lambda: self._set_active_side_panel(None))
+        self.options_panel.choice_changed.connect(self._on_format_choice_changed)
+        self.options_panel.changed.connect(self._save_one_click_settings)
         side_layout.addWidget(self.options_panel)
         self.options_panel.hide()
 
-        # 內容檢查：掃描無關連內容、作者感言與作品資訊、標點校對、繁簡轉換＋字色標示開關
+        # 內容檢查：掃描非正文內容、逐筆檢查、標點校對、繁簡轉換、顯示內文空格
         self.content_panel = ContentPanel()
-        self.content_panel.closed.connect(lambda: self._set_active_side_panel(None))
         self.content_panel.ad_scan_requested.connect(self.open_ad_scan_dialog)
-        self.content_panel.note_scan_requested.connect(self.open_note_scan_dialog)
+        self.content_panel.review_requested.connect(self.start_review)
         self.content_panel.quote_check_requested.connect(self.open_quote_check_dialog)
-        self.content_panel.word_count_requested.connect(self.open_word_count_dialog)
         self.content_panel.script_convert_requested.connect(self.open_script_convert_dialog)
-        self.content_panel.marking_changed.connect(self._on_marking_changed)
-        self.content_panel.confidence_changed.connect(self._on_mark_confidence_changed)
-        self.content_panel.previous_mark_requested.connect(lambda: self.goto_mark(False))
-        self.content_panel.next_mark_requested.connect(lambda: self.goto_mark(True))
-        self.content_panel.delete_mark_requested.connect(self.delete_current_mark)
         self.content_panel.show_whitespace_toggle.toggled.connect(self._on_whitespace_toggled)
         self.content_panel.show_whitespace_toggle.clicked.connect(
             lambda on: self._show_status("顯示內文空格：半形 ·、全形 □、Tab →，行尾多餘的空白標紅"
                                          if on else "不顯示內文空格"))
-        self.content_panel.mark_toggle.clicked.connect(
-            lambda on: self._show_status("已顯示本文字色：無關連內容、作者感言與作品資訊（顏色定義見說明）"
-                                         if on else "已隱藏本文字色"))
         side_layout.addWidget(self.content_panel)
         self.content_panel.hide()
 
         self.chapter_panel = ChapterPanel()
-        self.chapter_panel.closed.connect(lambda: self._set_active_side_panel(None))
         self.chapter_panel.recognition_requested.connect(self.open_recognition_dialog)
-        self.chapter_panel.rules_requested.connect(self.open_rules_dialog)
-        self.chapter_panel.merge_duplicates_requested.connect(self.open_duplicate_chapters_dialog)
         self.chapter_panel.check_missing_requested.connect(self.check_missing_chapters)
         self.chapter_panel.missing_mode_changed.connect(self._refresh_missing_report)
         self.chapter_panel.merge_titles_toggled.connect(self._on_merge_titles_toggled)
         self.chapter_panel.infer_volumes_toggled.connect(self._on_infer_volumes_toggled)
         self.chapter_panel.auto_apply_preview_toggled.connect(self._on_auto_apply_preview_toggled)
-        self.chapter_panel.apply_volumes_requested.connect(self.apply_toc_preview)
         self.chapter_panel.report_link_activated.connect(self._on_missing_report_link)
         self.chapter_panel.report_closed.connect(self._on_missing_report_closed)
         side_layout.addWidget(self.chapter_panel)
@@ -340,7 +331,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         # 尋找／取代也放進同一張卡片：本文不再被壓縮，搜尋結果也有完整高度。
         self.find_bar = FindBar()
-        self.find_bar.closed.connect(self.close_find_bar)
         self.find_bar.bind(
             get_text=lambda: self.editor.toPlainText(),
             on_select=self._find_on_select,
@@ -374,41 +364,49 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         i18n.skip(self.tree)   # 目錄是書的內容，不跟著介面切換繁簡
 
         tree_header, tree_header_layout = make_card_header("目錄")
-        for icon_name, tooltip, slot in (
-            ("refresh-cw", "重新掃描目錄（F5）", self.rescan_toc),
-            ("unfold-vertical", "全部展開", self.tree.expandAll),
-            ("fold-vertical", "全部摺疊", self.tree.collapseAll),
-        ):
-            button = IconButton(icon_name, tooltip, size=16)
-            button.clicked.connect(slot)
-            self._icon_buttons.append(button)
-            tree_header_layout.addWidget(button)
+        button = IconButton("refresh-cw", "重新掃描目錄（F5）", size=16)
+        button.clicked.connect(self.rescan_toc)
+        self._icon_buttons.append(button)
+        tree_header_layout.addWidget(button)
+        # 全部展開、全部摺疊是互斥的兩件事，一顆按鈕照目前的狀態做另一件（圖示、提示跟著換）
+        self.toc_fold_button = IconButton("unfold-vertical", "全部展開", size=16)
+        self.toc_fold_button.clicked.connect(self._toggle_toc_folding)
+        self._icon_buttons.append(self.toc_fold_button)
+        tree_header_layout.addWidget(self.toc_fold_button)
+        # 重建目錄時每個卷展開都會送一次訊號：併成一次再重算按鈕
+        self._toc_fold_timer = QTimer(self)
+        self._toc_fold_timer.setSingleShot(True)
+        self._toc_fold_timer.setInterval(0)
+        self._toc_fold_timer.timeout.connect(self._update_toc_fold_button)
+        self.tree.itemExpanded.connect(lambda _item: self._toc_fold_timer.start())
+        self.tree.itemCollapsed.connect(lambda _item: self._toc_fold_timer.start())
         # 目錄只顯示章號：開關型圖示，開著時用互動色
-        self.toc_compact_button = IconButton("list-filter", "只顯示章號", size=16)
+        self.toc_compact_button = IconButton("hash", "只顯示章號", size=16)
         self.toc_compact_button.setCheckable(True)
         self.toc_compact_button.clicked.connect(self._on_toc_compact_clicked)
         tree_header_layout.addWidget(self.toc_compact_button)
-        button = IconButton("ellipsis", "章節管理", size=16)
-        button.clicked.connect(lambda: self._toggle_side_panel(self.chapter_panel))
-        self._icon_buttons.append(button)
-        tree_header_layout.addWidget(button)
         tree_layout.addWidget(tree_header)
 
         tree_body = QVBoxLayout()
         tree_body.setContentsMargins(4, 8, 4, 8)
-        # 目錄是空的、本文卻有很多同一種常用寫法（1 標題、#1…）：提示一鍵加成辨識章節的組合
-        self.toc_hint = QFrame()
-        self.toc_hint.setObjectName("tocHint")
-        hint_layout = QVBoxLayout(self.toc_hint)
-        hint_layout.setContentsMargins(12, 10, 12, 10)
-        hint_layout.setSpacing(8)
-        self.toc_hint_label = QLabel("")
-        self.toc_hint_label.setWordWrap(True)
-        hint_layout.addWidget(self.toc_hint_label)
-        self.toc_hint_button = QPushButton("加入辨識章節")
+        # 目錄上方的提示列（widgets.NoticeBar），由上到下：
+        # 預覽中——章節管理的預覽開關開著：套用到本文、取消預覽都在這裡，跟預覽的目錄在一起；
+        self.preview_bar = NoticeBar()
+        self.preview_apply_button = self.preview_bar.add_button("套用到本文", primary=True)
+        self.preview_apply_button.clicked.connect(self.apply_toc_preview)
+        self.preview_bar.add_button("取消預覽").clicked.connect(self.cancel_toc_preview)
+        # 目錄是空的、本文卻有很多同一種常用寫法（1 標題、#1…）：提示一鍵加成辨識章節的組合；
+        self.toc_hint = NoticeBar(closable=True)
+        self.toc_hint_label = self.toc_hint.label
+        self.toc_hint_button = self.toc_hint.add_button("加入辨識章節")
         self.toc_hint_button.clicked.connect(self._accept_toc_hint)
-        hint_layout.addWidget(self.toc_hint_button)
-        self.toc_hint.hide()
+        self.toc_hint.dismissed.connect(lambda: self._dismiss_toc_notice(self._toc_hint_notice))
+        # 有章放錯位置（章號跟前後接不上、搬到別處就連續）：一鍵依章號重排。
+        # 後兩種可以按 ✕ 略過，這本書之後不再提示（同樣的內容才不提示，換了別的問題照樣提示）。
+        self.order_hint = NoticeBar(closable=True)
+        self.order_hint.add_button("依章號重排").clicked.connect(self.reorder_misplaced_chapters)
+        self.order_hint.dismissed.connect(lambda: self._dismiss_toc_notice(self._order_hint_notice))
+        self._toc_hint_notice = self._order_hint_notice = None
         self._toc_hint_template = None
         self._toc_hint_format = None
         self._toc_hint_key = self._toc_hint_result = None
@@ -416,7 +414,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._toc_hint_timer.setSingleShot(True)
         self._toc_hint_timer.setInterval(0)
         self._toc_hint_timer.timeout.connect(self._update_toc_hint)
-        tree_body.addWidget(self.toc_hint)
+        for bar in (self.preview_bar, self.toc_hint, self.order_hint):
+            tree_body.addWidget(bar)
         tree_body.addWidget(self.tree)
         # 目錄右下角：到最前面／到最後面，本文的游標一起到開頭／最後一個字
         self.toc_ends = ScrollEndButtons(self.tree)
@@ -444,6 +443,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         editor_header_layout.addWidget(self.breadcrumb_label, 1)
         editor_header_layout.addSpacing(6)
         editor_layout.addWidget(editor_header)
+        # 逐筆檢查列：開始逐筆檢查時出現在本文正上方，要看的內容就在旁邊（不用回左邊的卡片）
+        self.review_bar = ReviewBar()
+        self.review_bar.previous_requested.connect(lambda: self.goto_mark(False))
+        self.review_bar.next_requested.connect(lambda: self.goto_mark(True))
+        self.review_bar.delete_requested.connect(self.delete_current_mark)
+        self.review_bar.close_requested.connect(self.stop_review)
+        self.review_bar.types_changed.connect(self._on_review_types_changed)
+        self.review_bar.confidence_changed.connect(self._on_mark_confidence_changed)
+        editor_layout.addWidget(self.review_bar)
         # 章節標記平常藏起來（1px 透明字），但它們是真的寫在檔案裡的：顯示與否在「章節管理」卡片，
         # 匯出時要不要拿掉在匯出設定；說明按鈕在檔名列。
         self.marker_button = self.chapter_panel.show_markers_toggle
@@ -527,6 +535,16 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         splitter_wrap = QWidget()
         splitter_wrap_layout = QHBoxLayout(splitter_wrap)
         splitter_wrap_layout.setContentsMargins(14, 8, 14, 14)
+        splitter_wrap_layout.setSpacing(10)
+        # 最左邊的圖示列：一格一張功能卡片，貼在卡片旁邊（名稱一直顯示，不靠滑鼠提示）
+        self.side_rail = SideRail([
+            ("options", "sliders-horizontal", "排版"),
+            ("chapter", "list-tree", "章節"),
+            ("content", "file-check", "檢查"),
+            ("find", "text-search", "尋找"),
+        ])
+        self.side_rail.toggled.connect(self._on_side_rail_toggled)
+        splitter_wrap_layout.addWidget(self.side_rail)
         splitter_wrap_layout.addWidget(splitter)
         root.addWidget(splitter_wrap, 1)
 
@@ -557,6 +575,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+Z"), self, activated=self._redo)
         QShortcut(QKeySequence("Ctrl+Shift+L"), self, activated=self.open_log_folder)
         QShortcut(QKeySequence("Esc"), self, activated=self._on_escape)
+        # 逐筆檢查：F8 下一筆（還沒開始就開始）、Shift+F8 上一筆
+        QShortcut(QKeySequence("F8"), self, activated=lambda: self.goto_mark(True) if self.review_bar.is_active()
+                  else self.start_review())
+        QShortcut(QKeySequence("Shift+F8"), self, activated=lambda: self.goto_mark(False)
+                  if self.review_bar.is_active() else self.start_review())
 
     def _build_header(self) -> QWidget:
         header = QWidget()
@@ -575,7 +598,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             open_group, "folder-open", "選擇檔案", "", self.open_file, "Ctrl+O", primary=True)
         self.open_button.setProperty("split", "left")
         self.open_menu_button = self._add_text_button(
-            open_group, "chevron-down", "", "開啟檔案、接續更新章節", self._show_open_menu, None, primary=True)
+            open_group, "chevron-down", "", "開啟檔案、接續更新章節、合併多個檔案", self._show_open_menu, None,
+            primary=True)
         self.open_menu_button.setProperty("split", "right")
         layout.addLayout(open_group)
         self.open_menu = QMenu(self)
@@ -583,32 +607,17 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.open_file_action.triggered.connect(lambda: self.open_file())
         self.update_chapters_action = self.open_menu.addAction("接續更新章節…")
         self.update_chapters_action.triggered.connect(lambda: self.import_chapter_update())
+        self.merge_files_action = self.open_menu.addAction("合併多個檔案…")
+        self.merge_files_action.triggered.connect(lambda: self.merge_files())
         self.one_click_button = self._add_text_button(
             layout, "wand-sparkles", "一鍵排版", "", self.one_click_format, None, primary=True)
-        # 左邊是動作（開檔、一鍵排版），右邊是開關側邊卡片：中間用一條直線分開
-        layout.addSpacing(4)
-        layout.addWidget(VDivider())
-        layout.addSpacing(4)
-        # 工具列的按鈕不放滑鼠提示：圖示＋文字已經說明用途
-        self.format_toggle_button = self._add_text_button(
-            layout, "sliders-horizontal", "排版設定", "",
-            lambda: self._toggle_side_panel(self.options_panel), None, checkable=True)
-        self.chapter_toggle_button = self._add_text_button(
-            layout, "list-tree", "章節管理", "",
-            lambda: self._toggle_side_panel(self.chapter_panel), None, checkable=True)
-        self.content_toggle_button = self._add_text_button(
-            layout, "file-check", "內容檢查", "",
-            lambda: self._toggle_side_panel(self.content_panel), None, checkable=True)
-        # 尋找／取代（Ctrl+F）也是左側卡片之一；圖示跟內容檢查分開（放大鏡＋文字行）
-        self.find_toggle_button = self._add_text_button(
-            layout, "text-search", "尋找取代", "", self.toggle_find_bar, None, checkable=True)
+        # 工具列只放動作；開關功能卡片在最左邊的圖示列（貼在卡片旁邊）
         layout.addStretch(1)
 
         # 只有圖示的按鈕放滑鼠提示（名稱＋快捷鍵）；有文字的按鈕不放，文字已經說了（UI_RULES.md）
         self.undo_button = self._add_header_button(layout, "undo-2", "上一步（Ctrl+Z）", self._undo, None)
         self.redo_button = self._add_header_button(layout, "redo-2", "下一步（Ctrl+Y）", self._redo, None)
-        self.clear_button = self._add_header_button(layout, "eraser", "清空", self.clear_all, None)
-        # 編輯動作（上一步、下一步、清空）跟外觀設定（主題、繁簡）之間一條直線
+        # 編輯動作（上一步、下一步）跟外觀設定（主題、繁簡）之間一條直線
         layout.addSpacing(4)
         layout.addWidget(VDivider())
         layout.addSpacing(4)
@@ -669,11 +678,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         return button
 
     def _set_document_actions_enabled(self, enabled: bool):
-        for button in (self.one_click_button, self.save_button, self.filename_button, self.clear_button,
-                       self.format_toggle_button, self.chapter_toggle_button, self.content_toggle_button,
-                       self.find_toggle_button):
+        for button in (self.one_click_button, self.save_button, self.filename_button,
+                       *self.side_rail.buttons.values()):
             button.setEnabled(enabled)
-        self.options_panel.set_apply_enabled(enabled)
+        self.metadata_bar.close_file_button.setVisible(enabled)
         self.content_panel.set_actions_enabled(enabled)
         if not enabled:
             self._set_active_side_panel(None)
@@ -696,16 +704,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if name not in THEMES:
             return
         self.theme_name = name
-        if self.tokens.is_dark:
-            self._last_dark_theme = name
-        else:
-            self._last_light_theme = name
         self._apply_theme()
-
-    @action
-    def toggle_theme(self):
-        """在最近用過的淺色系與深色系主題之間切換。"""
-        self.set_theme(self._last_light_theme if self.tokens.is_dark else self._last_dark_theme)
 
     def _apply_theme(self):
         tokens = self.tokens
@@ -730,11 +729,12 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.chapter_panel.set_icon_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
         self.toc_compact_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint, tokens.checked_text)
         self.chapter_panel.set_report_theme(tokens)
-        self.options_panel.set_icon_colors(tokens.icon, tokens.primary_text, tokens.checked_text, tokens.icon_hover,
-                                           tokens.text_faint)
         self.content_panel.set_colors(tokens)
+        self.review_bar.set_colors(tokens)
         self.find_bar.set_theme(tokens)
-        self.find_bar.close_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
+        self.side_rail.set_colors(tokens)
+        for bar in (self.preview_bar, self.toc_hint, self.order_hint):
+            bar.set_colors(tokens)
         self._apply_editor_style()
         trailing = QColor(tokens.warn_text)
         trailing.setAlpha(60 if tokens.is_dark else 38)
@@ -754,10 +754,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 準），寬度沿用設計稿的比例（118×52）。
         # 工具列上所有控制項同一個高度（UI_RULES.md）：純圖示按鈕的 sizeHint 比有文字的
         # 按鈕高，「匯出 TXT」夾在圖示按鈕和繁簡切換旁邊就顯得矮一截。
-        header_buttons = ([self.open_button, self.open_menu_button, self.one_click_button, self.format_toggle_button,
-                           self.chapter_toggle_button, self.content_toggle_button, self.find_toggle_button,
+        header_buttons = ([self.open_button, self.open_menu_button, self.one_click_button,
                            self.save_button, self.filename_button,
-                           self.undo_button, self.redo_button, self.clear_button, self.theme_button])
+                           self.undo_button, self.redo_button, self.theme_button])
         for button in header_buttons:
             button.setMinimumHeight(0)
             button.setMaximumHeight(16777215)
@@ -789,7 +788,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             return True
         box = QMessageBox(QMessageBox.Icon.Warning, i18n.T("尚未匯出"),
                           i18n.T("目前的修改還沒有匯出，繼續下去會遺失。要先匯出嗎？"), parent=self)
-        save_button = box.addButton(i18n.T("匯出 TXT"), QMessageBox.ButtonRole.AcceptRole)
+        save_button = box.addButton(i18n.T(f"匯出 {self.export_format}"), QMessageBox.ButtonRole.AcceptRole)
         discard_button = box.addButton(i18n.T("不匯出，直接繼續"), QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(i18n.T("取消"), QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(save_button)
@@ -862,13 +861,17 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         return folder if isinstance(folder, str) and folder and os.path.isdir(folder) else ""
 
     @action
-    def _open_dropped_file(self, path: str):
-        """拖曳到本文卡片（還沒開檔、放置區沒有出現時）：跟拖到視窗其他地方一樣。"""
-        if not openable(path):
-            dialogs.error(self, "無法載入", "請拖曳 TXT 或 Word（.docx）檔案。")
+    def _open_dropped_file(self, paths: list):
+        """拖曳到本文卡片（還沒開檔、放置區沒有出現時）：跟拖到視窗其他地方一樣。一次好幾個檔就是合併。"""
+        usable = [path for path in paths if openable(path)]
+        if not usable:
+            dialogs.error(self, "無法載入", "請拖曳 TXT、Word（.docx）或 EPUB 檔案。")
+            return
+        if len(usable) > 1:
+            self.merge_files(usable)
             return
         if self._confirm_discard_changes():
-            self.load_file_path(path)
+            self.load_file_path(usable[0])
 
     def _has_document(self) -> bool:
         return not self.editor.document().isEmpty()
@@ -879,13 +882,93 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             self.drop_overlay.cover()
 
     @action
-    def _on_overlay_dropped(self, zone: str, path: str):
-        if not openable(path):
-            dialogs.error(self, "無法載入", "請拖曳 TXT 或 Word（.docx）檔案。")
+    def _on_overlay_dropped(self, zone: str, paths: list):
+        usable = [path for path in paths if openable(path)]
+        if not usable:
+            dialogs.error(self, "無法載入", "請拖曳 TXT、Word（.docx）或 EPUB 檔案。")
         elif zone == "update":
-            self.import_chapter_update(path)
+            if len(usable) > 1:
+                dialogs.info(self, "一次一個檔案", "接續更新章節一次比對一個檔案；好幾個章節檔請先合併成一份再比對。")
+                return
+            self.import_chapter_update(usable[0])
+        elif len(usable) > 1:
+            self.merge_files(usable)
         elif self._confirm_discard_changes():
-            self.load_file_path(path)
+            self.load_file_path(usable[0])
+
+    @action
+    def merge_files(self, paths: list | None = None):
+        """合併多個檔案（每章一個檔）成一份新的本文：照檔名裡的數字排序，可以在視窗裡調整（core/file_merge.py）。"""
+        if paths is None:
+            with native_dialog():
+                paths, _ = QFileDialog.getOpenFileNames(
+                    self, i18n.T("合併多個檔案"), self._remembered_dir("last_open_dir"), i18n.T(OPEN_FILE_FILTER))
+            if not paths:
+                return
+            self._ui_state["last_open_dir"] = os.path.dirname(paths[0])
+        paths = sorted((path for path in paths if openable(path)), key=natural_key)
+        if len(paths) < 2:
+            if paths and self._confirm_discard_changes():
+                self.load_file_path(paths[0])
+            return
+        # 合計很大時先問：合成一份之後排版、檢查都跟著變慢（24 MB 的書一鍵排版約 4 秒）
+        total = sum(os.path.getsize(path) for path in paths if os.path.isfile(path))
+        if total > MERGE_WARN_BYTES and not dialogs.confirm(
+                self, "檔案很大",
+                f"這 {len(paths)} 個檔合計 {total / 1e6:.0f} MB。合併成一份之後，排版、檢查都會很慢，"
+                "記憶體也會用很多。確定要合併嗎？"):
+            return
+        parts, skipped = self._read_merge_parts(paths)
+        if parts is None:
+            self._show_status("已取消合併")
+            return
+        if len(parts) < 2:
+            names = "\n".join(f"{name}（{reason}）" for name, reason in skipped[:10])
+            dialogs.error(self, "無法合併", f"只讀到 {len(parts)} 個檔，沒辦法合併：\n\n{names}")
+            return
+        dialog = MergeFilesDialog(parts, bool(self._ui_state.get("merge_title_from_name", True)), self, skipped)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not self._confirm_discard_changes():
+            return
+        self._ui_state["merge_title_from_name"] = dialog.result_title_from_name
+        text = merge_texts(dialog.result_parts, dialog.result_title_from_name)
+        folder = os.path.basename(os.path.dirname(os.path.abspath(dialog.result_parts[0][0])))
+        title = extract_filename_metadata(folder)[0] if folder else ""
+        self.load_file_path("", merged=(text, i18n.T(f"合併 {len(parts)} 個檔案"), title))
+
+    def _read_merge_parts(self, paths):
+        """一個一個讀要合併的檔，有進度條、可以取消（取消時回傳 (None, 略過的)）。讀不到的檔略過、記下原因，
+        不整批放棄；編碼不符的詢問可以「後面的檔案也這樣處理」。回傳（[(路徑, 文字)], [(檔名, 原因)]）。"""
+        parts, skipped = [], []
+        remember: dict = {}
+        progress = QProgressDialog(i18n.T("讀取檔案…"), i18n.T("取消"), 0, len(paths), self)
+        progress.setWindowTitle(i18n.T("合併多個檔案"))
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(400)          # 很快讀完的（幾十個小檔）不閃一下進度條
+        progress.setAutoClose(False)
+        try:
+            for index, path in enumerate(paths):
+                name = os.path.basename(path)
+                progress.setLabelText(i18n.T(f"讀取第 {index + 1}／{len(paths)} 個檔：") + name)
+                progress.setValue(index)
+                if progress.wasCanceled():
+                    return None, skipped
+                remember.pop("error", None)
+                try:
+                    encoding = None if is_docx(path) or is_epub(path) else smart_detect_encoding(path)
+                    content, _damaged, _encoding = self._read_document(path, encoding, remember)
+                except OSError as error:
+                    skipped.append((name, i18n.T("讀取失敗") + f"：{error.strerror or error}"))
+                    continue
+                if content is None:
+                    skipped.append((name, i18n.T("讀取失敗") if "error" in remember else i18n.T("編碼不符，已略過")))
+                    continue
+                content, _boms, _zero_width = strip_invisible_chars(content)
+                parts.append((path, content))
+            progress.setValue(len(paths))
+        finally:
+            progress.close()
+            progress.deleteLater()
+        return parts, skipped
 
     def _show_open_menu(self):
         self.update_chapters_action.setEnabled(self._has_document())
@@ -900,20 +983,29 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         paths = dropped_paths(event)
         if paths:
             event.acceptProposedAction()
-            self._open_dropped_file(paths[0])
+            self._open_dropped_file(paths)
 
     @action
-    def load_file_path(self, path: str, encoding: str | None = None):
+    def load_file_path(self, path: str, encoding: str | None = None, merged: tuple | None = None):
+        """merged＝（合併好的文字, 顯示的名稱, 書名）：合併多個檔案（merge_files），path 傳空字串。"""
         word = is_docx(path)
-        encoding = WORD_ENCODING if word else encoding or smart_detect_encoding(path)
-        try:
-            content, damaged, encoding = self._read_document(path, encoding)
-        except OSError as error:
-            dialogs.error(self, "讀取失敗", f"無法開啟檔案：\n{path}\n\n{error}")
-            return
-        if content is None:
-            return
-        content, removed_boms = strip_stray_bom(content)
+        epub = is_epub(path)
+        packaged = word or epub       # 沒有文字編碼可選（讀出來就是 Unicode）
+        if merged is not None:
+            # 每個檔讀的時候已經各自解碼、移除過 BOM 與零寬字元
+            content, damaged, encoding = merged[0], 0, "utf-8"
+            removed_boms = removed_zero_width = 0
+        else:
+            encoding = (WORD_ENCODING if word else EPUB_ENCODING if epub else
+                        encoding or smart_detect_encoding(path))
+            try:
+                content, damaged, encoding = self._read_document(path, encoding)
+            except OSError as error:
+                dialogs.error(self, "讀取失敗", f"無法開啟檔案：\n{path}\n\n{error}")
+                return
+            if content is None:
+                return
+            content, removed_boms, removed_zero_width = strip_invisible_chars(content)
 
         self.close_find_bar()
         self._drop_line_caches()
@@ -936,8 +1028,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.metadata_bar.set_structure(DEFAULT_STRUCTURE_MODE)
         encoding_choice = next((label for label, codec in ENCODING_CODECS.items() if codec == encoding), "自動")
         self.metadata_bar.set_encoding_choice(encoding_choice)
-        # Word 檔沒有文字編碼可選（讀出來就是 Unicode）
-        self.metadata_bar.encoding_combo.setEnabled(not word)
+        # Word、EPUB 沒有文字編碼可選（讀出來就是 Unicode）
+        self.metadata_bar.encoding_combo.setEnabled(not packaged)
 
         self._history = []
         self._history_position = -1
@@ -947,30 +1039,42 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         self._mark_synced(content)
         self._rebuild_toc()
-        self._autofill_book_metadata()
+        if merged is not None:
+            self.metadata_bar.set_title_if_empty(merged[2])
+        else:
+            self._autofill_book_metadata()
+        if epub:
+            self._fill_epub_metadata()
         try:
             size_mb = os.path.getsize(path) / (1024 * 1024)
-        except OSError:      # 讀完之後檔案被移走或改名
-            size_mb = len(content.encode("utf-8" if word else encoding, "replace")) / (1024 * 1024)
-        self.metadata_bar.set_filename(os.path.basename(path), f"{size_mb:.2f} MB")
+        except OSError:      # 讀完之後檔案被移走或改名（合併的沒有檔案）
+            size_mb = len(content.encode("utf-8" if packaged else encoding, "replace")) / (1024 * 1024)
+        display_name = merged[1] if merged is not None else os.path.basename(path)
+        self.metadata_bar.set_filename(display_name, f"{size_mb:.2f} MB")
         self.metadata_bar.set_encoding_badge(self.detected_encoding.upper())
         self._set_footer_encoding(
-            "DOCX" if word else f"{self.detected_encoding.upper()} · {detect_line_ending(path)}")
-        status = i18n.T("已載入：") + os.path.basename(path)
+            self.detected_encoding.upper() if packaged else
+            f"{self.detected_encoding.upper()} · {'LF' if merged is not None else detect_line_ending(path)}")
+        status = i18n.T("已載入：") + display_name
         if damaged:
             status += i18n.T(f"；有 {damaged} 個字元無法以 {encoding.upper()} 解碼（顯示為 �），存檔會永久遺失")
         if removed_boms:
             status += i18n.T(f"；已移除 {removed_boms} 個夾在行首的 BOM 字元（多檔串接留下的，會讓章節辨識失敗）")
+        if removed_zero_width:
+            status += i18n.T(f"；已移除 {removed_zero_width} 個零寬字元（網頁複製留下的，會讓章節辨識失敗）")
+        if not packaged and looks_misdecoded(content):
+            status += i18n.T("；文字看起來像亂碼：編碼可能不對，在書籍資料的「讀取編碼」換一種")
         self._show_status(status, translated=True)
-        log.info("載入 %s：%.2f MB、編碼 %s、%d 行、目錄 %d 項（推定卷 %d）、移除 BOM %d 個",
-                 os.path.basename(path), size_mb, encoding, len(self.raw_lines), len(self.chapter_raw_map),
-                 len(self.virtual_volume_items), removed_boms)
+        log.info("載入 %s：%.2f MB、編碼 %s、%d 行、目錄 %d 項（推定卷 %d）、移除 BOM %d 個、零寬字元 %d 個",
+                 display_name, size_mb, encoding, len(self.raw_lines), len(self.chapter_raw_map),
+                 len(self.virtual_volume_items), removed_boms, removed_zero_width)
         self._set_document_actions_enabled(True)
         if self._pending_side_panel:
             self._open_pending_side_panel()
         self._checkpoint_document()   # 建立復原歷史的第一步（載入後的初始狀態）
-        self._document_dirty = False
-        self._saved_text_hash = hash(content)
+        # 合併出來的本文還沒有檔案：關閉前要提醒匯出
+        self._document_dirty = merged is not None
+        self._saved_text_hash = hash(content) if merged is None else None
         self._warm_scan_caches()
 
     def _warm_scan_caches(self):
@@ -1033,17 +1137,35 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                 break
         self._warm_timer.start(0)
 
-    def _read_document(self, path: str, encoding: str):
-        if is_docx(path):
-            try:
-                return read_docx_text(path), 0, WORD_ENCODING
-            except DocxError as error:
-                log.warning("讀取 Word 檔失敗：%s", error)
-                dialogs.error(self, "讀取失敗", f"無法讀取這個 Word 檔：\n{path}\n\n{error}")
-                return None, 0, encoding
-        return self._read_text_document(path, encoding)
+    def _fill_epub_metadata(self):
+        """EPUB 裡寫的書名、作者比檔名可靠：有寫就用它蓋掉從檔名猜的（狀態還是照檔名）。"""
+        info = self._epub_info or {}
+        if info.get("title"):
+            self.metadata_bar.title_input.setText(info["title"])
+        if info.get("author"):
+            self.metadata_bar.author_input.setText(info["author"])
 
-    def _read_text_document(self, path: str, encoding: str):
+    def _read_document(self, path: str, encoding: str, remember: dict | None = None):
+        """remember：合併好幾個檔時給一個 dict——讀不了的 EPUB、Word 不跳錯誤（記在 remember["error"]，
+        呼叫端略過這個檔、最後一起列出），編碼不符的詢問可以「後面的檔案也這樣處理」。"""
+        self._epub_info = None
+        if is_epub(path) or is_docx(path):
+            kind = "EPUB" if is_epub(path) else "Word 檔"
+            try:
+                if is_epub(path):
+                    text, self._epub_info = read_epub(path)
+                    return text, 0, EPUB_ENCODING
+                return read_docx_text(path), 0, WORD_ENCODING
+            except (EpubError, DocxError) as error:
+                log.warning("讀取%s失敗：%s", kind, error)
+                if remember is not None:
+                    remember["error"] = str(error)
+                else:
+                    dialogs.error(self, "讀取失敗", f"無法讀取這個 {kind}：\n{path}\n\n{error}")
+                return None, 0, encoding
+        return self._read_text_document(path, encoding, remember)
+
+    def _read_text_document(self, path: str, encoding: str, remember: dict | None = None):
         """先嚴格解碼；編碼不符時問過使用者才容錯開啟。
 
         不預設容錯：解不開的位元組會變成「�」，一旦照這樣編輯、匯出，原本
@@ -1056,7 +1178,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             except (UnicodeError, LookupError) as error:
                 log.warning("以 %s 嚴格解碼失敗：%s", encoding, error)
             choices = [label for label, codec in ENCODING_CODECS.items() if codec != encoding]
-            choice, label = dialogs.decode_failure(self, os.path.basename(path), encoding, choices)
+            saved = remember.get("decode") if remember is not None else None
+            if saved is not None and not (saved.get("action") == "retry"
+                                          and ENCODING_CODECS.get(saved.get("label")) == encoding):
+                choice, label = saved.get("action"), saved.get("label")      # 前面的檔勾了「後面也這樣處理」
+            else:
+                decided = {} if remember is not None else None
+                choice, label = dialogs.decode_failure(self, os.path.basename(path), encoding, choices, decided)
+                if decided:
+                    remember["decode"] = decided
             if choice == "retry" and label in ENCODING_CODECS:
                 encoding = ENCODING_CODECS[label]
                 continue
@@ -1163,7 +1293,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if self.find_bar.isVisible():
             # 搜尋結果記的是字元位置，正文一變就全部作廢，不能再拿去取代。
             self.find_bar.invalidate()
-        if self.content_panel.marking():
+        if self.review_bar.marking():
             self._mark_timer.start(MARK_SCAN_DELAY_MS)   # 停一下才在背景重掃，不是每打一個字就掃
         if self._restoring_history:
             return
@@ -1326,10 +1456,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     def _on_format_option_toggled(self, label: str, on: bool, description: str):
         """排版設定的開關：切換之後說一句它會做什麼（開關本身不放滑鼠提示）。"""
         if on:
-            message = i18n.T(f"已開啟「{label}」：{description}（按「套用格式」才會動到本文）")
+            message = i18n.T(f"已開啟「{label}」：{description}（一鍵排版、目錄右鍵「套用格式」時使用）")
         else:
             message = i18n.T(f"已關閉「{label}」")
         self._show_status(message, translated=True)
+
+    def _on_format_choice_changed(self, label: str, value: str):
+        """排版設定的下拉：換了之後說一句現在是什麼、什麼時候用。"""
+        self._show_status(i18n.T(f"{label}改成「{value}」（一鍵排版、目錄右鍵「套用格式」時使用）"),
+                          translated=True)
 
     # ------------------------------------------------------------------
     # 介面繁／簡
@@ -1403,11 +1538,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @action
     def save_file_as(self, *, strip_markers: bool | None = None):
-        """匯出 TXT。strip_markers 為 None 時照「匯出時移除章節標記」的設定。
+        """匯出 TXT（匯出設定選 EPUB 時匯出 EPUB）。strip_markers 為 None 時照「匯出時移除章節標記」的設定。
         只能用名稱傳：按鈕的 clicked 會帶一個 checked=False 進來，當成位置參數就蓋掉設定了。"""
         content = self.editor.toPlainText()
         if not content.strip():
             return False
+        if self.export_format == "EPUB":
+            return self._export_epub()
+        if self.export_split:
+            return self._export_split(strip_markers)
         default_name = self._suggest_export_filename()
         # 上次匯出的資料夾；還沒匯出過就放在原檔旁邊
         folder = (self._remembered_dir("last_export_dir")
@@ -1441,6 +1580,122 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._document_dirty = False
         self._saved_text_hash = hash(content)
         self._show_status(i18n.T("已匯出：") + path + self._offer_old_file_cleanup(path), translated=True)
+        return True
+
+    def _set_export_format(self, export_format):
+        """匯出設定的「匯出格式」；工具列的匯出按鈕跟著寫「匯出 TXT／匯出 EPUB」。"""
+        self.export_format = export_format if export_format in ("TXT", "EPUB") else "TXT"
+        if self.export_format != "TXT":
+            self.export_split = False
+        label = f"匯出 {self.export_format}"
+        i18n.set_text(self.save_button, label)
+        if self._toolbar_compact:
+            self.save_button.setToolTip(self.save_button.text() + "（Ctrl+S）")
+
+    def _epub_sections(self):
+        """目錄的每一項一段：（EpubSection 清單, 第一個目錄項目之前的行）。卷底下的章縮一層。"""
+        entries = sorted((row, item) for item, row in self.chapter_raw_map.items()
+                         if 0 <= row < len(self.raw_lines))
+        sections = []
+        for position, (row, item) in enumerate(entries):
+            end = entries[position + 1][0] if position + 1 < len(entries) else len(self.raw_lines)
+            title, _marker = strip_persistent_title_marker(self.raw_lines[row].strip())
+            depth, parent = 0, item.parent()
+            while parent is not None:
+                depth += 1
+                parent = parent.parent()
+            body, _count = strip_export_markers("\n".join(self.raw_lines[row + 1:end]))
+            sections.append(EpubSection(title or self.toc_full_labels.get(item, item.text(0)), depth,
+                                        body.split("\n")))
+        front_end = entries[0][0] if entries else len(self.raw_lines)
+        front, _count = strip_export_markers("\n".join(self.raw_lines[:front_end]))
+        return sections, front.split("\n")
+
+    def _epub_cover_png(self, title: str, author: str) -> bytes:
+        """沒有封面圖時的文字封面：書名、作者置中。"""
+        image = QImage(900, 1200, QImage.Format.Format_RGB32)
+        image.fill(QColor("#F4F4F2"))
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        family = self.font().family()
+        painter.setPen(QColor("#222222"))
+        painter.setFont(QFont(family, 60, QFont.Weight.Bold))
+        flags = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter) | int(Qt.TextFlag.TextWordWrap)
+        painter.drawText(QRect(90, 260, 720, 460), flags, title)
+        if author:
+            painter.setPen(QColor("#555555"))
+            painter.setFont(QFont(family, 30))
+            painter.drawText(QRect(90, 780, 720, 160), flags, author)
+        painter.end()
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        return bytes(buffer.data())
+
+    def _export_epub(self) -> bool:
+        """匯出 EPUB：目錄照 txt-tool 的目錄，書名、作者照書籍資料，封面是文字封面（core/epub_writer.py）。
+        不算「已存檔」：本文還是 TXT 的形式，關閉前照常提醒。"""
+        self._sync_raw_lines()
+        self._ensure_toc_current()
+        default_name = os.path.splitext(self._suggest_export_filename())[0] + ".epub"
+        folder = (self._remembered_dir("last_export_dir")
+                  or (os.path.dirname(self.input_file) if self.input_file else "")
+                  or self._remembered_dir("last_open_dir"))
+        with native_dialog():
+            path, _ = QFileDialog.getSaveFileName(self, i18n.T("另存新檔"),
+                                                  os.path.join(folder, default_name) if folder else default_name,
+                                                  i18n.T("EPUB 電子書 (*.epub)"))
+        if not path:
+            return False
+        if not path.lower().endswith(".epub"):
+            path += ".epub"
+        sections, front = self._epub_sections()
+        title = self.metadata_bar.book_title() or os.path.splitext(os.path.basename(path))[0]
+        author = self.metadata_bar.author()
+        language = "zh-Hans" if dominant_script(self.raw_lines) == "simp" else "zh-Hant"
+        try:
+            build_epub(path, title, author, sections, front, self._epub_cover_png(title, author), language)
+        except OSError as error:
+            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{path}\n\n{error}\n\n原本的檔案沒有被更動。")
+            return False
+        self._ui_state["last_export_dir"] = os.path.dirname(path)
+        self._show_status(i18n.T("已匯出：") + path + i18n.T(f"（EPUB，目錄 {len(sections)} 項）"), translated=True)
+        return True
+
+    def _export_split(self, strip_markers: bool | None = None) -> bool:
+        """匯出方式「每章一個檔」：目錄的每一項存成一個 TXT，放進一個以匯出檔名命名的資料夾
+        （core/file_split.py）。不算「已存檔」，也不問要不要移除舊檔。"""
+        self._sync_raw_lines()
+        self._ensure_toc_current()
+        start = (self._remembered_dir("last_export_dir")
+                 or (os.path.dirname(self.input_file) if self.input_file else "")
+                 or self._remembered_dir("last_open_dir"))
+        with native_dialog():
+            parent = QFileDialog.getExistingDirectory(self, i18n.T("選擇要放資料夾的位置"), start)
+        if not parent:
+            return False
+        folder = os.path.join(parent, os.path.splitext(self._suggest_export_filename())[0])
+        sections = split_sections(self.raw_lines, self.chapter_raw_map.values())
+        names = section_filenames([title for title, _body in sections])
+        existing = [name for name in names if os.path.exists(os.path.join(folder, name))]
+        if existing and not dialogs.confirm(
+                self, "資料夾裡已經有同名的檔案",
+                f"「{os.path.basename(folder)}」裡已經有 {len(existing)} 個同名的檔案，要取代嗎？"):
+            return False
+        strip = self._strip_markers_on_export if strip_markers is None else strip_markers
+        try:
+            os.makedirs(folder, exist_ok=True)
+            for name, (_title, body) in zip(names, sections):
+                content = "\n".join(body)
+                if strip:
+                    content, _count = strip_export_markers(content)
+                write_text_atomic(os.path.join(folder, name), content, encoding="utf-8-sig")
+        except (OSError, UnicodeError) as error:
+            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{folder}\n\n{error}")
+            return False
+        self._ui_state["last_export_dir"] = parent
+        self._show_status(i18n.T(f"已匯出 {len(names)} 個檔案到：") + folder, translated=True)
         return True
 
     def _offer_old_file_cleanup(self, new_path: str) -> str:
@@ -1508,14 +1763,22 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         dialog = FilenameDialog(self.filename_ongoing, self.filename_completed, self.filename_script,
                                 self._filename_fields(), self.metadata_bar.status(), self,
                                 strip_markers=self._strip_markers_on_export,
-                                ask_old_files=self._ask_old_files_on_export)
+                                ask_old_files=self._ask_old_files_on_export, export_format=self.export_format,
+                                split_chapters=self.export_split)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._ask_old_files_on_export = dialog.result_ask_old_files
         self.filename_ongoing, self.filename_completed = dialog.result_ongoing, dialog.result_completed
         self.filename_script = dialog.result_script
         self._strip_markers_on_export = dialog.result_strip_markers
-        self._show_status(i18n.T("匯出檔名：") + self._suggest_export_filename()
+        self._set_export_format(dialog.result_format)
+        self.export_split = dialog.result_split
+        name = self._suggest_export_filename()
+        if self.export_format == "EPUB":
+            name = os.path.splitext(name)[0] + ".epub"
+        elif self.export_split:
+            name = i18n.T("資料夾「") + os.path.splitext(name)[0] + i18n.T("」，每章一個檔")
+        self._show_status(i18n.T(f"匯出格式：{self.export_format}；") + i18n.T("匯出檔名：") + name
                           + i18n.T("；匯出時移除章節標記" if self._strip_markers_on_export else "；匯出時保留章節標記"),
                           translated=True)
 
@@ -1538,10 +1801,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @action
     def clear_all(self):
-        """清空目前檔案與所有章節標記狀態，回到剛啟動時的樣子。
+        """關閉檔案（檔名旁的「關閉檔案」）：清掉目前的本文與所有章節標記狀態，回到剛啟動時的樣子。
 
-        復原歷史整個重設（不是疊加一筆「清空後」的快照）：
-        清空之後沒有「上一步」可以復原，這是刻意的——清空前的內容已經
+        復原歷史整個重設（不是疊加一筆「關閉後」的快照）：
+        關閉之後沒有「上一步」可以復原，這是刻意的——關閉前的內容已經
         用「另存新檔」或原始檔案保住了，不需要靠復原堆疊撐著。
         """
         if not self.input_file and not self.editor.toPlainText().strip():
@@ -1549,9 +1812,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if self._document_dirty:
             if not self._confirm_discard_changes():
                 return
-        elif not dialogs.confirm(self, "清空重來", "確定要清空目前的內容與所有章節標記狀態嗎？"):
+        elif not dialogs.confirm(self, "關閉檔案", "確定要關閉目前的檔案嗎？本文與目錄都會清掉，不能用上一步復原。"):
             return
         self.close_find_bar()
+        self.stop_review()
         self._drop_line_caches()
         self.input_file = ""
         self.raw_lines = [""]
@@ -1589,7 +1853,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._document_dirty = False
         self._saved_text_hash = hash("")
         self._set_document_actions_enabled(False)
-        self._show_status("已清空，可以重新選擇檔案")
+        self._show_status("已關閉檔案，可以重新選擇檔案")
 
     def _title_check(self):
         return build_title_check(self.title_tail_allowed, self.title_tail_custom, self.max_title_length)
@@ -1621,8 +1885,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         """自訂規則的正則在期限內跑不完：這次開啟期間已停用，告訴使用者是哪一條。"""
         names = pop_timed_out_rules()
         if names:
-            self._show_status(f"自訂章節規則「{'、'.join(names)}」執行太久，已暫停使用；"
-                              "請到「自訂章節規則」修改寫法")
+            self._show_status(f"自己寫的章節規則「{'、'.join(names)}」執行太久，已暫停使用；"
+                              "請到「辨識章節」修改寫法")
 
     def _label_path(self, item) -> tuple:
         path = []
@@ -1700,6 +1964,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @timed
     def _populate_tree(self, result):
+        self._toc_fold_timer.start()
         view = self._capture_tree_view() if self.toc_full_labels else None
         self.tree.clear()
         node_map = {}
@@ -1773,20 +2038,74 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._toc_hint_template = None
         self._toc_hint_format = None
         if not any(line.strip() for line in self.raw_lines):
-            self.toc_hint.hide()
+            for bar in (self.preview_bar, self.toc_hint, self.order_hint):
+                bar.hide()
             return
+        self._update_preview_bar()
+        self._update_order_hint()
         # 行數、目錄項數、辨識規則都沒變（打字、改字）：沿用上次的判斷，不用再掃
         key = (self.input_file, len(self.raw_lines), len(self.chapter_raw_map), self.max_title_length,
                tuple(rule.get("pattern") for rule in self.user_chapter_rules))
         if key != self._toc_hint_key:
             self._toc_hint_key, self._toc_hint_result = key, self._find_toc_hint()
         text, self._toc_hint_template, self._toc_hint_format = self._toc_hint_result
-        if text is None:
+        self._toc_hint_notice = f"{self._book_key()}|hint|{self._toc_hint_template or self._toc_hint_format}"
+        if text is None or self._toc_notice_dismissed(self._toc_hint_notice):
             self.toc_hint.hide()
             return
         i18n.set_text(self.toc_hint_label, text)
         i18n.set_text(self.toc_hint_button, "查看可疑章節" if self._toc_hint_format else "加入辨識章節")
         self.toc_hint.show()
+
+    def _update_preview_bar(self):
+        """章節管理的預覽開關開著：目錄上方寫出預覽了什麼，套用到本文、取消預覽都在這裡。"""
+        names = [name for on, name in ((self._merge_titles, "自動合併標題"),
+                                       (self._infer_volumes, "自動補齊卷號與卷名")) if on]
+        if not names:
+            self.preview_bar.hide()
+            return
+        preview = self._toc_preview_lines()
+        text = "預覽中：" + "、".join(names)
+        text += f"（{'、'.join(preview[1])}）" if preview else "（這本書沒有要改的地方）"
+        i18n.set_text(self.preview_bar.label, text)
+        self.preview_apply_button.setVisible(preview is not None)
+        self.preview_bar.show()
+
+    def cancel_toc_preview(self):
+        """預覽列的「取消預覽」：關掉章節管理的兩個預覽開關，目錄回到本文原本的樣子。"""
+        self.chapter_panel.set_merge_titles(False)
+        self.chapter_panel.set_infer_volumes(False)
+        self._merge_titles = self._infer_volumes = False
+        self._rebuild_preview_toc()
+        self._show_status("已取消預覽：自動合併標題、自動補齊卷號與卷名都已關閉")
+
+    def _update_order_hint(self):
+        """有章放錯位置時，目錄上方提示「依章號重排」（跟缺章檢查的「順序錯亂」同一套判斷）。"""
+        numbers = sorted({move["number"] for result in self._find_collection_missing_from_toc()
+                          for move in result["misplaced_moves"]}) if self.chapter_records else []
+        self._order_hint_notice = f"{self._book_key()}|order|{','.join(map(str, numbers))}"
+        if not numbers or self._toc_notice_dismissed(self._order_hint_notice):
+            self.order_hint.hide()
+            return
+        shown = "、".join(map(str, numbers[:5]))
+        text = (f"第 {shown} 章的位置跟章號對不上" if len(numbers) <= 5
+                else f"第 {shown} 章等 {len(numbers)} 章的位置跟章號對不上")
+        i18n.set_text(self.order_hint.label, text)
+        self.order_hint.show()
+
+    def _book_key(self) -> str:
+        """「這本書不再提示」記在哪本書名下：有書名用書名（接續更新後檔名會換），沒有就用檔名。"""
+        return self.metadata_bar.title_input.text().strip() or os.path.basename(self.input_file or "")
+
+    def _toc_notice_dismissed(self, key: str) -> bool:
+        return key in self._ui_state.get("dismissed_toc_notices", [])
+
+    def _dismiss_toc_notice(self, key):
+        if not key:
+            return
+        kept = [item for item in self._ui_state.get("dismissed_toc_notices", []) if item != key]
+        self._ui_state["dismissed_toc_notices"] = (kept + [key])[-200:]
+        self._show_status("這本書不再顯示這個提示")
 
     def _handled_title_rows(self) -> set:
         """目錄裡的標題，加上「自動合併標題」預覽合併掉的那幾行：找「像標題卻不在目錄」的行（可疑章節、
@@ -1855,11 +2174,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     @action
     def _accept_toc_hint(self):
         if self._toc_hint_format:
-            fmt = self._toc_hint_format
-            self.open_rules_dialog()
-            dialog = self._tool_dialogs.get("rules")
-            if dialog is not None:
-                dialog.show_candidates(fmt)
+            self.open_suspect_chapters(self._toc_hint_format)
             return
         if not self._toc_hint_template:
             return
@@ -1879,7 +2194,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         是推算出來的（UI_RULES.md）。"""
         tokens = self.tokens
         tooltip = i18n.T("推算出來的卷：本文沒有這個卷標題。\n"
-                         "確認沒問題後，在「章節管理」按「套用到本文」寫進本文。")
+                         "確認沒問題後，在目錄上方的預覽列按「套用到本文」寫進本文。")
         for item in list(self.virtual_volume_items) + list(self.split_volume_items):
             font = item.font(0)
             font.setItalic(True)
@@ -1887,7 +2202,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             item.setForeground(0, QColor(tokens.marker_text))
             item.setToolTip(0, tooltip)
         merged_tip = i18n.T("接上了下一行的章名（預覽）：本文還沒改。\n"
-                            "確認沒問題後，在「章節管理」按「套用到本文」寫進本文。")
+                            "確認沒問題後，在目錄上方的預覽列按「套用到本文」寫進本文。")
         for item in self.absorbed_title_items:
             font = item.font(0)
             font.setItalic(True)
@@ -2114,9 +2429,59 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                  for node in group["nodes"]), key=lambda entry: entry[0])
             report["anomaly_rows"] = [(self.chapter_raw_map.get(group["nodes"][index], 0), number, kind, guess)
                                       for index, number, kind, guess in report["anomalies"]]
+            report["misplaced_moves"] = self._misplaced_moves(group, report["misplaced"])
             results.append(report)
             previous[group["work"]] = report["last"]
         return results
+
+    def _misplaced_moves(self, group, misplaced) -> list:
+        """缺章檢查的「順序錯亂」：每一章從哪一行搬到哪一行（ChapterOrderDialog、move_chapter_blocks 用）。"""
+        if not misplaced:
+            return []
+        title_rows = sorted(set(self.chapter_raw_map.values()))
+
+        def chapter_end(row):
+            later = title_rows[bisect.bisect_right(title_rows, row):]
+            return later[0] if later else len(self.raw_lines)
+
+        nodes, numbers = group["nodes"], group["numbers"]
+        moves = []
+        for index, number, where, target in misplaced:
+            start = self.chapter_raw_map.get(nodes[index])
+            target_row = self.chapter_raw_map.get(nodes[target])
+            if start is None or target_row is None:
+                continue
+            now = f"第 {numbers[index - 1]} 章後面" if index else "最前面"
+            if where == "after":
+                destination, to = chapter_end(target_row), f"第 {numbers[target]} 章後面"
+            else:
+                destination, to = target_row, f"第 {numbers[target]} 章前面"
+            moves.append({"title": self.toc_full_labels.get(nodes[index], nodes[index].text(0)),
+                          "number": number, "row": start, "start": start, "end": chapter_end(start),
+                          "destination": destination, "now": now, "to": to})
+        return moves
+
+    @action
+    def reorder_misplaced_chapters(self):
+        """缺章檢查結果的「依章號重排」：勾選的章整章搬到章號該在的位置。"""
+        self._sync_raw_lines()
+        self._ensure_toc_current()
+        moves = [move for result in self._find_collection_missing_from_toc() for move in result["misplaced_moves"]]
+        if not moves:
+            dialogs.info(self, "沒有放錯位置的章", "目前的目錄沒有章號放錯位置的章。")
+            return
+        moves.sort(key=lambda move: (move["destination"], move["number"]))
+        dialog = ChapterOrderDialog(self.raw_lines, moves, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.checked_moves()
+        if not chosen:
+            return
+        lines = move_chapter_blocks(self.raw_lines, [(move["start"], move["end"], move["destination"])
+                                                     for move in chosen])
+        self.editor.setExtraSelections([])
+        self._replace_text_from_tool(lines)
+        self._show_status(f"已依章號搬動 {len(chosen)} 章，可以按 Ctrl+Z 復原")
 
     def _missing_problems_from_structure(self, result) -> list:
         """直接用 core 的結構結果算缺章，不需要先把目錄畫出來。"""
@@ -2143,6 +2508,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                     str(a) if a == b else f"{a}–{b}" for a, b in result["missing_ranges"]))
             if result["duplicates"]:
                 details.append("重複 " + compact_number_ranges(result["duplicates"]))
+            if result.get("misplaced"):
+                details.append("順序錯亂 " + compact_number_ranges(
+                    sorted(int(number) for _index, number, _where, _target in result["misplaced"])))
             if details:
                 prefix = "" if result["label"] == "全書" else f"{result['label']}："
                 problems.append(prefix + "、".join(details))
@@ -2158,7 +2526,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @timed
     def _refresh_missing_report(self):
-        if not self._missing_report_active:
+        # 章節管理卡片收起來時不算（看不到）；再打開卡片時重算一次
+        if not self._missing_report_active or not self.chapter_panel.isVisible():
             return
         results = self._find_collection_missing_from_toc()
         self._missing_groups = [result["nodes"] for result in results]
@@ -2169,6 +2538,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             "start_unverified": any(result["start_unverified"] for result in results),
             "groups": [{"label": result["label"], "entries": self._report_entries(result, uncollected)}
                        for result in results],
+            "words": [entry for entry in self._word_counts()[0] if entry["note"]],
         })
 
     def _report_entries(self, result, uncollected) -> list:
@@ -2188,6 +2558,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             rows = [row for row, value, _node in nodes if value == number]
             entries.append({"kind": "dup", "start": number, "end": number, "row": rows[1] if len(rows) > 1 else 0,
                             "found": []})
+        for move in result.get("misplaced_moves", []):
+            entries.append({"kind": "misplaced", "start": int(move["number"]), "end": int(move["number"]),
+                            "row": move["row"], "found": [], "now": move["now"], "to": move["to"]})
         for row, number, kind, guess in result.get("anomaly_rows", []):
             entries.append({"kind": kind, "start": int(number), "end": guess, "row": row, "found": [],
                             "text": self.raw_lines[row].strip()[:16] if 0 <= row < len(self.raw_lines) else ""})
@@ -2250,6 +2623,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     def _on_missing_report_link(self, link: str):
         """點結果裡的缺口：跳到缺口前最後一章；點重複：跳到第二次出現的那一章。"""
+        if link == "reorder":
+            self.reorder_misplaced_chapters()
+            return
+        if link == "duplicates":
+            self.open_duplicate_chapters_dialog()
+            return
+        if link == "words":
+            self.open_word_count_dialog()
+            return
         if link.startswith("line|"):
             self._jump_to_line(int(link.split("|")[1]) + 1)
             return
@@ -2282,11 +2664,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             widget.setVisible(widget is panel)
         if panel is not self.find_bar:
             self.editor.setExtraSelections([])      # 關掉搜尋面板就把反白收掉
-        self.format_toggle_button.setChecked(panel is self.options_panel)
-        self.chapter_toggle_button.setChecked(panel is self.chapter_panel)
-        self.content_toggle_button.setChecked(panel is self.content_panel)
-        self.find_toggle_button.setChecked(panel is self.find_bar)
+        self.side_rail.set_active({self.options_panel: "options", self.chapter_panel: "chapter",
+                                   self.content_panel: "content", self.find_bar: "find"}.get(panel))
         self.side_card.setVisible(panel is not None)
+        if panel is self.chapter_panel:
+            self._refresh_missing_report()
         if was_open != (panel is not None):
             self._resize_cards_for_side_panel(sizes, opening=panel is not None)
 
@@ -2303,7 +2685,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._update_minimum_width(settle=True)
         side = max(self._side_width, self.side_card.minimumSizeHint().width())
         margins = self.splitter.parentWidget().layout().contentsMargins()
-        available = max(self.splitter.width(), self.minimumWidth() - margins.left() - margins.right())
+        rail = self.side_rail.sizeHint().width() + self.splitter.parentWidget().layout().spacing()
+        available = max(self.splitter.width(), self.minimumWidth() - margins.left() - margins.right() - rail)
         editor = max(self.editor_card.minimumSizeHint().width(), available - side - tree - 2 * handle)
         tree = max(self.tree_card.minimumSizeHint().width(), available - side - editor - 2 * handle)
         self.splitter.setSizes([side, tree, editor])
@@ -2319,7 +2702,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                 _settle(card)
         margins = self.splitter.parentWidget().layout().contentsMargins()
         needed = (sum(max(card.minimumSizeHint().width(), card.minimumWidth()) for card in cards)
-                  + self.splitter.handleWidth() * (len(cards) - 1) + margins.left() + margins.right())
+                  + self.splitter.handleWidth() * (len(cards) - 1) + margins.left() + margins.right()
+                  + self.side_rail.sizeHint().width() + self.splitter.parentWidget().layout().spacing())
         screen = self.screen()
         if screen is not None:
             needed = min(needed, screen.availableGeometry().width())
@@ -2349,31 +2733,57 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             panel.setMinimumWidth(width)
         self._update_minimum_width(settle=True)
 
+    def _toc_fully_expanded(self) -> bool:
+        """有子項目的節點（卷）都展開著：沒有卷的目錄算展開（按了也沒東西可摺）。"""
+        stack = [self.tree.topLevelItem(index) for index in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            if item.childCount():
+                if not item.isExpanded():
+                    return False
+                stack.extend(item.child(index) for index in range(item.childCount()))
+        return True
+
+    def _toggle_toc_folding(self):
+        if self._toc_fully_expanded():
+            self.tree.collapseAll()
+        else:
+            self.tree.expandAll()
+        self._update_toc_fold_button()
+
+    def _update_toc_fold_button(self):
+        expanded = self._toc_fully_expanded()
+        self.toc_fold_button.set_icon_name("fold-vertical" if expanded else "unfold-vertical")
+        self.toc_fold_button.setToolTip("全部摺疊" if expanded else "全部展開")
+
     def _toggle_side_panel(self, panel: QWidget):
         self._set_active_side_panel(None if panel.isVisible() else panel)
+
+    def _on_side_rail_toggled(self, key: str):
+        if key == "find":
+            self.toggle_find_bar()
+            return
+        self._toggle_side_panel({"options": self.options_panel, "chapter": self.chapter_panel,
+                                 "content": self.content_panel}[key])
 
     # ------------------------------------------------------------------
     # 格式選項／一鍵排版
     # ------------------------------------------------------------------
 
     @action
-    def apply_formatting(self):
-        if not self.raw_lines:
-            return
-        self._sync_raw_lines()
-        options = self.options_panel.current_options(self.structure_mode)
-        self._apply_format_options(options, "已套用格式到全文，可以按 Ctrl+Z 復原")
-
-    @action
     def one_click_format(self):
-        """一鍵排版：不管面板目前勾了什麼，直接套用一組固定的常用組合——
-        段落之間不空行、標題前兩行後一行、段首兩個全形空格、編號間隔用半形空格
-        （使用者按過「保存到一鍵排版」就用存下來的組合）。不做合併下行標題：
+        """一鍵排版：照排版設定卡片目前的設定排整份（卡片就是一鍵排版的設定，改了自動記住；
+        第一次用是內建的常用組合，見 _default_one_click_options）。不做合併下行標題：
         那是猜測，要在章節管理預覽過再套用。
 
         排版前先檢查缺章與高信心廣告：排版會重排整份文字，事後比較難回頭
         確認原本的問題，所以有狀況時先問過再動手。"""
         if not self.editor.toPlainText().strip():
+            return
+        options = self.options_panel.current_options(self.structure_mode)
+        if not describe_options(options) and not self._auto_apply_preview:
+            dialogs.info(self, "沒有開啟任何項目",
+                         "排版設定目前沒有開啟任何項目，先打開要套用的開關或選擇下拉選項。")
             return
         self._sync_raw_lines()
         # 「自動套用到一鍵排版」：章節管理的預覽先寫進本文，跟排版算同一步；取消時整個退回
@@ -2389,7 +2799,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             self._sync_raw_lines()
             self._ensure_toc_current()
             message = "已套用一鍵排版（" + "、".join(preview[1]) + "），可以按 Ctrl+Z 復原"
-        options = self._one_click_options()
         # 排版前的檢查直接用排版那一次的辨識結果，不另外再建一次結構（大檔每次要好幾秒）。
         applied = self._apply_format_options(
             options, message, confirm=self._confirm_one_click_warnings)
@@ -2397,20 +2806,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             if before is not None:
                 self._restore_state(before)
             self._show_status("已取消一鍵排版")
-            return
-        self.options_panel.reset_to_defaults()
 
-    def _one_click_options(self) -> FormatOptions:
-        """一鍵排版的組合：使用者按過「保存到一鍵排版」就用存下來的，否則用內建的。"""
-        saved = self._ui_state.get("one_click_options")
-        if isinstance(saved, dict):
-            # 合併下行標題不在一鍵排版做（在章節管理預覽再套用）：存下來的組合裡有 merge_title 也不用
-            known = {field.name for field in dataclasses.fields(FormatOptions)} - {"structure", "merge_title"}
-            values = {key: value for key, value in saved.items() if key in known}
-            try:
-                return FormatOptions(**values, structure=self.structure_mode)
-            except TypeError:
-                pass
+    def _default_one_click_options(self) -> FormatOptions:
+        """還沒有自己的一鍵排版設定時用的常用組合：段落之間不空行、標題前兩行後一行、段首兩個全形空格、
+        編號間隔用半形空格。"""
         return FormatOptions(
             remove_extra_empty=True,
             add_empty=True,
@@ -2420,17 +2819,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             structure=self.structure_mode,
         )
 
-    @action
-    def save_one_click_options(self):
-        """把排版設定目前的開關與下拉存成一鍵排版的組合。"""
-        options = self.options_panel.current_options(self.structure_mode)
-        saved = dataclasses.asdict(options)
-        saved.pop("structure", None)
-        self._ui_state["one_click_options"] = saved
-        items = describe_options(options)
-        self._show_status(i18n.T("一鍵排版改用目前的設定：") + ("、".join(i18n.T(item) for item in items)
-                                                           if items else i18n.T("（沒有勾選任何項目）")),
-                          translated=True)
+    def _save_one_click_settings(self):
+        """排版設定卡片改了任何一項：記下來（關程式前也會再存一次，見 _collect_ui_state）。"""
+        self._ui_state["one_click_format"] = self.options_panel.options_state()
 
     def _confirm_one_click_warnings(self, result) -> bool:
         """有缺章或高信心廣告時彈窗確認；沒有狀況就直接放行。
@@ -2442,7 +2833,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             warnings.append("缺章：" + "；".join(problems))
         ads = self._high_confidence_ads()
         if ads:
-            warnings.append(f"高信心廣告：{len(ads)} 處（可先到「內容檢查 → 掃描無關連內容」刪除）")
+            warnings.append(f"高信心廣告：{len(ads)} 處（可先到「內容檢查 → 掃描非正文內容」刪除）")
         if not warnings:
             return True
         return dialogs.confirm(
@@ -2608,11 +2999,20 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_escape(self):
-        """Esc：先取消剪下狀態，沒有的話才收起尋找面板。"""
+        """Esc 一次收一樣，由近到遠：取消剪下 → 結束逐筆檢查 → 收起尋找取代 → 清掉本文上的跳轉底色
+        （從視窗點一列跳過來的）→ 收起開著的功能卡片（功能卡片沒有自己的收起鈕）。"""
         if self._cut_state is not None:
             self.cancel_cut()
             return
-        self.close_find_bar()
+        if self.review_bar.is_active():
+            self.stop_review()
+            return
+        if self.find_bar.isVisible():
+            self.close_find_bar()
+        elif self.editor.extraSelections():
+            self.editor.setExtraSelections([])
+        elif self.side_card.isVisible():
+            self._set_active_side_panel(None)
 
     def toggle_find_bar(self):
         if not self.raw_lines:

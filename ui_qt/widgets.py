@@ -427,7 +427,7 @@ class AppWidgetPolisher(QObject):
     3. 下拉框的最小寬度不再由最長的選項決定：否則卡片拉到最窄時，下拉框
        撐不下去就會連同整個面板內容一起超出卡片邊界。放不下時 Qt 會自動
        截斷顯示中的文字，展開的清單仍然完整。
-    5. 按鈕不接受滑鼠點擊取得焦點（只接受 Tab）：「測試目前文件」這類一次動作的
+    5. 按鈕不接受滑鼠點擊取得焦點（只接受 Tab）：「產生」這類一次動作的
        按鈕按完會一直掛著焦點框，看起來像還開著。按鈕行為的規則見 UI_RULES.md。
     6. 捲動區一律預留直向捲軸的位置（見 reserve_scrollbar_gutter）。
     7. 點得下去的元件用手指游標。"""
@@ -775,7 +775,7 @@ class IconTextButton(QPushButton):
 
 
 class HoverIconButton(QPushButton):
-    """卡片裡的一般按鈕（掃描無關連內容、合併重複章節…）：滑鼠移上去時圖示跟文字
+    """卡片裡的一般按鈕（掃描非正文內容、辨識章節…）：滑鼠移上去時圖示跟文字
     一起變色（文字色由樣式表的 QPushButton:hover 負責），停用時圖示變淡。"""
 
     def __init__(self, icon_name: str, text: str, *, size: int = 16, parent=None):
@@ -812,6 +812,88 @@ class HoverIconButton(QPushButton):
         super().changeEvent(event)
 
 
+class RailButton(QToolButton):
+    """左側圖示列的一格：圖示在上、兩個字的名稱在下，名稱一直顯示（不靠滑鼠提示）。
+    開著的那一格用「開啟中」的顏色；不接受焦點，點了焦點留在本文。"""
+
+    def __init__(self, icon_name: str, text: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("railButton")
+        self.setText(text)
+        self.setCheckable(True)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.setIconSize(QSize(20, 20))
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._icon_name = icon_name
+        self._color = self._hover_color = self._active_color = self._disabled_color = "#000000"
+
+    def set_colors(self, color: str, hover_color: str, active_color: str, disabled_color: str):
+        self._color, self._hover_color = color, hover_color
+        self._active_color, self._disabled_color = active_color, disabled_color
+        self._refresh_icon()
+
+    def _refresh_icon(self):
+        if not self.isEnabled():
+            color = self._disabled_color
+        elif self.isChecked():
+            color = self._active_color
+        else:
+            color = self._hover_color if self.underMouse() else self._color
+        self.setIcon(icons.make_icon(self._icon_name, color, 20))
+
+    def setChecked(self, checked: bool):
+        super().setChecked(checked)
+        self._refresh_icon()
+
+    def nextCheckState(self):
+        # 按下去開關哪張卡片由圖示列決定（一次只開一張），按鈕自己不切換
+        pass
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._refresh_icon()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._refresh_icon()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.EnabledChange:
+            self._refresh_icon()
+        super().changeEvent(event)
+
+
+class SideRail(QFrame):
+    """最左邊直立的圖示列：一格一張功能卡片，按一下打開、再按一下收起，一次只開一張。
+    貼在卡片旁邊，不用把滑鼠移到上方的工具列。items：[(代號, 圖示, 名稱)]。"""
+
+    toggled = Signal(str)      # 按了哪一格（代號）
+
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 6, 5, 6)
+        layout.setSpacing(4)
+        self.buttons: dict[str, RailButton] = {}
+        for key, icon_name, text in items:
+            button = RailButton(icon_name, text)
+            button.clicked.connect(lambda _checked=False, key=key: self.toggled.emit(key))
+            self.buttons[key] = button
+            layout.addWidget(button)
+        layout.addStretch(1)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+
+    def set_active(self, key: str | None):
+        for name, button in self.buttons.items():
+            button.setChecked(name == key)
+
+    def set_colors(self, tokens):
+        for button in self.buttons.values():
+            button.set_colors(tokens.icon, tokens.icon_hover, tokens.checked_text, tokens.text_faint)
+
+
 class Editor(QPlainTextEdit):
     """章節結構（force_lv1/2、忽略集合…）跟正文綁在一起，Qt 內建的
     QTextDocument undo 只認得文字、不認得這些——所以 Ctrl+Z／Ctrl+Shift+Z
@@ -823,7 +905,7 @@ class Editor(QPlainTextEdit):
     # Ctrl＋滾輪調整預覽字級：+1 放大、-1 縮小；Ctrl+0 送 0 代表回到 100%。
     zoom_requested = Signal(int)
     # 把 TXT 檔拖進本文：交給主視窗開檔，而不是把檔案路徑當文字插進本文。
-    file_dropped = Signal(str)
+    file_dropped = Signal(list)         # 拖進來的檔案（一次拖好幾個檔時是合併）
     file_drag_entered = Signal()        # 拖著檔案進到本文：開著檔案時主視窗會蓋上放置區
 
     def __init__(self, parent=None):
@@ -868,7 +950,7 @@ class Editor(QPlainTextEdit):
         files = self._dropped_files(event)
         if files:
             event.acceptProposedAction()
-            self.file_dropped.emit(files[0])
+            self.file_dropped.emit(files)
             return
         super().dropEvent(event)
 
@@ -1427,46 +1509,6 @@ def snippet_button(parent, line_edit, groups, tooltip: str) -> IconButton:
     return button
 
 
-class GroupCheckBox(QCheckBox):
-    """A section title that is itself the checkbox for a group of checkboxes (detect types, check items): a click
-    checks all of them — or, when all are checked, unchecks all; some checked shows the partial mark. Saves a row
-    of "select all / none" buttons next to the result table's own. A click on the title changes the members
-    silently and emits members_changed once, so the window rescans once instead of once per member."""
-
-    members_changed = Signal()
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(text, parent)
-        self.setObjectName("groupCheck")
-        self.setTristate(True)
-        self._members: list = []
-
-    def add_member(self, box: QCheckBox):
-        self._members.append(box)
-        box.toggled.connect(self._sync)
-        self._sync()
-
-    def nextCheckState(self):
-        on = self.checkState() != Qt.CheckState.Checked
-        for box in self._members:
-            box.blockSignals(True)
-            box.setChecked(on)
-            box.blockSignals(False)
-        self._sync()
-        self.members_changed.emit()
-
-    def _sync(self, *_args):
-        count = sum(box.isChecked() for box in self._members)
-        if count and count == len(self._members):
-            state = Qt.CheckState.Checked
-        else:
-            state = Qt.CheckState.PartiallyChecked if count else Qt.CheckState.Unchecked
-        self.blockSignals(True)
-        self.setCheckState(state)
-        self.blockSignals(False)
-
-
-
 def dropped_paths(event) -> list:
     """拖進來的本機檔案路徑（拖的是文字不是檔案就是空的）。"""
     mime = event.mimeData()
@@ -1479,7 +1521,7 @@ class DropOverlay(QWidget):
     """拖檔案進視窗時蓋在上面的放置區：每一區一個動作，放在哪一區就做哪一件，不用再跳一個詢問視窗。
     拖出視窗（或按 Esc 取消拖曳）就收起來。zones：[(代號, 標題, 說明)]，由左到右排。"""
 
-    dropped = Signal(str, str)        # 放在哪一區（代號）、檔案路徑
+    dropped = Signal(str, list)       # 放在哪一區（代號）、檔案路徑（一次拖好幾個檔時不只一個）
 
     def __init__(self, zones, parent=None):
         super().__init__(parent)
@@ -1550,7 +1592,112 @@ class DropOverlay(QWidget):
         self.hide()
         if paths and key:
             event.acceptProposedAction()
-            self.dropped.emit(key, paths[0])
+            self.dropped.emit(key, paths)
+
+
+class StayOpenMenu(QMenu):
+    """勾選式的選單：點一個選項只切換勾選、選單不關，可以一次勾好幾個（點選單外面才關）。"""
+
+    def mouseReleaseEvent(self, event):
+        action = self.activeAction()
+        if action is not None and action.isEnabled() and action.isCheckable():
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class ChoiceMenuButton(QPushButton):
+    """一組多選（偵測類型、檢查項目）收成一顆下拉按鈕：按鈕寫「全部 8 項」「6／8 項」，
+    點開是一排可以連續勾的選項，最上面「全部」一次全選或全不選（不攤開一整片勾選框，表格多出高度）。
+    items：[(代號, 名稱, 說明)]；說明放在選項的滑鼠提示（選單裡的文字只放名稱）。"""
+
+    changed = Signal()
+
+    def __init__(self, items, checked=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("menuButton")
+        self._menu = StayOpenMenu(self)
+        self._menu.setToolTipsVisible(True)
+        self._all = self._menu.addAction(i18n.T("全部"))
+        self._all.setCheckable(True)
+        self._all.triggered.connect(self._on_all)
+        self._menu.addSeparator()
+        self._actions = {}
+        for key, label, hint in items:
+            action = self._menu.addAction(i18n.T(label))
+            action.setCheckable(True)
+            action.setChecked(checked is None or key in checked)
+            if hint:
+                action.setToolTip(i18n.T(hint))
+            action.triggered.connect(self._on_item)
+            self._actions[key] = action
+        self.setMenu(self._menu)
+        self._refresh()
+
+    def checked(self) -> set:
+        return {key for key, action in self._actions.items() if action.isChecked()}
+
+    def _on_all(self):
+        everything = len(self.checked()) < len(self._actions)
+        for action in self._actions.values():
+            action.setChecked(everything)
+        self._refresh()
+        self.changed.emit()
+
+    def _on_item(self):
+        self._refresh()
+        self.changed.emit()
+
+    def _refresh(self):
+        count, total = len(self.checked()), len(self._actions)
+        self._all.setChecked(count == total)
+        text = f"全部 {total} 項" if count == total else ("未選" if not count else f"{count}／{total} 項")
+        i18n.set_text(self, text)
+
+
+class NoticeBar(QFrame):
+    """目錄上方的提示列（漏掉的章節寫法、章號順序錯亂、預覽中）：一句話＋一排按鈕，
+    closable 時右上角有 ✕（「這本書不再提示」，由呼叫端記住）。"""
+
+    dismissed = Signal()
+
+    def __init__(self, closable: bool = False, parent=None):
+        super().__init__(parent)
+        self.setObjectName("tocHint")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 8 if closable else 12, 10)
+        layout.setSpacing(8)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        self.label = QLabel("")
+        self.label.setWordWrap(True)
+        top.addWidget(self.label, 1)
+        self.close_button = None
+        if closable:
+            self.close_button = IconButton("x", "這本書不再提示", size=14)
+            self.close_button.clicked.connect(self._dismiss)
+            top.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(top)
+        self._buttons = QHBoxLayout()
+        self._buttons.setSpacing(6)
+        self._buttons.addStretch(1)
+        layout.addLayout(self._buttons)
+        self.hide()
+
+    def add_button(self, text: str, primary: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        if primary:
+            button.setObjectName("primary")
+        self._buttons.insertWidget(self._buttons.count() - 1, button)
+        return button
+
+    def _dismiss(self):
+        self.hide()
+        self.dismissed.emit()
+
+    def set_colors(self, tokens):
+        if self.close_button is not None:
+            self.close_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
 
 
 class ScrollEndButtons(QFrame):

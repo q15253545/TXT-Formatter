@@ -19,6 +19,8 @@ class FormatOptions:
     merge_title: bool = False
     # 整理段落換行：固定欄寬的硬換行接回同一段
     reflow_paragraphs: bool = False
+    # 長段落：不拆分／只拆高信心／拆高、中信心（core/paragraph_split.SPLIT_CHOICES）
+    long_paragraph: str = "不拆分"
     normalize_punct: bool = False
     halfwidth_punct: bool = False
     # 對話引號：保留原樣／「」『』／“”‘’（core/text_format.QUOTE_STYLES）

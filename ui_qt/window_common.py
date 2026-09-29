@@ -22,9 +22,10 @@ TYPING_CHECKPOINT_DELAY_MS = 450
 DEFAULT_STRUCTURE_MODE = "自動判斷"
 
 # 能開的檔案：TXT，和 Word（.docx，只取文字）；存檔一律是 TXT
-OPENABLE_EXTENSIONS = (".txt", ".docx")
-OPEN_FILE_FILTER = "文字檔 (*.txt *.docx);;所有檔案 (*)"
+OPENABLE_EXTENSIONS = (".txt", ".docx", ".epub")
+OPEN_FILE_FILTER = "文字檔 (*.txt *.docx *.epub);;所有檔案 (*)"
 WORD_ENCODING = "docx"        # detected_encoding 的值：Word 檔沒有文字編碼
+EPUB_ENCODING = "epub"        # EPUB 也一樣（裡面的 XHTML 自己宣告編碼）
 
 
 def openable(path: str) -> bool:
@@ -50,7 +51,7 @@ MARKER_GUIDE = [
 MIN_WINDOW_WIDTH = 680
 MIN_WINDOW_HEIGHT = 420       # 書籍資料收起時；展開時再加上它的高度（_update_minimum_height）
 # 章節管理的預覽開關：狀態列說明的結尾
-_PREVIEW_NOTE = "（預覽，按「套用到本文」才寫入）"
+_PREVIEW_NOTE = "（預覽，在目錄上方按「套用到本文」才寫入）"
 
 
 class _LayoutWatcher(QObject):
@@ -88,11 +89,12 @@ WARM_NOW_LINES = 20000
 WARM_WAITING_SLICE = 0.04
 # 工具列縮成「只有圖示」的門檻。兩個數字不一樣是為了留遲滯：在邊界附近
 # 拖動視窗時才不會一直來回切換。
-COMPACT_TOOLBAR_WIDTH = 1330
-FULL_TOOLBAR_WIDTH = 1390
+COMPACT_TOOLBAR_WIDTH = 880
+FULL_TOOLBAR_WIDTH = 940
 COMPACT_ARROW_WIDTH = 26     # 只顯示圖示時，選擇檔案、匯出 TXT 旁邊的箭頭寬度
 _NUMBER_WITHOUT_UNIT = re.compile(r"^第\s*(" + CN_NUM_FLOAT_PATTERN + r")[\s　]+\S")
 PENDING_LINE_MAP_LIMIT = 32     # 行號位移累積幾次就折成一張表（見 _push_line_map）
+MERGE_WARN_BYTES = 30_000_000   # 合併的檔合計超過這麼大先問（合成一份後排版、檢查都很慢）
 
 
 # 行尾持久標記（連同前面的空白），畫面上要隱藏；規則與 core.title_markers 一致。

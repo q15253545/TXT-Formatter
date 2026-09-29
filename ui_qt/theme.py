@@ -23,7 +23,6 @@ class Tokens:
     text_muted: str      # 次要文字／說明文字
     text_faint: str      # 佔位文字、停用狀態
     accent: str          # 強調色（主要按鈕、勾選框、開關、焦點框）
-    accent_hover: str
     accent_text: str     # 強調色按鈕上的文字顏色
     selection_bg: str     # 目錄樹、表格、清單的選取列
     shadow: str           # 卡片陰影顏色（含透明度）
@@ -75,7 +74,7 @@ SIMPLE_BLUE = Tokens(
     name="simple_blue", label="簡約藍", is_dark=False,
     bg="#F5F7FA", surface="#FFFFFF", surface_hover="#F6F9FF", surface_active="#F1F5FF", border="#E2E7EE",
     text="#243044", text_muted="#647084", text_faint="#A9B1BE",
-    accent="#3869D8", accent_hover="#315CBE", accent_text="#FFFFFF",
+    accent="#3869D8", accent_text="#FFFFFF",
     selection_bg="#EDF3FF", shadow="rgba(36, 48, 68, 40)", icon="#243044", icon_hover="#3869D8",
     warn_bg="#FBE7E7", warn_text="#B4383C", diff_text="#D92D20", ok_bg="#E4F4EA", ok_text="#1F7A4C",
     find_match_bg="#DCE8FC", find_current_bg="#B6CEF5", jump_bg="#EAF1FD",
@@ -95,7 +94,7 @@ SIMPLE_WHITE = Tokens(
     name="simple_white", label="簡約白", is_dark=False,
     bg="#F9F9F9", surface="#FFFFFF", surface_hover="#F3F3F3", surface_active="#ECECEC", border="#E5E5E5",
     text="#0D0D0D", text_muted="#5D5D5D", text_faint="#A3A3A3",
-    accent="#0D0D0D", accent_hover="#333333", accent_text="#FFFFFF",
+    accent="#0D0D0D", accent_text="#FFFFFF",
     selection_bg="#ECECEC", shadow="rgba(0, 0, 0, 28)", icon="#5D5D5D", icon_hover="#0D0D0D",
     warn_bg="#FDECEC", warn_text="#C0362C", diff_text="#D92D20", ok_bg="#E7F5EC", ok_text="#1F7A4C",
     find_match_bg="#E1EBF7", find_current_bg="#C3D8F2", jump_bg="#EEF3FA",
@@ -115,7 +114,7 @@ LIGHT_BROWN = Tokens(
     name="light_brown", label="淺棕色", is_dark=False,
     bg="#F1E7D2", surface="#FBF4E4", surface_hover="#F6EDDA", surface_active="#EADDC5", border="#E4DCC9",
     text="#4A4130", text_muted="#8C826C", text_faint="#B5AB95",
-    accent="#0284C8", accent_hover="#0373AE", accent_text="#FFFFFF",
+    accent="#0284C8", accent_text="#FFFFFF",
     selection_bg="#F0E5CC", shadow="rgba(74, 65, 48, 30)", icon="#837961", icon_hover="#8C6A3F",
     warn_bg="#F6DCCF", warn_text="#A8432A", diff_text="#C8341F", ok_bg="#DDEBD5", ok_text="#3F7A3A",
     find_match_bg="#C9DDF3", find_current_bg="#8EBDF0", jump_bg="#DCEAF7",
@@ -135,7 +134,7 @@ DARK = Tokens(
     name="dark", label="深色", is_dark=True,
     bg="#1C1714", surface="#261F1B", surface_hover="#302824", surface_active="#3A312C", border="#3A322D",
     text="#EDE4DB", text_muted="#A39890", text_faint="#6F655E",
-    accent="#A85A48", accent_hover="#BA6A56", accent_text="#FFF4EE",
+    accent="#A85A48", accent_text="#FFF4EE",
     selection_bg="#3F3530", shadow="rgba(0, 0, 0, 140)", icon="#BDB0A6", icon_hover="#A85A48",
     warn_bg="#4A2622", warn_text="#F2A493", diff_text="#FF8F73", ok_bg="#27331F", ok_text="#A8CF8E",
     find_match_bg="#4E2B25", find_current_bg="#8A3B30", jump_bg="#3E211D",
@@ -155,7 +154,7 @@ BLACK = Tokens(
     name="black", label="純黑", is_dark=True,
     bg="#0A0A0A", surface="#151515", surface_hover="#2E2E2E", surface_active="#333333", border="#262626",
     text="#C8C8C8", text_muted="#7A7A7A", text_faint="#555555",
-    accent="#7A7A7A", accent_hover="#8A8A8A", accent_text="#FFFFFF",
+    accent="#7A7A7A", accent_text="#FFFFFF",
     selection_bg="#303030", shadow="rgba(0, 0, 0, 200)", icon="#A8A8A8", icon_hover="#F0F0F0",
     warn_bg="#3A1A1C", warn_text="#FF8A8F", diff_text="#FF6B72", ok_bg="#16241A", ok_text="#8CCB9A",
     find_match_bg="#2A2A2A", find_current_bg="#3E3E3E", jump_bg="#222222",
@@ -296,7 +295,7 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         font-size: 12px;
         color: {t.text_muted};
     }}
-    /* 章節管理裡「檢查缺章」的結果區：比卡片底色深一階的小區塊。 */
+    /* 章節管理裡「檢查章節」的結果區：比卡片底色深一階的小區塊。 */
     #reportPane {{
         background: {t.bg};
         border: 1px solid {t.border};
@@ -493,6 +492,29 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         color: {t.text_faint};
         border-color: {t.button_border};
         background: {t.button_bg};
+    }}
+    /* 左側圖示列（widgets.SideRail）：圖示在上、名稱在下；開著的那一格用「開啟中」的顏色。 */
+    QToolButton#railButton {{
+        background: transparent;
+        color: {t.control_text};
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 6px 2px 5px 2px;
+        min-width: 44px;
+        font-size: 12px;
+    }}
+    QToolButton#railButton:hover {{
+        background: {t.surface_hover};
+        color: {t.icon_hover};
+    }}
+    QToolButton#railButton:checked {{
+        background: {t.checked_bg};
+        border-color: {t.checked_border};
+        color: {t.checked_text};
+    }}
+    QToolButton#railButton:disabled {{
+        color: {t.text_faint};
+        background: transparent;
     }}
     /* 檔案資訊列上的「書籍資料」展開鈕：跟工具列不同，不畫框、只用文字＋箭頭。 */
     QPushButton#barToggle {{
@@ -740,6 +762,17 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         text-decoration: underline;
     }}
 
+    /* 多行的輸入框（繁簡轉換的詞表）：跟一般輸入框同一種框（本文編輯器的 QPlainTextEdit 沒有框） */
+    QPlainTextEdit#wordList {{
+        background: {t.surface};
+        border: 1px solid {t.border};
+        border-radius: 9px;
+        padding: 6px 8px;
+    }}
+    QPlainTextEdit#wordList:hover, QPlainTextEdit#wordList:focus {{
+        border: 1px solid {t.icon_hover};
+    }}
+
     /* 工具視窗表格下面的前後文預覽：跟表格同一種框 */
     QTextEdit#contextPreview {{
         background: {t.surface};
@@ -810,11 +843,6 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         background: {t.accent};
         border-color: {t.accent};
         image: url({check_path});
-    }}
-    /* 區塊標題本身是勾選框（偵測類型、檢查項目）：字跟 #appTitle 一樣，部分勾選畫「－」 */
-    QCheckBox#groupCheck {{
-        font-size: 15px;
-        font-weight: 600;
     }}
     QCheckBox::indicator:indeterminate {{
         background: {t.accent};
@@ -966,7 +994,7 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         background: {t.selection_bg};
         color: {t.tree_selected_text};
     }}
-    /* 自訂章節規則 → 辨識格式的分類清單：跟目錄樹同一套 hover／選取色 */
+    /* 辨識章節的組合清單：跟目錄樹同一套 hover／選取色 */
     /* 辨識章節左邊的組合清單：每一列是自己畫的（名稱、信心、開關），選到的那一列加淡底 */
     /* 目錄是空的時候，目錄卡片最上面那段提示（加成辨識章節的組合） */
     /* 目錄右下角的到最前面／到最後面：視窗底色的小膠囊（跟白色卡片有色差），浮在清單上 */
@@ -997,6 +1025,15 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     QLabel#dropZoneText {{
         color: {t.text_muted};
         background: transparent;
+    }}
+    /* 本文上方的逐筆檢查列：跟目錄上方的提示同一種淡底，看得出「正在檢查」 */
+    QFrame#reviewBar {{
+        background: {t.selection_bg};
+        border: none;
+        border-bottom: 1px solid {t.border};
+    }}
+    QLabel#reviewTitle {{
+        font-weight: 600;
     }}
     QFrame#tocHint {{
         background: {t.selection_bg};

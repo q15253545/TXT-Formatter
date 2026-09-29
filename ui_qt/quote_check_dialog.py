@@ -11,17 +11,17 @@ import re
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-    QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
+    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
 )
 
 from core.quote_check import (
-    QUOTE_PROBLEM_LABELS, SEPARATOR_LENGTH, apply_fixes, scan_quote_problems, separator_styles,
+    QUOTE_PROBLEM_LABELS, SEPARATOR_LENGTH, WORD_PROBLEM_LABELS, apply_fixes, scan_quote_problems, separator_styles,
 )
 from . import dialogs, i18n
-from .sortable_table import PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
+from .sortable_table import HeaderCheckBox, PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
 from .theme import active_tokens
-from .widgets import ContextPreview, Divider, GroupCheckBox, ScopeToggle, dialog_frame, flow_container, size_dialog
+from .widgets import ChoiceMenuButton, ContextPreview, ScopeToggle, dialog_frame, size_dialog
 
 # 每種問題該怎麼看待，寫在勾選框的提示裡。
 _KIND_TIPS = {
@@ -34,6 +34,9 @@ _KIND_TIPS = {
                       "網址、英文裡的點不會動。",
     "dash_run": "段落裡太長的破折號（——————、——-、中文裡的 ----）改成兩格「——」；"
                 "~~~~、～～～～ 改成一個「～」。整行的分隔線、英文與網址裡的不會動。",
+    "masked": "中文字旁邊的一到四個星號（**），多半是被遮掉的字；只列出來。",
+    "homoglyph": "英文字裡混著長得像英文字母的西里爾、希臘字母，改回英文字母。",
+    "noise_dot": "中文字之間、章號裡的句點（大.走一步、第.1808章），拿掉。",
 }
 
 # 「分隔線不一致」不是勾選框：由下拉選單決定要不要統一、統一成哪一種
@@ -215,7 +218,7 @@ class QuoteCheckDialog(QDialog):
         self.result_lines: list | None = None
         self.applied_count = 0
 
-        root, footer = dialog_frame(self, intro="找出引號沒成對、對話斷行、重複標點；有正確寫法的可以勾選後一次修正。")
+        root, footer = dialog_frame(self, intro="找出引號、斷行、標點與可疑字詞的問題，有正確寫法的可以勾選後一次修正。")
         root.setSpacing(12)
 
         # 「只檢查選取的章節」是範圍，所有工具視窗都放在最上面（預設關著，見 ScopeToggle）。
@@ -223,46 +226,33 @@ class QuoteCheckDialog(QDialog):
         self.scope_check.toggled.connect(self._run_scan)
         root.addWidget(self.scope_check)
 
-        self.kind_group = GroupCheckBox("檢查項目")
-        self.kind_group.members_changed.connect(self._refresh)
-        root.addWidget(self.kind_group)
-
-        kind_box, kind_flow = flow_container(uniform=True)
-        self._kind_checks = {}
-        for key, label in QUOTE_PROBLEM_LABELS.items():
-            if key == _SEPARATOR_KIND:
-                continue
-            checkbox = QCheckBox(label)
-            checkbox.setChecked(enabled_kinds is None or key in enabled_kinds)
-            checkbox.setToolTip(_KIND_TIPS.get(key, ""))
-            checkbox.toggled.connect(self._refresh)
-            self._kind_checks[key] = checkbox
-            self.kind_group.add_member(checkbox)
-            kind_flow.addWidget(checkbox)
-        root.addWidget(kind_box)
-        # 分隔線統一：同一本書裡 --- 和 === 混用時，由使用者決定要不要統一、統一成哪一種。
-        # 只列這本書出現過的樣式（附行數，多的在前）；選了之後，其他樣式的分隔線才列成「分隔線不一致」。
-        separator_row = QHBoxLayout()
-        separator_row.setSpacing(10)
+        # 檢查項目、可疑字詞（不是標點，另成一組）、分隔線統一成：三個設定同一列，各自一顆下拉，表格多出高度。
+        # 分隔線統一：同一本書裡 --- 和 === 混用時，由使用者決定要不要統一、統一成哪一種；只列這本書出現過的
+        # 樣式（附行數，多的在前），選了之後，其他樣式的分隔線才列成「分隔線不一致」。
+        settings_row = QHBoxLayout()
+        settings_row.setSpacing(10)
+        self.kind_buttons = {}
+        for title, labels in (("檢查項目", {key: label for key, label in QUOTE_PROBLEM_LABELS.items()
+                                            if key != _SEPARATOR_KIND}),
+                              ("可疑字詞", WORD_PROBLEM_LABELS)):
+            label = QLabel(title)
+            label.setObjectName("fileLabel")
+            settings_row.addWidget(label)
+            button = ChoiceMenuButton([(key, text, _KIND_TIPS.get(key, "")) for key, text in labels.items()],
+                                      None if enabled_kinds is None else set(enabled_kinds))
+            button.changed.connect(self._refresh)
+            self.kind_buttons[title] = button
+            settings_row.addWidget(button)
+            settings_row.addSpacing(8)
         separator_label = QLabel("分隔線統一成")
         separator_label.setObjectName("fileLabel")
-        separator_row.addWidget(separator_label)
+        settings_row.addWidget(separator_label)
         self.separator_combo = QComboBox()
         self.separator_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.separator_combo.currentIndexChanged.connect(self._run_scan)
-        separator_row.addWidget(self.separator_combo)
-        separator_row.addStretch(1)
-        root.addLayout(separator_row)
-        root.addWidget(Divider())
-
-        select_row = QHBoxLayout()
-        select_row.setSpacing(8)
-        for label, slot in (("勾選可自動修正的項目", self._check_fixable), ("全部取消", self._uncheck_all)):
-            button = QPushButton(label)
-            button.clicked.connect(slot)
-            select_row.addWidget(button)
-        select_row.addStretch(1)
-        root.addLayout(select_row)
+        settings_row.addWidget(self.separator_combo)
+        settings_row.addStretch(1)
+        root.addLayout(settings_row)
 
         self.status_label = QLabel("尚未檢查")
         self.status_label.setObjectName("fileLabel")
@@ -276,6 +266,11 @@ class QuoteCheckDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         # 「內容」與「修正後」都是長文字：內容先給表格寬度的四成，修正後吃剩下的。
+        # 總勾選框只管可以自動修正的項目（只是提醒的沒有勾選框）
+        self.header_check = HeaderCheckBox(
+            self.table, lambda: (len(self._checked), sum(1 for index in self._visible
+                                                          if self._all_problems[index]["fix"])),
+            self._set_all_checked, _FIX_COLUMN)
         setup_columns(self.table, {_FIX_COLUMN: "contents", _KIND_COLUMN: "contents", _TEXT_COLUMN: 0.45})
         self._diff_delegate = _DiffDelegate(self.table)
         self.table.setItemDelegateForColumn(_TEXT_COLUMN, self._diff_delegate)
@@ -301,7 +296,7 @@ class QuoteCheckDialog(QDialog):
     # ------------------------------------------------------------------
 
     def enabled_kinds(self) -> set:
-        return {key for key, box in self._kind_checks.items() if box.isChecked()}
+        return set().union(*(button.checked() for button in self.kind_buttons.values()))
 
     def separator_target(self):
         """使用者選的分隔線符號；不統一時是 None。"""
@@ -429,6 +424,7 @@ class QuoteCheckDialog(QDialog):
             text += f"。有 {wrapped} 段話分成好幾行、引號到最後一行才關（每行開頭沒有補引號），這些沒有列出"
         i18n.set_text(self.status_label, text)
         self.fix_button.setEnabled(bool(self._checked))
+        self.header_check.refresh()
 
     def _on_item_changed(self, item: QTableWidgetItem):
         if item.column() != _FIX_COLUMN:
@@ -463,12 +459,8 @@ class QuoteCheckDialog(QDialog):
             self.preview.show_rows(self._raw_lines, row, row, tokens.text)
         return problem
 
-    def _check_fixable(self):
-        self._checked |= {index for index in self._visible if self._all_problems[index]["fix"]}
-        self._refresh()
-
-    def _uncheck_all(self):
-        self._checked = set()
+    def _set_all_checked(self, checked: bool):
+        self._checked = {index for index in self._visible if self._all_problems[index]["fix"]} if checked else set()
         self._refresh()
 
     def _apply_fixes(self):

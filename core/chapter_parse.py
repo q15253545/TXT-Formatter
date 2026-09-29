@@ -7,11 +7,16 @@ from functools import lru_cache
 from . import title_blocks
 from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 
-CN_NUM_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零]+"
+# 大寫數字（第壹章、第拾貳章）也算：cn_numerals 轉得了，辨識章節的積木也有「壹貳參」
+CN_UPPER_DIGITS = "壹貳贰參叁肆伍陸陆柒捌玖拾佰仟"
+CN_NUM_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零" + CN_UPPER_DIGITS + r"]+"
 CN_NUM_FLOAT_PATTERN = CN_NUM_PATTERN + r"(?:[\.．]\d+)?"
-CN_NUM_FLOAT_OPT_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零]*(?:[\.．]\d+)?"
+CN_NUM_FLOAT_OPT_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零" + CN_UPPER_DIGITS + r"]*(?:[\.．]\d+)?"
 
 SEP = r"[ \t:：]+"
+# 一個標題涵蓋好幾章：「第38-40章」「第三十八——四十章」「第5至6章」
+RANGE_SEP = r"(?:[-－~～—–]{1,2}|至|到)"
+MAX_RANGE_SPAN = 10
 
 # 章節前面常見、但沒有任何意義的前綴：網站匯出的 TXT 常在每一章前面加上
 # 「正文」「VIP章節」。規則會把「第N章」前面的字當成篇名／書名保留下來
@@ -69,7 +74,8 @@ LV1_B_REGEX = re.compile(
 
 COMBO_LV2_REGEX = re.compile(
     r"^[\s【\[\(-]*" + ARC_PATTERN + VOL_PATTERN +
-    rf"第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})(?:\s*[、，,]\s*(?P<also>[0-9０-９]{{1,4}}))?\s*(?P<unit>[章回節节折幕])"
+    rf"第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})(?:\s*[、，,]\s*(?P<also>[0-9０-９]{{1,4}})"
+    rf"|\s*{RANGE_SEP}\s*(?P<range_end>{CN_NUM_PATTERN}))?\s*(?P<unit>[章回節节折幕])"
     r"[\s】\]\)-]*(?P<title>.*)$", re.IGNORECASE)
 
 COMBO_LV2_EXTRA_REGEX = re.compile(
@@ -180,6 +186,9 @@ def weak_candidate_to_user_rule(candidate):
 
 # 章號裡把 0 打成英文字母 o（「第2oo章」、「第1O5章」）：至少有一個真的數字才換，
 # 單獨的「第o章」不算。
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+# 「第.1808章」：章號前面插了句點（防轉載），辨識時先拿掉
+_LEADING_DOT = re.compile(r"(?<=第)(\s*)[.．]\s*(?=[0-9０-９])")
 _OCR_ZERO = re.compile(r"(?<=第)(\s*)([0-9][0-9oO]*[oO][0-9oO]*)(?=\s*[章回節节])")
 
 
@@ -187,9 +196,27 @@ _LEADING_CHAPTER = re.compile(rf"^\s*第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})\s*
                              r"[\s:：、·\-—]*(?P<title>.*)$")
 
 
+def _valid_range(start, end) -> bool:
+    return float(start).is_integer() and start < end <= start + MAX_RANGE_SPAN
+
+
+_RANGE_TITLE = re.compile(rf"第\s*({CN_NUM_PATTERN})\s*{RANGE_SEP}\s*({CN_NUM_PATTERN})\s*[章回節节折幕]")
+
+
+def chapter_range_end(text):
+    """「第38-40章」這種一個標題涵蓋好幾章的：回傳最後一章的號碼（40）；不是就回傳 None。"""
+    match = _RANGE_TITLE.search(text or "")
+    if not match:
+        return None
+    start, end = chinese_to_arabic(match.group(1)), chinese_to_arabic(match.group(2))
+    return int(end) if _valid_range(start, end) else None
+
+
 def parse_lv2(line):
-    # 自動辨識只收正規格式（第N章／回／節…、番外）；英文 Chapter N 是「自訂章節規則」的常用格式。
+    # 自動辨識只收正規格式（第N章／回／節…、番外）；英文 Chapter N 是辨識章節的常用寫法。
     # COMBO_LV2_NUM_REGEX 給連續編號、保留標題間隔這些「已經確定是標題」之後的處理使用。
+    if "." in line or "．" in line:
+        line = _LEADING_DOT.sub(lambda match: match.group(1), line)
     if "o" in line or "O" in line:
         line = _OCR_ZERO.sub(lambda match: match.group(1) + match.group(2).replace("o", "0").replace("O", "0"), line)
     for regex, prefix in ((COMBO_LV2_REGEX, "第"), (COMBO_LV2_EXTRA_REGEX, "番外")):
@@ -203,8 +230,10 @@ def parse_lv2(line):
                 if outer and outer.group("unit") == fields.get("unit"):
                     return ("", "", "第", chinese_to_arabic(outer.group("number")), outer.group("unit"),
                             outer.group("title"))
-            return (_clean_arc(fields["arc"]), fields["volume"], prefix,
-                    chinese_to_arabic(fields["number"]) if fields["number"] else 0.0,
+            number = chinese_to_arabic(fields["number"]) if fields["number"] else 0.0
+            if fields.get("range_end") and not _valid_range(number, chinese_to_arabic(fields["range_end"])):
+                return None
+            return (_clean_arc(fields["arc"]), fields["volume"], prefix, number,
                     fields.get("unit", "章"), fields["title"])
     weak = parse_weak_numbered_title(line)
     if weak:
@@ -221,7 +250,7 @@ def parse_lv1(line):
     if m and m.group("arc") and _CHAPTER_IN_ARC.search(m.group("arc")):
         return None
     # 只收「第N卷／部／篇／集」：不帶「第」的「集三千寵愛於一身」會被當成卷，那種寫法是
-    # 「自訂章節規則」的常用格式（要求編號後面有分隔）。LV1_A_REGEX 的另一種語序給連續編號用。
+    # 辨識章節的常用寫法（要求編號後面有分隔）。LV1_A_REGEX 的另一種語序給連續編號用。
     if m and m.group("number"):
         fields = m.groupdict(default="")
         return (_clean_arc(fields["arc"]), fields["prefix"] or "第", chinese_to_arabic(fields["number"]),
@@ -283,14 +312,6 @@ def build_title_tail_regex(allowed_chars=DEFAULT_TITLE_TAIL_ALLOWED, extra_chars
     if blocked:
         parts.insert(0, f"[{re.escape(''.join(sorted(blocked)))}]")
     return re.compile(f"(?:{'|'.join(parts)})\\s*$")
-
-
-def title_tail_group(text: str, extra_chars: str = ""):
-    """標題最後一個字屬於哪一組（回傳顯示用的符號）；不是清單上的標點就回傳 None。"""
-    text = text.rstrip()
-    if not text:
-        return None
-    return next((symbol for symbol, chars, _name in title_tail_groups(extra_chars) if text[-1] in chars), None)
 
 
 class TitleCheck:
@@ -394,7 +415,7 @@ def looks_like_heading(text: str, max_length: int = MAX_TITLE_LENGTH) -> bool:
     return heading_word(text) is not None and not not_a_heading(text)
 
 
-# 自動辨識認得的字：（代號, 顯示, 這一組包含的寫法）。使用者可以在「自訂章節規則 → 辨識格式」
+# 自動辨識認得的字：（代號, 顯示, 這一組包含的寫法）。使用者可以在「辨識章節」
 # 關掉其中幾個，例如關掉「節」「部」，正文裡的「第一節課」「第一部手機」就不會被當成章節。
 CHAPTER_WORDS = (("章", "第N章", ("章",)), ("回", "第N回", ("回",)), ("節", "第N節", ("節", "节")),
                  ("折", "第N折", ("折",)), ("幕", "第N幕", ("幕",)), ("番外", "番外", ("番外",)))
@@ -429,19 +450,19 @@ _NOTE_TITLE_WORDS = re.compile(r"请假|請假|月票|求票|推荐票|推薦票
 
 # 單位字跟後面的字合起來是一個詞：「第二部分，是…」「第一集團軍」「第三季度」不是卷，
 # 「第三回合」「第一節課」「第二節自習課」「第一節晚自習」「第五節車廂」是正文的句子開頭，不是章節
-_UNIT_WORD = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*"
+_UNIT_WORD = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零" + CN_UPPER_DIGITS + r"]{1,8}\s*"
                         r"(?:部[分门門队隊长長落位]|集[团團中合体體]|篇幅|卷[入起子轴軸]|季[度节節末赛賽]|回合"
                         r"|[节節](?:[一-鿿]{0,2}[课課]|晚自[习習]|[车車][厢廂]))")
 
 
 # 單位後面直接接只會出現在句子中間的詞、後面還有逗號：「第三章會晚一點，先去山路」「第一章就寫好了，…」
-_SENTENCE_AFTER_UNIT = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*[章回節节]"
+_SENTENCE_AFTER_UNIT = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零" + CN_UPPER_DIGITS + r"]{1,8}\s*[章回節节]"
                                   r"(?:會|会|就|的時候|的时候|已經|已经)[^，,]{0,15}[，,]")
 
 
 # 季 is also a surname: 「第一季點頭，道：…」 is a character named 第一季. A season heading is written
 # 「第一季」「第一季 山路」「第一季：山路」, never with the text glued to the unit
-_GLUED_SEASON = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零]{1,8}\s*季"
+_GLUED_SEASON = re.compile(r"^[\s【\[(（]*第\s*[0-9０-９一二兩两三四五六七八九十百千萬万〇零" + CN_UPPER_DIGITS + r"]{1,8}\s*季"
                            r"(?![完終终結结])[一-鿿A-Za-z]")
 
 
@@ -613,8 +634,18 @@ def ten_as_zero_reading(number_text):
     return int(chinese_to_arabic(text[:-2])) * 10 + int(chinese_to_arabic(text[-1]))
 
 
+_NOISE_DOTS = re.compile(r"[.．]")
+
+
 def resolve_chapter_number(number, number_text, previous):
-    """號碼有兩種讀法時，選跟前一章（previous）接得比較上的那個。"""
+    """號碼有兩種讀法時，選跟前一章（previous）接得比較上的那個。
+
+    網站防轉載會在章號裡插句點（「第1.817章」）：拿掉句點剛好接上前一章（第 1816 章）才當成干擾，
+    其他的小數章（「第1.5章」）照舊。"""
+    if previous and number_text and not float(number).is_integer():
+        digits = _NOISE_DOTS.sub("", number_text.strip()).translate(_FULLWIDTH_DIGITS)
+        if digits.isdigit() and int(digits) == previous + 1:
+            return float(int(digits))
     alternative = ten_as_zero_reading(number_text)
     if alternative is None or not previous:
         return number
@@ -624,7 +655,8 @@ def resolve_chapter_number(number, number_text, previous):
 
 def original_number_text(text, unit):
     """取出標題中該單位對應的原始編號文字，供保留原本的數字系統。"""
-    match = re.search(r"(?:第|番外)\s*(" + CN_NUM_FLOAT_PATTERN + r")\s*" + re.escape(unit), text)
+    match = re.search(r"(?:第|番外)\s*(" + CN_NUM_FLOAT_PATTERN + r"(?:\s*" + RANGE_SEP + r"\s*" + CN_NUM_PATTERN
+                      + r")?)\s*" + re.escape(unit), text)
     if match:
         return match.group(1)
     weak = parse_weak_numbered_title(text)

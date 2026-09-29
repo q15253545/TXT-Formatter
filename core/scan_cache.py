@@ -1,6 +1,6 @@
 """開檔後在背景先把各種掃描的「逐行判斷」算好。
 
-掃描無關連內容、作者感言、標點校對、本文可疑章節都照「行的內容」快取每一行的判斷，
+非正文內容、標點校對、可疑章節都照「行的內容」快取每一行的判斷，
 第一次開視窗時才算會卡一兩秒（大檔十幾萬行）；先在背景算好，開視窗時就只剩查表。
 """
 
@@ -8,6 +8,7 @@ import gc
 
 from .ad_scan import _LINE_PROFILES, _line_profile, compact_ad_text, forum_line_strength, meta_line_kind
 from .chapter_parse import heading_number, heading_word, parse_weak_numbered_title
+from .duplicate_chapters import _text_sentences
 from .quote_check import _check_line
 from .title_markers import strip_persistent_title_marker
 from .user_rules import preset_match
@@ -39,11 +40,6 @@ def warm_other_caches(lines):
 WARM_PHASES = (warm_ad_caches, warm_other_caches)
 
 
-def warm_line_caches(lines):
-    for phase in WARM_PHASES:
-        phase(lines)
-
-
 def freeze_line_caches():
     """整本算完後把現有的物件移出垃圾回收的掃描範圍。快取裡是十幾萬個字串、tuple，
     每次完整回收都要全部掃一遍（大檔約 0.1 秒），剛好碰上開視窗、打字就多卡一下；
@@ -58,7 +54,7 @@ def clear_line_caches():
     gc.unfreeze()
     _LINE_PROFILES.clear()
     for cached in (compact_ad_text, forum_line_strength, meta_line_kind, _check_line, preset_match, heading_word, heading_number,
-                   parse_weak_numbered_title):
+                   parse_weak_numbered_title, _text_sentences):
         cached.cache_clear()
     # Collect now: unfrozen garbage (the last book's cyclic leftovers) would otherwise sit in the oldest
     # generation until this book's warm-up freezes it again, and pile up with every file opened.

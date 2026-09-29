@@ -1,13 +1,13 @@
-"""可以點標題列排序的表格（掃描無關連內容、標點校對、本文可疑章節共用）。
+"""可以點標題列排序的表格（非正文內容、標點校對、可疑章節共用）。
 
-「自訂章節規則」的規則清單刻意不用：那張表的順序就是規則的套用優先順序。
+（辨識章節的組合清單不是表格，不用這個。）
 
 點欄位標題依序切換：遞增 → 遞減 → 回到原本順序（文件中的順序）。
 第三下回到原本順序很重要：這幾張表的預設順序本身就有意義，排過之後要
 回得去。
 
 排序後「第幾列」就不再等於「第幾筆資料」，所以每一列的每一格都存著它在
-原始清單裡的索引（INDEX_ROLE）；呼叫端一律用 data_index()／row_of_index()
+原始清單裡的索引（INDEX_ROLE）；呼叫端一律用 data_index()
 換算，不能再直接拿 row 去索引資料。
 
 不用 QTableWidget.setSortingEnabled(True)：開著它的時候，程式每填一格表格
@@ -18,7 +18,9 @@ from collections import Counter
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics
-from PySide6.QtWidgets import QHeaderView, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import QCheckBox, QHeaderView, QMenu, QPushButton, QTableWidget, QTableWidgetItem
+
+from . import i18n
 
 INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 100
 SORT_ROLE = int(Qt.ItemDataRole.UserRole) + 101
@@ -66,6 +68,85 @@ def limit_rows(indices, priority=None):
     order = {index: position for position, index in enumerate(indices)}
     chosen = sorted(indices, key=lambda index: (priority(index), order[index]))[:TABLE_ROW_LIMIT]
     return sorted(chosen, key=order.__getitem__), total
+
+
+class HeaderCheckBox(QCheckBox):
+    """勾選欄標題列上的總勾選框（一顆就能全選、全部取消，不另外放兩顆按鈕）：
+    全部勾著時打勾、勾了一部分畫「－」、都沒勾空白；按一下：沒全勾就全勾，全勾了就全部取消。
+    counts()：回傳（已勾, 可以勾的總數），只算目前列出來、可以勾的那幾列；
+    set_all(bool)：全勾或全部取消，由呼叫端改自己的勾選並重畫表格（之後呼叫 refresh）。
+    勾選欄的標題文字往右讓出方框的位置（標題列的點擊排序照常）。"""
+
+    GAP = 6
+
+    def __init__(self, table: QTableWidget, counts, set_all, column: int = 0):
+        header = table.horizontalHeader()
+        super().__init__(header)
+        self._table, self._counts, self._set_all, self._column = table, counts, set_all, column
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.clicked.connect(self._on_clicked)
+        header.sectionResized.connect(lambda *_args: self._place())
+        header.sectionMoved.connect(lambda *_args: self._place())
+        header.geometriesChanged.connect(self._place)
+        table.horizontalScrollBar().valueChanged.connect(lambda _value: self._place())
+        header.installEventFilter(self)
+        self._pad_title()
+        self.refresh()
+
+    def _pad_title(self):
+        """勾選欄的標題靠左、前面空出方框的寬度。"""
+        item = self._table.horizontalHeaderItem(self._column)
+        if item is None:
+            item = QTableWidgetItem("")
+            self._table.setHorizontalHeaderItem(self._column, item)
+        text = item.text().strip()
+        space = QFontMetrics(self._table.horizontalHeader().font()).horizontalAdvance(" ") or 4
+        indent = self.sizeHint().width() + self.GAP
+        item.setText(" " * -(-indent // space) + text if text else "")
+        item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    def nextCheckState(self):
+        pass        # 按下去的結果由 _on_clicked 決定，不照 Qt 的三態順序轉
+
+    def _on_clicked(self):
+        checked, total = self._counts()
+        if total:
+            self._set_all(checked < total)
+        self.refresh()
+
+    def refresh(self):
+        checked, total = self._counts()
+        self.setEnabled(total > 0)
+        self.setCheckState(Qt.CheckState.Unchecked if not checked else
+                           Qt.CheckState.Checked if checked >= total else Qt.CheckState.PartiallyChecked)
+        self._place()
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            # 以自己為 context：視窗已經關掉、這個勾選框被刪掉時，排好的呼叫會自動取消
+            QTimer.singleShot(0, self, self._place)
+        return False
+
+    def _place(self):
+        header = self._table.horizontalHeader()
+        size = self.sizeHint()
+        # 跟表格裡的勾選方框對齊：方框畫在格子左邊、留跟標題文字一樣的內距
+        x = header.sectionViewportPosition(self._column) + 8
+        self.setGeometry(x, (header.height() - size.height()) // 2, size.width(), size.height())
+        self.setVisible(not header.isSectionHidden(self._column) and header.height() > 0)
+
+
+def confidence_menu_button(check_levels) -> QPushButton:
+    """「依信心勾選 ▾」：只勾高信心／勾高、中信心／全部勾選（取代三顆「勾選某信心」按鈕）。
+    check_levels(set)：把勾選換成那幾種信心的全部候選（原本的勾選不保留）。"""
+    button = QPushButton("依信心勾選")
+    button.setObjectName("menuButton")
+    menu = QMenu(button)
+    for label, levels in (("只勾高信心", {"高"}), ("勾高、中信心", {"高", "中"}), ("全部勾選", {"高", "中", "低"})):
+        menu.addAction(i18n.T(label), lambda levels=levels: check_levels(set(levels)))
+    button.setMenu(menu)
+    return button
 
 
 class PreviewTable(QTableWidget):
@@ -272,10 +353,3 @@ def resort(table: QTableWidget):
 def data_index(table: QTableWidget, row: int) -> int:
     item = table.item(row, 0)
     return int(item.data(INDEX_ROLE)) if item is not None and item.data(INDEX_ROLE) is not None else row
-
-
-def row_of_index(table: QTableWidget, index: int) -> int:
-    for row in range(table.rowCount()):
-        if data_index(table, row) == index:
-            return row
-    return -1

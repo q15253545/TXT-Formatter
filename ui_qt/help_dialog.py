@@ -42,10 +42,10 @@ class HelpDialog(QDialog):
         self._section("章節標記", "由使用者手動標記並寫入本文，便於排版；可設定匯出時移除",
                       self._table([(f"<span style='color:{tokens.marker_text}'>{html.escape(mark)}</span>", detail)
                                    for mark, detail in marker_guide]))
-        self._section("本文字色", "僅影響顯示，與正文無關", self._table([
+        self._section("本文字色", "逐筆檢查時標出來，僅影響顯示；章節標記、預覽隨時顯示", self._table([
             (f"<span style='color:{color}'>{name}</span>", detail)
             for color, name, detail in (
-                (tokens.ad_mark_text, "無關連內容", "網址、發布頁、QQ／微信、小說來源、重複段落、論壇轉貼資訊"),
+                (tokens.ad_mark_text, "廣告與網頁字元", "網址、發布頁、QQ／微信、小說來源、論壇轉貼資訊、重複段落"),
                 (tokens.note_mark_text, "作者感言與作品資訊", "作者的話、作者／字數／發表平台、分隔線"),
                 (tokens.marker_text, "非原文內容", "顯示中的章節標記、章節管理開關的預覽"),
             )]))

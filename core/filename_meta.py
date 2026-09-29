@@ -10,9 +10,9 @@ _FILENAME_UNSAFE_REGEX = re.compile(r'[\\/:*?"<>|]')
 
 def extract_filename_metadata(filename):
     """從常見 TXT 檔名擷取書名、作者與連載狀態。"""
-    # 只移除真正的 .txt／.docx 副檔名。呼叫端可能已經去過一次副檔名，
+    # 只移除真正的 .txt／.docx／.epub 副檔名。呼叫端可能已經去過一次副檔名，
     # 不能再用 splitext 把 [example.org]後半部誤當成副檔名。
-    base = re.sub(r"(?i)\.(?:txt|docx)$", "", os.path.basename(filename).strip()).strip()
+    base = re.sub(r"(?i)\.(?:txt|docx|epub)$", "", os.path.basename(filename).strip()).strip()
     author_match = re.search(r"作者\s*[：:]\s*(.+?)(?=(?:[◎（(【\[]|$))", base)
     author = author_match.group(1).strip(" _-，,。") if author_match else ""
 

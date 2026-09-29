@@ -145,11 +145,10 @@ class TocEditMixin:
 
     @action
     def apply_toc_preview(self):
-        """「章節管理 → 套用到本文」：把開關預覽的結果真的寫進本文，可以按 Ctrl+Z 復原。"""
+        """目錄上方預覽列的「套用到本文」：把開關預覽的結果真的寫進本文，可以按 Ctrl+Z 復原。"""
         preview = self._toc_preview_lines()
         if preview is None:
-            self._show_status("沒有可以套用的內容：先打開章節管理的預覽開關（合併標題、補齊卷號與卷名），"
-                              "目錄上會先顯示預覽")
+            self._show_status("沒有可以套用的內容：預覽開關（自動合併標題、自動補齊卷號與卷名）沒有要改的地方")
             return
         lines, done = preview
         self._replace_text_from_tool(lines)

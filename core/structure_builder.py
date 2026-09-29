@@ -27,14 +27,18 @@ from .text_format import (
 from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 from .chapter_parse import (
     CN_NUM_FLOAT_PATTERN, INLINE_SPACE_REGEX,
-    CN_NUM_PATTERN, parse_lv1, parse_lv2, parse_special, parse_mixed_volume_chapter_header,
+    CN_NUM_PATTERN, RANGE_SEP, chapter_range_end, parse_lv1, parse_lv2, parse_special, parse_mixed_volume_chapter_header,
     is_weak_numbered_title, is_valid_auto_title, strip_title_body, volume_dash_number,
     preserve_title_separator, original_number_text, resolve_chapter_number, heading_word, heading_words, title_length_limit, too_long_for_title,
     word_key, not_a_heading,
 )
 from .collection import analyze_collection_structure
+from .paragraph_split import SPLIT_OFF, split_long_paragraphs
 from .reflow import collapse_inline_spaces, reflow_lines
 from .user_rules import match_user_chapter_rule
+
+
+_RANGE_TEXT = re.compile(r"(" + CN_NUM_PATTERN + r")\s*(" + RANGE_SEP + r")\s*(" + CN_NUM_PATTERN + r")")
 
 
 def format_custom_title(options: FormatOptions, extra_prefix: str, prefix_tag: str, num_val: float,
@@ -54,7 +58,13 @@ def format_custom_title(options: FormatOptions, extra_prefix: str, prefix_tag: s
             final_num = str(num_val)
         else:
             num_int = int(num_val)
-            if num_style == "中文數字": final_num = arabic_to_chinese(num_int)
+            # 「第38-40章」：範圍的兩端一起換寫法，連接符號照原文
+            span = _RANGE_TEXT.fullmatch(str(number_text or "").strip())
+            if span and num_style in ("中文數字", "阿拉伯數字"):
+                convert = arabic_to_chinese if num_style == "中文數字" else str
+                final_num = (convert(num_int) + span.group(2)
+                             + convert(int(chinese_to_arabic(span.group(3)))))
+            elif num_style == "中文數字": final_num = arabic_to_chinese(num_int)
             elif num_style == "阿拉伯數字": final_num = str(num_int)
             else: final_num = number_text or str(num_int)
         tag = f"{prefix_tag}{final_num}{unit_tag}"
@@ -505,7 +515,8 @@ def render_collection_title(ctx: BuildContext, state: RenderState, apply_format,
         _, _, prefix, number, unit, body_title = data
         body_title = strip_title_body(body_title)
         if state.opts.keep_number or not apply_format:     # only layout rewrites the number
-            number_match = re.search(r'第\s*(' + CN_NUM_FLOAT_PATTERN + r')\s*' + re.escape(unit), line_str)
+            number_match = re.search(r'第\s*(' + CN_NUM_FLOAT_PATTERN + r'(?:\s*' + RANGE_SEP + r'\s*'
+                                     + CN_NUM_PATTERN + r')?)\s*' + re.escape(unit), line_str)
             number_text = number_match.group(1) if number_match else str(int(number))
             chapter_title = f'第{number_text}{unit} {body_title}'.strip()
         else:
@@ -760,7 +771,7 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
                 # 只比數字不足以證明是同一章：「第1章 開始」與「第1節 插曲」
                 # 是兩個不同的標題；「甲篇 第1章」與「乙篇 第1章」也是。
                 # 單位、前綴、篇名、卷名都一致，而且章名一樣（或其中一個只有章號）才算重複；
-                # 「第12章 風起」「第12章 雲湧」多半是作者編號打錯，兩章都留著，交給「合併重複章節」勾選。
+                # 「第12章 風起」「第12章 雲湧」多半是作者編號打錯，兩章都留著，交給「重複章節」勾選。
                 if ch_num > 0 and _same_chapter_identity(p_data, arc, vol, ch_prefix, ch_num, ch_unit) \
                         and _same_title_body(ch_body, strip_title_body(p_body)):
                     dup_cands.append((nxt, p_body, peek))
@@ -808,10 +819,12 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
         # 情況才把原始編號文字傳進去，其餘維持原本的阿拉伯數字寫法（最新章
         # 會用在建議檔名上，「第2章」比「第二章」好排序）。
         zero_number_text = original_number_text(chosen_raw, ch_unit) if not ch_num else None
+        # 「第38-40章」：最新章是第 40 章
+        range_end = chapter_range_end(chosen_raw) if ch_num else None
         state.last_found_ch = ctx.format_custom_title(
-            extra_prefix, ch_prefix, ch_num, ch_unit, '', apply_format, zero_number_text).strip()
+            extra_prefix, ch_prefix, range_end or ch_num, ch_unit, '', apply_format, zero_number_text).strip()
     if ch_num:
-        state.last_chapter_number = ch_num
+        state.last_chapter_number = chapter_range_end(chosen_raw) or ch_num
     parent = state.current_lv1_node if state.current_lv1_node else ''
     item_id = ctx.tree.insert(parent, 'end', text=chosen_title)
     record_title(ctx, state, item_id, chosen_title, state.processed_render_lines, apply_format,
@@ -1143,15 +1156,23 @@ def _finish_virtual_volumes(ctx: BuildContext, state: RenderState, virtual: dict
 
 
 def _build_with_reflow(ctx: BuildContext, write_text: bool) -> StructureResult:
-    """排版選項「整理段落換行」：先認出章節標題，把標題之間正文的硬換行接回去，再照常排版。
+    """排版選項「整理段落換行」「長段落」：先認出章節標題，把標題之間正文的硬換行接回去、
+    太長的段落拆開，再照常排版。
 
     回傳結果的 chapter_raw_map 換算回「整理前」的行號，呼叫端（整份排版、只排選取章節）
     拿來對照舊行號的方式不用改。"""
-    plain = replace(ctx.options, reflow_paragraphs=False)
+    plain = replace(ctx.options, reflow_paragraphs=False, long_paragraph=SPLIT_OFF)
     probe = build_document_structure(replace(ctx, options=plain), apply_format=False, write_text=False)
     protected = (set(probe.chapter_raw_map.values()) | set(ctx.force_lv1_chapters)
                  | set(ctx.force_lv2_chapters) | set(ctx.auto_titles))
-    new_lines, row_map = reflow_lines(ctx.raw_lines, protected)
+    if ctx.options.reflow_paragraphs:
+        new_lines, row_map = reflow_lines(ctx.raw_lines, protected)
+    else:
+        new_lines, row_map = list(ctx.raw_lines), {row: row for row in range(len(ctx.raw_lines))}
+    if ctx.options.long_paragraph != SPLIT_OFF:
+        split_protected = {row_map[row] for row in protected if row in row_map}
+        new_lines, split_map = split_long_paragraphs(new_lines, split_protected, ctx.options.long_paragraph)
+        row_map = {row: split_map[moved_row] for row, moved_row in row_map.items()}
 
     def moved(rows):
         return {row_map[row] for row in rows if row in row_map}
@@ -1183,7 +1204,7 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
     重新以 apply_format=True、write_text=True 呼叫一次，那一輪算出的位置
     才是實際輸出後的正確位置。
     """
-    if apply_format and ctx.options.reflow_paragraphs:
+    if apply_format and (ctx.options.reflow_paragraphs or ctx.options.long_paragraph != SPLIT_OFF):
         return _build_with_reflow(ctx, write_text)
     state = RenderState()
     ctx.tree = SimpleTree()

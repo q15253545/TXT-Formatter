@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 
 from core.chapter_update import LONGER, MISSING, NEW, SAME
 from . import i18n
-from .sortable_table import PreviewTable, data_index, enable_sorting, make_item, resort, setup_columns
+from .sortable_table import HeaderCheckBox, PreviewTable, data_index, enable_sorting, make_item, resort, setup_columns
 from .theme import active_tokens
 from .widgets import ContextPreview, ToggleSwitch, dialog_frame, size_dialog
 
@@ -55,7 +55,7 @@ class ChapterUpdateDialog(QDialog):
         self._checked = {item["index"] for item in plan if item["suggested"]}
 
         root, footer = dialog_frame(
-            self, intro="比對新下載的檔案和本文：本文缺少的章節補進原本的位置，新章節接在最後。")
+            self, intro="比對新下載的檔案和本文，把本文缺少的章節和新章節加進來。")
         root.setSpacing(12)
 
         file_row = QHBoxLayout()
@@ -73,16 +73,6 @@ class ChapterUpdateDialog(QDialog):
             self.convert_toggle.setChecked(True)
             root.addWidget(self.convert_toggle)
 
-        select_row = QHBoxLayout()
-        select_row.setSpacing(8)
-        for label, handler in (("勾選缺少和新章節", self._check_suggested), ("全選", self._check_all),
-                               ("全部取消", self._uncheck_all)):
-            button = QPushButton(label)
-            button.clicked.connect(handler)
-            select_row.addWidget(button)
-        select_row.addStretch(1)
-        root.addLayout(select_row)
-
         self.status_label = QLabel("")
         self.status_label.setObjectName("fileLabel")
         root.addWidget(self.status_label)
@@ -92,7 +82,11 @@ class ChapterUpdateDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        setup_columns(self.table, {0: 56, 1: 240, 2: 300})
+        setup_columns(self.table, {0: 96, 1: 240, 2: 300})
+        # 一打開就勾好建議的（本文缺少的、新的章）；總勾選框勾全部能加入的，或全部取消
+        self.header_check = HeaderCheckBox(
+            self.table, lambda: (len(self._checked), sum(1 for item in self._plan if self._actionable(item))),
+            self._set_all_checked)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         enable_sorting(self.table)
@@ -182,6 +176,7 @@ class ChapterUpdateDialog(QDialog):
             text = f"新檔案 {len(self._plan)} 章：" + "、".join(parts) + f"；已勾選 {len(self._checked)} 章"
         i18n.set_text(self.status_label, text)
         self.apply_button.setEnabled(bool(self._checked))
+        self.header_check.refresh()
 
     def _on_item_changed(self, item: QTableWidgetItem):
         if item.column() != 0:
@@ -202,14 +197,6 @@ class ChapterUpdateDialog(QDialog):
         row = self._new_rows[index]
         self.preview.show_rows(self._new_lines, row, row, active_tokens().accent)
 
-    def _check_suggested(self):
-        self._checked = {item["index"] for item in self._plan if item["suggested"]}
-        self._refresh()
-
-    def _check_all(self):
-        self._checked = {item["index"] for item in self._plan if self._actionable(item)}
-        self._refresh()
-
-    def _uncheck_all(self):
-        self._checked = set()
+    def _set_all_checked(self, checked: bool):
+        self._checked = {item["index"] for item in self._plan if self._actionable(item)} if checked else set()
         self._refresh()

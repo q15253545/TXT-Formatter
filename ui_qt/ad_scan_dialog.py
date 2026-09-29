@@ -1,9 +1,12 @@
-"""掃描視窗（從「內容檢查」卡片開啟），兩種模式：
+"""「非正文內容」視窗（內容檢查卡片的「掃描非正文內容」），三個分頁：
 
-- 掃描無關連內容（mode="ads"）：網址、發布頁、QQ、微信、來源署名、網頁字元碼；「重複段落」
-  獨立一個分頁，最短長度、至少重複幾次都可以用拉桿或輸入框調整，表格即時更新。
+- 廣告與網頁字元：網址、發布頁、QQ、微信、來源署名、網頁字元碼。
   網頁字元碼不是刪掉整行，是換回原本的字（候選帶著 fix）。
-- 作者感言與作品資訊（mode="notes"）：只列這兩類。
+- 作者感言與作品資訊。
+- 重複段落：最短長度、至少重複幾次都可以用拉桿或輸入框調整，表格即時更新。
+
+偵測類型收成一顆下拉（widgets.ChoiceMenuButton），跟「依信心勾選」同一列。
+「在本文逐筆檢查」打開本文上方的逐筆檢查列（main_window 的 review_bar）。
 
 非模式：開著的時候可以直接在本文手動刪掉沒被找到的內容。對話框拿一份
 raw_lines 快照作業；本文改過之後，主視窗會呼叫 reload() 換成新的一份重新
@@ -15,26 +18,24 @@ import re
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QTableWidget,
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from core.ad_scan import (
-    AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, FIX_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT, REPEAT_MIN_LENGTH,
+    AD_CATEGORY_LABELS, AD_ONLY_CATEGORIES, NOTE_CATEGORIES, REPEAT_MIN_COUNT, REPEAT_MIN_LENGTH,
     apply_candidates, scan_ad_candidates,
 )
 from . import dialogs, i18n
 from .theme import active_tokens
 from .widgets import (
-    ContextPreview, Divider, GroupCheckBox, ScopeToggle, ToggleSwitch, dialog_frame, flow_container, size_dialog,
-    slider_with_spin,
+    ChoiceMenuButton, ContextPreview, ScopeToggle, dialog_frame, size_dialog, slider_with_spin,
 )
 from .sortable_table import (
-    PreviewTable,
+    HeaderCheckBox, PreviewTable, confidence_menu_button,
     CONFIDENCE_ORDER, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns,
 )
 
-_CONFIDENCE_BY_BUTTON = {"勾選高信心": "高", "勾選中信心": "中", "勾選低信心": "低"}
 
 # 只有需要解釋的類型才寫提示；其餘看名字就懂。
 _CATEGORY_TIPS = {
@@ -48,15 +49,11 @@ REPEAT_LENGTH_RANGE = (2, 60)
 _WAITING_TEXT = "準備中：第一次打開要先整理本文，整理好就會自動掃描"
 REPEAT_COUNT_RANGE = (2, 50)
 
-_INTROS = {
-    "ads": "找出網址、QQ／微信、小說來源、論壇轉貼資訊、重複段落這類跟故事無關的內容；勾選後刪除，網頁字元碼換回原字。",
-    "notes": "找出作者的話、作者／字數／發表平台、分隔線；勾選後刪除。",
-}
-
-_MODES = {
-    # 模式: (視窗標題, 偵測類型（勾選框）, 沒找到時的說明)
-    "ads": ("掃描無關連內容", tuple(key for key in AD_ONLY_CATEGORIES if key != "repeat"), "內容"),
-    "notes": ("作者感言與作品資訊", NOTE_CATEGORIES, "作者感言或作品資訊"),
+ADS_TAB, NOTES_TAB, REPEAT_TAB = range(3)
+# 有偵測類型的兩個分頁：(分頁名稱, 偵測類型, 沒找到時的說明)。重複段落優先度最低，放最後。
+_CATEGORY_TABS = {
+    ADS_TAB: ("廣告與網頁字元", tuple(key for key in AD_ONLY_CATEGORIES if key != "repeat"), "內容"),
+    NOTES_TAB: ("作者感言與作品資訊", NOTE_CATEGORIES, "作者感言或作品資訊"),
 }
 
 
@@ -80,7 +77,7 @@ _ENTITY = re.compile(r"&#?[0-9A-Za-z]{1,10};")
 
 
 class _CandidatePane(QWidget):
-    """一張候選表格＋選取按鈕＋狀態列。掃描無關連內容的兩個分頁、作者感言視窗共用。"""
+    """一張候選表格＋選取按鈕＋狀態列。非正文內容的三個分頁共用。"""
 
     highlighted = Signal(int, int)
 
@@ -95,24 +92,23 @@ class _CandidatePane(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
+        # 依信心勾選跟找到幾個放同一列；全選／全部取消是表格左上角的總勾選框
         select_row = QHBoxLayout()
-        select_row.setSpacing(8)
-        for label in ("勾選高信心", "勾選中信心", "勾選低信心", "全選", "全部取消"):
-            button = QPushButton(label)
-            button.clicked.connect(lambda _checked, m=label: self.select_mode(m))
-            select_row.addWidget(button)
-        select_row.addStretch(1)
-        layout.addLayout(select_row)
-
+        select_row.setSpacing(12)
+        select_row.addWidget(confidence_menu_button(self.check_confidence))
         self.status_label = QLabel("尚未掃描")
         self.status_label.setObjectName("fileLabel")
-        layout.addWidget(self.status_label)
+        select_row.addWidget(self.status_label, 1)
+        layout.addLayout(select_row)
+        self.select_row = select_row        # 分頁可以在最前面加自己的設定（偵測類型）
 
         self.table = PreviewTable(0, 3)
         self.table.setHorizontalHeaderLabels(["信心", second_column, "內容預覽"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.header_check = HeaderCheckBox(self.table, lambda: (len(self._selected), len(self._shown)),
+                                           self._set_all_checked)
         setup_columns(self.table, {0: "contents", 1: 200 if second_column == "類型" else 90})
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
@@ -178,6 +174,7 @@ class _CandidatePane(QWidget):
         self._update_preview()
 
     def update_status(self):
+        self.header_check.refresh()
         if not self._candidates:
             i18n.set_text(self.status_label, self._empty_text)
             return
@@ -223,88 +220,65 @@ class _CandidatePane(QWidget):
         self.preview.show_rows(lines, candidate["start"], candidate["end"], color, spans)
         return candidate
 
-    def select_mode(self, button_label: str):
-        if button_label == "全選":
-            self._selected = set(self._shown)
-        elif button_label == "全部取消":
-            self._selected = set()
-        else:
-            # 加勾那一種信心，原本勾的保留（跟自訂章節規則的「勾選高信心」一樣）
-            target = _CONFIDENCE_BY_BUTTON[button_label]
-            self._selected |= {i for i in self._shown if self._candidates[i]["confidence"] == target}
+    def check_confidence(self, levels: set):
+        """依信心勾選：列出來的候選只勾那幾種信心的，其餘取消。"""
+        self._selected = {index for index in self._shown if self._candidates[index]["confidence"] in levels}
+        self.refresh()
+
+    def _set_all_checked(self, checked: bool):
+        self._selected = set(self._shown) if checked else set()
         self.refresh()
 
 
 class AdScanDialog(QDialog):
+    """非正文內容：三個分頁各自一張候選表格，偵測類型、勾選各自記。
+    按「刪除已勾選項目」只處理目前這個分頁勾選的。"""
+
     candidateHighlighted = Signal(int, int)  # start_line, end_line（0-indexed，含首尾）
     deletionReady = Signal(list)             # 刪除後的整份本文
-    repeatMarkingChanged = Signal(bool)      # 重複段落要不要標在本文上（字色、內容檢查卡片的快速跳轉）
+    reviewRequested = Signal()               # 「在本文逐筆檢查」
 
     def __init__(self, raw_lines: list, parent=None, selected_ranges=None, selected_count: int = 0,
-                 enabled_categories=None, title_rows=None, mode: str = "ads", repeat_settings=None,
-                 defer_scan: bool = False, repeat_marking: bool = False):
+                 ad_categories=None, note_categories=None, title_rows=None, repeat_settings=None,
+                 defer_scan: bool = False, start_tab: int = ADS_TAB):
         """defer_scan: show the dialog first and scan when start_scan() is called (the main window does that once
         its idle-time cache warming is done — scanning a large file cold would freeze the window for seconds)."""
         super().__init__(parent)
         self._waiting = defer_scan
-        self._mode = mode
-        title_text, self._categories, self._empty_name = _MODES[mode]
-        self.setWindowTitle(title_text)
+        self.setWindowTitle("非正文內容")
         size_dialog(self, 900, 660)
         self._raw_lines = list(raw_lines)
         self._title_rows = set(title_rows) if title_rows is not None else None
         self._selected_ranges = list(selected_ranges or [])
-        self._selected_count = selected_count
         self.result_lines: list | None = None
         self.result_summary = (0, 0)          # （刪掉幾行, 換回網頁字元碼的行數）
-        self._repeat_marking = repeat_marking
 
-        root, footer = dialog_frame(self, intro=_INTROS[mode])
+        root, footer = dialog_frame(self, intro="找出廣告、作者感言、重複段落這類不屬於正文的內容，勾選後刪除。")
         root.setSpacing(12)
 
-        # 「只掃描選取的章節」是範圍，兩個分頁共用，放在最上面（預設關著，見 ScopeToggle）。
+        # 「只掃描選取的章節」是範圍，三個分頁共用，放在最上面（預設關著，見 ScopeToggle）。
         self.scope_check = ScopeToggle("掃描", selected_count if self._selected_ranges else 0)
         self.scope_check.toggled.connect(self._run_scan)
         root.addWidget(self.scope_check)
 
-        # 偵測類型＋候選表格
-        main_page = QWidget()
-        main_layout = QVBoxLayout(main_page)
-        main_layout.setContentsMargins(0, 8 if mode == "ads" else 0, 0, 0)
-        main_layout.setSpacing(12)
-        self.category_group = GroupCheckBox("偵測類型")
-        self.category_group.members_changed.connect(self._run_scan)
-        main_layout.addWidget(self.category_group)
-        # 類型照視窗寬度自動換行：寬的時候一列排完，不會在右邊留一大塊空白。
-        category_box, category_flow = flow_container(uniform=True)
-        self._category_checks = {}
-        for key in self._categories:
-            checkbox = QCheckBox(AD_CATEGORY_LABELS[key])
-            checkbox.setChecked(enabled_categories is None or key in enabled_categories)
-            checkbox.setToolTip(_CATEGORY_TIPS.get(key, ""))
-            checkbox.toggled.connect(self._run_scan)
-            self._category_checks[key] = checkbox
-            self.category_group.add_member(checkbox)
-            category_flow.addWidget(checkbox)
-        main_layout.addWidget(category_box)
-        main_layout.addWidget(Divider())
-        self._main_pane = _CandidatePane("類型", lambda: self._raw_lines)
-        self._main_pane.highlighted.connect(self.candidateHighlighted.emit)
-        main_layout.addWidget(self._main_pane, 1)
-
-        self._repeat_pane = None
-        self.tabs = None
-        if mode == "ads":
-            self.tabs = QTabWidget()
-            self.tabs.addTab(main_page, "廣告與網頁字元")
-            self.tabs.addTab(self._build_repeat_page(repeat_settings), "重複段落")
-            self.tabs.currentChanged.connect(self._update_action_label)
-            root.addWidget(self.tabs, 1)
-        else:
-            root.addWidget(main_page, 1)
+        self.tabs = QTabWidget()
+        self._panes = {}
+        self._category_buttons = {}
+        for key, (label, categories, empty_name) in _CATEGORY_TABS.items():
+            chosen = ad_categories if key == ADS_TAB else note_categories
+            self.tabs.addTab(self._build_category_page(key, categories, chosen), label)
+        self.tabs.addTab(self._build_repeat_page(repeat_settings), "重複段落")
+        self.tabs.setCurrentIndex(start_tab)
+        self.tabs.currentChanged.connect(self._update_action_label)
+        # 只掃看得到的那一頁：其他分頁切過去才掃（大檔每一頁要零點幾秒）
+        self._stale: set = set()
+        self.tabs.currentChanged.connect(self._scan_if_stale)
+        root.addWidget(self.tabs, 1)
 
         buttons = QDialogButtonBox()
         cancel_button = buttons.addButton("關閉", QDialogButtonBox.ButtonRole.RejectRole)
+        review_button = buttons.addButton("在本文逐筆檢查", QDialogButtonBox.ButtonRole.ActionRole)
+        review_button.clicked.connect(self.reviewRequested.emit)
         # 網頁字元碼、文中的廣告片段是換字，其他都是刪除：會換字的分頁叫「處理」，只會刪除的叫「刪除」
         self.delete_button = buttons.addButton("刪除已勾選項目", QDialogButtonBox.ButtonRole.AcceptRole)
         self.delete_button.setObjectName("primary")
@@ -315,11 +289,31 @@ class AdScanDialog(QDialog):
         self._update_action_label()
         if defer_scan:
             self.delete_button.setEnabled(False)
-            for pane in (self._main_pane, self._repeat_pane):
-                if pane is not None:
-                    pane.set_candidates([], _WAITING_TEXT)
+            for pane in self._panes.values():
+                pane.set_candidates([], _WAITING_TEXT)
         else:
             self._run_scan()
+
+    def _build_category_page(self, key: int, categories, chosen) -> QWidget:
+        """廣告與網頁字元、作者感言與作品資訊：偵測類型收成一顆下拉（跟依信心勾選同一列）＋候選表格。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(12)
+        pane = _CandidatePane("類型", lambda: self._raw_lines)
+        pane.highlighted.connect(self.candidateHighlighted.emit)
+        label = QLabel("偵測類型")
+        label.setObjectName("fileLabel")
+        button = ChoiceMenuButton([(item, AD_CATEGORY_LABELS[item], _CATEGORY_TIPS.get(item, ""))
+                                   for item in categories], chosen)
+        button.changed.connect(lambda key=key: self._scan_categories(key))
+        pane.select_row.insertWidget(0, label)
+        pane.select_row.insertWidget(1, button)
+        pane.select_row.insertSpacing(2, 8)
+        layout.addWidget(pane, 1)
+        self._panes[key] = pane
+        self._category_buttons[key] = button
+        return page
 
     def start_scan(self):
         """The deferred first scan (see defer_scan), with whatever settings the user picked meanwhile."""
@@ -330,7 +324,7 @@ class AdScanDialog(QDialog):
         self._run_scan()
 
     def _update_action_label(self, *_args):
-        replaces = self._current_pane() is self._main_pane and bool((FIX_CATEGORIES | {"url"}) & set(self._categories))
+        replaces = self.tabs.currentIndex() == ADS_TAB
         i18n.set_text(self.delete_button, "處理已勾選項目" if replaces else "刪除已勾選項目")
 
     def _build_repeat_page(self, repeat_settings) -> QWidget:
@@ -342,25 +336,20 @@ class AdScanDialog(QDialog):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(12)
 
-        # 重複段落多半是作者慣用的句子，預設不標在本文上：標了字色、放進卡片的快速跳轉，找廣告反而變慢
-        self.repeat_marking_toggle = ToggleSwitch("標在本文上（字色、快速跳轉）", fill=False)
-        self.repeat_marking_toggle.setChecked(self._repeat_marking)
-        self.repeat_marking_toggle.clicked.connect(lambda on: self.repeatMarkingChanged.emit(on))
-        layout.addWidget(self.repeat_marking_toggle)
-
         # 兩個設定同一種樣子：標籤、拉桿、可以直接輸入也有上下箭頭的數字框（單位寫在框裡）。
         controls = QHBoxLayout()
         controls.setSpacing(10)
-        self.repeat_length_slider, self.repeat_length_input = slider_with_spin(
+        self.repeat_length_slider, _length_input = slider_with_spin(
             controls, "最短長度", REPEAT_LENGTH_RANGE, min_length, " 字")
         controls.addSpacing(16)
-        self.repeat_count_slider, self.repeat_count_spin = slider_with_spin(
+        self.repeat_count_slider, _count_input = slider_with_spin(
             controls, "至少重複", REPEAT_COUNT_RANGE, min_count, " 次")
         layout.addLayout(controls)
 
-        self._repeat_pane = _CandidatePane("次數", lambda: self._raw_lines)
-        self._repeat_pane.highlighted.connect(self.candidateHighlighted.emit)
-        layout.addWidget(self._repeat_pane, 1)
+        pane = _CandidatePane("次數", lambda: self._raw_lines)
+        pane.highlighted.connect(self.candidateHighlighted.emit)
+        layout.addWidget(pane, 1)
+        self._panes[REPEAT_TAB] = pane
 
         # 拉桿拖動時不要每一格都重掃：停一下再掃
         self._repeat_timer = QTimer(self)
@@ -373,19 +362,22 @@ class AdScanDialog(QDialog):
 
     @property
     def table(self):
-        return self._main_pane.table
+        return self._panes[ADS_TAB].table
 
     @property
     def status_label(self):
-        return self._main_pane.status_label
+        return self._panes[ADS_TAB].status_label
 
     def enabled_categories(self) -> set:
-        return self._enabled_categories()
+        """廣告與網頁字元分頁勾的偵測類型。"""
+        return self._category_buttons[ADS_TAB].checked()
+
+    def note_categories(self) -> set:
+        """作者感言與作品資訊分頁勾的偵測類型。"""
+        return self._category_buttons[NOTES_TAB].checked()
 
     def repeat_settings(self):
-        """（最短長度, 至少幾次）；作者感言視窗沒有這個分頁，回傳 None。"""
-        if self._repeat_pane is None:
-            return None
+        """（最短長度, 至少幾次）。"""
         return self.repeat_length_slider.value(), self.repeat_count_slider.value()
 
     # ------------------------------------------------------------------
@@ -404,26 +396,45 @@ class AdScanDialog(QDialog):
         self.scope_check.blockSignals(False)
         self._run_scan(keep_state=True)
 
-    def _enabled_categories(self):
-        return {key for key, box in self._category_checks.items() if box.isChecked()}
-
     def _ranges(self):
         return self._selected_ranges if self.scope_check.isChecked() else None
 
     def _run_scan(self, *_args, keep_state: bool = False):
+        """範圍、本文變了：目前這一頁馬上重掃，其他頁記成過期，切過去時才掃。"""
         if self._waiting:
             return          # start_scan() picks up the current settings
-        categories = self._enabled_categories()
-        state = self._main_pane.state() if keep_state else None
-        if not categories:
-            self._main_pane.set_candidates([], "尚未選擇偵測類型")
-        else:
-            candidates = scan_ad_candidates(self._raw_lines, categories, self._ranges(), self._title_rows)
-            empty = (f"選取的章節裡沒有符合的{self._empty_name}" if self.scope_check.isChecked()
-                     else f"沒有找到符合所選類型的{self._empty_name}")
-            self._main_pane.set_candidates(candidates, empty, state)
-        if self._repeat_pane is not None:
+        self._stale = {key for key in self._panes if key != self.tabs.currentIndex()}
+        self._stale_keep = keep_state
+        self._scan_tab(self.tabs.currentIndex(), keep_state)
+
+    def _scan_tab(self, key: int, keep_state: bool):
+        if key == REPEAT_TAB:
             self._scan_repeats(keep_state=keep_state)
+        else:
+            self._scan_categories(key, keep_state=keep_state)
+
+    def _scan_if_stale(self, key: int):
+        if key in self._stale:
+            self._stale.discard(key)
+            self._scan_tab(key, self._stale_keep)
+
+    def _scan_categories(self, key: int, keep_state: bool = False):
+        if self._waiting:
+            return
+        if key != self.tabs.currentIndex():
+            self._stale.add(key)        # 偵測類型改了但不在這一頁（理論上不會）：切過去再掃
+            return
+        pane = self._panes[key]
+        categories = self._category_buttons[key].checked()
+        empty_name = _CATEGORY_TABS[key][2]
+        state = pane.state() if keep_state else None
+        if not categories:
+            pane.set_candidates([], "尚未選擇偵測類型")
+            return
+        candidates = scan_ad_candidates(self._raw_lines, categories, self._ranges(), self._title_rows)
+        empty = (f"選取的章節裡沒有符合的{empty_name}" if self.scope_check.isChecked()
+                 else f"沒有找到符合所選類型的{empty_name}")
+        pane.set_candidates(candidates, empty, state)
 
     def _on_repeat_setting_changed(self, *_args):
         self._repeat_timer.start()
@@ -432,15 +443,14 @@ class AdScanDialog(QDialog):
         if self._waiting:
             return
         min_length, min_count = self.repeat_settings()
-        state = self._repeat_pane.state() if keep_state else None
+        pane = self._panes[REPEAT_TAB]
+        state = pane.state() if keep_state else None
         candidates = scan_ad_candidates(self._raw_lines, {"repeat"}, self._ranges(), self._title_rows,
                                         repeat_min_length=min_length, repeat_min_count=min_count)
-        self._repeat_pane.set_candidates(candidates, "沒有重複出現的段落", state)
+        pane.set_candidates(candidates, "沒有重複出現的段落", state)
 
     def _current_pane(self) -> _CandidatePane:
-        if self.tabs is not None and self.tabs.currentIndex() == 1:
-            return self._repeat_pane
-        return self._main_pane
+        return self._panes[self.tabs.currentIndex()]
 
     def _delete_selected(self):
         selected = self._current_pane().selected_candidates()

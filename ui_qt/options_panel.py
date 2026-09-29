@@ -1,18 +1,19 @@
-"""「排版設定」卡片（工具列「排版設定」）：排版開關、下拉與套用按鈕。
+"""「排版設定」卡片（左側圖示列「排版」）：一鍵排版的設定（排版開關與下拉）。
 
-開關狀態存在面板自己身上；呼叫端只在套用格式時用 current_options() 讀一次。
+開關狀態存在面板自己身上，改了就存（changed）；一鍵排版、目錄右鍵「套用格式」用 current_options() 讀。
 「合併下行標題」在章節管理（預覽＋套用到本文），不在這裡；只排選取的章在目錄右鍵。
 """
 
 from PySide6.QtCore import QSize, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QGridLayout, QLabel, QPushButton, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QGridLayout, QLabel, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
 from core.format_options import FormatOptions
+from core.paragraph_split import SPLIT_CHOICES, SPLIT_OFF
 from core.text_format import QUOTE_KEEP, QUOTE_STYLES
-from . import i18n, icons
-from .widgets import Divider, IconButton, PanelScroll, ToggleSwitch, make_card_header
+from . import i18n
+from .widgets import Divider, PanelScroll, ToggleSwitch, make_card_header
 
 _CHECKBOX_FIELDS = [
     ("reflow_paragraphs", "整理段落換行"),
@@ -67,6 +68,8 @@ def describe_options(options: FormatOptions) -> list:
                                      ("段首縮排", indent_choice(options), "保留原樣")):
         if choice != unchanged:
             items.append(f"{label}：{choice}")
+    if options.long_paragraph in SPLIT_CHOICES and options.long_paragraph != SPLIT_OFF:
+        items.append(f"長段落：{options.long_paragraph}")
     if options.quote_style != QUOTE_KEEP:
         items.append(f"對話引號：{options.quote_style}")
     if options.num_style != "保留原文":
@@ -85,11 +88,12 @@ def describe_options(options: FormatOptions) -> list:
 
 
 class OptionsPanel(QWidget):
-    apply_requested = Signal()
     # 使用者切換了某個開關：（開關名稱, 開或關, 一句說明）→ 主視窗顯示在狀態列
     option_toggled = Signal(str, bool, str)
-    save_one_click_requested = Signal()
-    closed = Signal()
+    # 使用者換了某個下拉：（標籤, 選到的值）
+    choice_changed = Signal(str, str)
+    # 使用者改了任何一項（開關或下拉）：主視窗存成一鍵排版的設定
+    changed = Signal()
 
     def __init__(self, initial: FormatOptions, parent=None):
         super().__init__(parent)
@@ -100,9 +104,6 @@ class OptionsPanel(QWidget):
         root.setSpacing(0)
 
         header, header_layout = make_card_header("排版設定")
-        self.close_button = IconButton("panel-left-close", "收起排版設定", size=16)
-        self.close_button.clicked.connect(self.closed.emit)
-        header_layout.addWidget(self.close_button)
         root.addWidget(header)
 
         # 視窗矮時選項要能捲動；「套用格式」固定在捲動區外面的底部，不會被捲走。
@@ -123,6 +124,7 @@ class OptionsPanel(QWidget):
             # clicked 只在使用者自己切換時送出；還原設定、一鍵排版後歸零不會洗掉狀態列
             checkbox.clicked.connect(
                 lambda on, label=label, field=field: self.option_toggled.emit(label, on, OPTION_STATUS[field]))
+            checkbox.clicked.connect(lambda _on: self.changed.emit())
             self._checkboxes[field] = checkbox
             grid.addWidget(checkbox, index, 0)
         body.addLayout(grid)
@@ -142,37 +144,33 @@ class OptionsPanel(QWidget):
         self.title_spacing_combo = self._add_combo(combos, 1, "標題前後", list(TITLE_SPACING_CHOICES),
                                                    title_spacing_choice(initial))
         self.indent_combo = self._add_combo(combos, 2, "段首縮排", list(INDENT_CHOICES), indent_choice(initial))
+        # 長段落：在引號外的句末拆開，分高、中信心（core/paragraph_split.py）
+        self.long_combo = self._add_combo(combos, 3, "長段落", list(SPLIT_CHOICES),
+                                          initial.long_paragraph if initial.long_paragraph in SPLIT_CHOICES
+                                          else SPLIT_OFF)
         # 對話引號：有方向的引號照原本的內外層對應，一行一行轉（core/text_format.convert_quotes）
-        self.quote_combo = self._add_combo(combos, 3, "對話引號", list(QUOTE_STYLES), initial.quote_style)
-        self.num_style_combo = self._add_combo(combos, 4, "章節編號", NUM_STYLE_CHOICES, initial.num_style)
-        self.sep_style_combo = self._add_combo(combos, 5, "編號間隔", SEP_STYLE_CHOICES, initial.sep_style)
-        self.punct_combo = self._add_combo(combos, 6, "標點符號", PUNCT_CHOICES, punct_default)
-        self.digit_combo = self._add_combo(combos, 7, "數字", DIGIT_CHOICES, digit_default)
+        self.quote_combo = self._add_combo(combos, 4, "對話引號", list(QUOTE_STYLES), initial.quote_style)
+        self.num_style_combo = self._add_combo(combos, 5, "章節編號", NUM_STYLE_CHOICES, initial.num_style)
+        self.sep_style_combo = self._add_combo(combos, 6, "編號間隔", SEP_STYLE_CHOICES, initial.sep_style)
+        self.punct_combo = self._add_combo(combos, 7, "標點符號", PUNCT_CHOICES, punct_default)
+        self.digit_combo = self._add_combo(combos, 8, "數字", DIGIT_CHOICES, digit_default)
 
         body.addStretch(1)
 
-        # 底部按鈕固定在捲動區外面、不跟著捲動，上面一條分隔線跟選項分開：
-        # 存成一鍵排版的組合（不改本文，跟下面的套用再用一條線隔開）、排整份。
+        # 這張卡片就是一鍵排版的設定：改了自動記住，排版由工具列的「一鍵排版」或目錄右鍵「套用格式」來做，
+        # 卡片上不另外放套用、保存按鈕（兩組設定容易搞不清楚哪一組會生效）。
         root.addWidget(Divider())
-        footer = QVBoxLayout()
-        footer.setContentsMargins(16, 12, 16, 14)
-        footer.setSpacing(8)
-        self.save_one_click_button = QPushButton("保存到一鍵排版")
-        self.save_one_click_button.clicked.connect(self.save_one_click_requested.emit)
-        footer.addWidget(self.save_one_click_button)
-        footer.addSpacing(4)
-        footer.addWidget(Divider())
-        footer.addSpacing(4)
-        self.apply_button = QPushButton("套用格式到全文")
-        self.apply_button.setObjectName("primary")
-        self.apply_button.setIcon(icons.make_icon("check", "#FFFFFF", 16))
-        self.apply_button.clicked.connect(self.apply_requested.emit)
-        self._primary_text = self._disabled_text = "#FFFFFF"
-        footer.addWidget(self.apply_button)
-        root.addLayout(footer)
+        self.usage_label = QLabel("一鍵排版、目錄右鍵「套用格式」都用這組設定，改了自動記住。")
+        self.usage_label.setObjectName("fileLabel")
+        self.usage_label.setWordWrap(True)
+        self.usage_label.setContentsMargins(16, 10, 16, 12)
+        root.addWidget(self.usage_label)
 
-    @staticmethod
-    def _add_combo(grid: QGridLayout, row: int, label_text, choices, current_value) -> QComboBox:
+    def _on_combo_activated(self, label_text: str, combo: QComboBox):
+        self.choice_changed.emit(label_text, i18n.combo_value(combo))
+        self.changed.emit()
+
+    def _add_combo(self, grid: QGridLayout, row: int, label_text, choices, current_value) -> QComboBox:
         """標籤放左、下拉放右——欄位比較窄時，這樣比標籤壓在上面省一半高度。"""
         label = QLabel(label_text)
         label.setObjectName("fileLabel")
@@ -180,6 +178,9 @@ class OptionsPanel(QWidget):
         combo.addItems(choices)
         if current_value in choices:
             i18n.set_combo_value(combo, current_value)
+        # activated 只在使用者自己選的時候送出；還原設定不算
+        combo.activated.connect(lambda _index, combo=combo, label_text=label_text: self._on_combo_activated(
+            label_text, combo))
         grid.addWidget(label, row, 0)
         grid.addWidget(combo, row, 1)
         return combo
@@ -216,25 +217,12 @@ class OptionsPanel(QWidget):
             halfwidth_punct=(punct == "轉半形"),
             fullwidth_digits=(digit == "轉全形"),
             halfwidth_digits=(digit == "轉半形"),
+            long_paragraph=i18n.combo_value(self.long_combo),
             quote_style=i18n.combo_value(self.quote_combo),
             num_style=i18n.combo_value(self.num_style_combo),
             sep_style=i18n.combo_value(self.sep_style_combo),
             structure=structure_mode,
         )
-
-    def set_icon_colors(self, color: str, primary_text: str, accent: str = "", hover: str = "",
-                        disabled: str = ""):
-        self.close_button.set_colors(color, hover or color, color)
-        self._primary_text, self._disabled_text = primary_text, disabled or primary_text
-        self._refresh_apply_icon()
-
-    def _refresh_apply_icon(self):
-        color = self._primary_text if self.apply_button.isEnabled() else self._disabled_text
-        self.apply_button.setIcon(icons.make_icon("check", color, 16))
-
-    def set_apply_enabled(self, enabled: bool):
-        self.apply_button.setEnabled(enabled)
-        self._refresh_apply_icon()
 
     def options_state(self) -> dict:
         """目前的勾選與下拉，存成可以寫進 JSON 的樣子（下次開程式時還原）。"""
@@ -243,6 +231,7 @@ class OptionsPanel(QWidget):
             "paragraph": i18n.combo_value(self.paragraph_combo),
             "title_spacing": i18n.combo_value(self.title_spacing_combo),
             "indent": i18n.combo_value(self.indent_combo),
+            "long_paragraph": i18n.combo_value(self.long_combo),
             "quote_style": i18n.combo_value(self.quote_combo),
             "num_style": i18n.combo_value(self.num_style_combo),
             "sep_style": i18n.combo_value(self.sep_style_combo),
@@ -259,6 +248,7 @@ class OptionsPanel(QWidget):
         for key, combo, choices in (("paragraph", self.paragraph_combo, list(PARAGRAPH_CHOICES)),
                                     ("title_spacing", self.title_spacing_combo, list(TITLE_SPACING_CHOICES)),
                                     ("indent", self.indent_combo, list(INDENT_CHOICES)),
+                                    ("long_paragraph", self.long_combo, list(SPLIT_CHOICES)),
                                     ("quote_style", self.quote_combo, list(QUOTE_STYLES)),
                                     ("num_style", self.num_style_combo, NUM_STYLE_CHOICES),
                                     ("sep_style", self.sep_style_combo, SEP_STYLE_CHOICES),
@@ -267,12 +257,19 @@ class OptionsPanel(QWidget):
             if state.get(key) in choices:
                 i18n.set_combo_value(combo, state[key])
 
-    def reset_to_defaults(self):
-        """一鍵排版用自己的固定組合、不管面板目前勾了什麼；套用後把面板歸零，
-        避免看起來像「這些勾選也是一鍵排版套用的」而造成誤解。"""
-        for checkbox in self._checkboxes.values():
-            checkbox.setChecked(False)
-        for combo in (self.paragraph_combo, self.title_spacing_combo, self.indent_combo, self.quote_combo,
-                      self.num_style_combo,
-                      self.sep_style_combo, self.punct_combo, self.digit_combo):
-            combo.setCurrentIndex(0)
+    def set_options(self, options: FormatOptions):
+        """照一組排版設定擺好開關與下拉（沒存過設定時的常用組合）。"""
+        for field, checkbox in self._checkboxes.items():
+            checkbox.setChecked(bool(getattr(options, field)))
+        punct = "轉全形" if options.normalize_punct else "轉半形" if options.halfwidth_punct else "不轉換"
+        digit = "轉全形" if options.fullwidth_digits else "轉半形" if options.halfwidth_digits else "不轉換"
+        for combo, value in ((self.paragraph_combo, paragraph_choice(options)),
+                             (self.title_spacing_combo, title_spacing_choice(options)),
+                             (self.indent_combo, indent_choice(options)),
+                             (self.long_combo, options.long_paragraph if options.long_paragraph in SPLIT_CHOICES
+                              else SPLIT_OFF),
+                             (self.quote_combo, options.quote_style),
+                             (self.num_style_combo, options.num_style),
+                             (self.sep_style_combo, options.sep_style),
+                             (self.punct_combo, punct), (self.digit_combo, digit)):
+            i18n.set_combo_value(combo, value)
