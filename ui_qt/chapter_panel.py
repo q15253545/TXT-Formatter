@@ -240,12 +240,16 @@ class ChapterPanel(QWidget):
                     clean_groups += 1
                     continue
                 label = html.escape(group["label"]) if group["label"] != "全書" else T("全書")
-                lines, typos, strays = [], [], []
+                lines, typos, strays, misplaced = [], [], [], []
                 link = f'<a href="{{}}" style="color:{accent};text-decoration:none">{{}}</a>'
                 for entry in group["entries"]:
                     start, end = entry["start"], entry["end"]
                     if entry["kind"] == "dup":
                         lines.append(link.format(f"{index}|{start}|dup", T(f"第 {start} 章重複")))
+                        continue
+                    if entry["kind"] == "misplaced":
+                        misplaced.append(link.format(f"line|{entry['row']}", T(
+                            f"第 {start} 章在{entry['now']}，應該在{entry['to']}")))
                         continue
                     # 打錯、不像章節的章號：已經照前後章算進去（或不算），另外一段列出是哪一行，點了跳過去
                     quoted = html.escape(entry.get("text", ""))
@@ -268,6 +272,10 @@ class ChapterPanel(QWidget):
                         lines.append(f'&nbsp;&nbsp;&nbsp;<span style="color:{muted}">'
                                      f'{T(f"↳ 還有 {len(found) - 3} 行沒收錄")}</span>')
                 body = "<br>".join(f"· {line}" for line in lines)
+                if misplaced:
+                    body += ((("<br>" if body else "") + f'<span style="font-weight:600">{T("順序錯亂")}</span>'
+                              + "　" + link.format("reorder", T("依章號重排")) + "<br>")
+                             + "<br>".join(f"· {item}" for item in misplaced))
                 for title, note, items in ((T("可能打錯的章號"), T("照前後章的章號算進去了"), typos),
                                            (T("可能不是章節"), T("章號跟前後章接不上，沒有算進檢查"), strays)):
                     if items:

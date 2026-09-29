@@ -39,6 +39,7 @@ from core.ad_scan import AD_CATEGORY_LABELS, FIX_CATEGORIES, scan_ad_candidates
 from core.user_rules import PRESET_RULES, pop_timed_out_rules, preset_match
 from core.collection import (
     chapter_gap_report, group_formal_chapters, missed_middle_chapters, missed_tail_chapters, missed_volumes,
+    move_chapter_blocks,
     scan_chapter_candidates,
 )
 from core.docx_reader import DocxError, is_docx, read_docx_text
@@ -64,6 +65,7 @@ from .app_log import action, log, native_dialog, timed
 from .help_dialog import HelpDialog
 from .content_panel import ContentPanel
 from .chapter_panel import ChapterPanel
+from .chapter_order_dialog import ChapterOrderDialog
 from .find_bar import FindBar
 from .filename_dialog import FilenameDialog
 from .metadata_bar import ENCODING_CODECS, MetadataBar
@@ -2114,9 +2116,59 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                  for node in group["nodes"]), key=lambda entry: entry[0])
             report["anomaly_rows"] = [(self.chapter_raw_map.get(group["nodes"][index], 0), number, kind, guess)
                                       for index, number, kind, guess in report["anomalies"]]
+            report["misplaced_moves"] = self._misplaced_moves(group, report["misplaced"])
             results.append(report)
             previous[group["work"]] = report["last"]
         return results
+
+    def _misplaced_moves(self, group, misplaced) -> list:
+        """缺章檢查的「順序錯亂」：每一章從哪一行搬到哪一行（ChapterOrderDialog、move_chapter_blocks 用）。"""
+        if not misplaced:
+            return []
+        title_rows = sorted(set(self.chapter_raw_map.values()))
+
+        def chapter_end(row):
+            later = title_rows[bisect.bisect_right(title_rows, row):]
+            return later[0] if later else len(self.raw_lines)
+
+        nodes, numbers = group["nodes"], group["numbers"]
+        moves = []
+        for index, number, where, target in misplaced:
+            start = self.chapter_raw_map.get(nodes[index])
+            target_row = self.chapter_raw_map.get(nodes[target])
+            if start is None or target_row is None:
+                continue
+            now = f"第 {numbers[index - 1]} 章後面" if index else "最前面"
+            if where == "after":
+                destination, to = chapter_end(target_row), f"第 {numbers[target]} 章後面"
+            else:
+                destination, to = target_row, f"第 {numbers[target]} 章前面"
+            moves.append({"title": self.toc_full_labels.get(nodes[index], nodes[index].text(0)),
+                          "number": number, "row": start, "start": start, "end": chapter_end(start),
+                          "destination": destination, "now": now, "to": to})
+        return moves
+
+    @action
+    def reorder_misplaced_chapters(self):
+        """缺章檢查結果的「依章號重排」：勾選的章整章搬到章號該在的位置。"""
+        self._sync_raw_lines()
+        self._ensure_toc_current()
+        moves = [move for result in self._find_collection_missing_from_toc() for move in result["misplaced_moves"]]
+        if not moves:
+            dialogs.info(self, "沒有放錯位置的章", "目前的目錄沒有章號放錯位置的章。")
+            return
+        moves.sort(key=lambda move: (move["destination"], move["number"]))
+        dialog = ChapterOrderDialog(self.raw_lines, moves, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.checked_moves()
+        if not chosen:
+            return
+        lines = move_chapter_blocks(self.raw_lines, [(move["start"], move["end"], move["destination"])
+                                                     for move in chosen])
+        self.editor.setExtraSelections([])
+        self._replace_text_from_tool(lines)
+        self._show_status(f"已依章號搬動 {len(chosen)} 章，可以按 Ctrl+Z 復原")
 
     def _missing_problems_from_structure(self, result) -> list:
         """直接用 core 的結構結果算缺章，不需要先把目錄畫出來。"""
@@ -2143,6 +2195,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                     str(a) if a == b else f"{a}–{b}" for a, b in result["missing_ranges"]))
             if result["duplicates"]:
                 details.append("重複 " + compact_number_ranges(result["duplicates"]))
+            if result.get("misplaced"):
+                details.append("順序錯亂 " + compact_number_ranges(
+                    sorted(int(number) for _index, number, _where, _target in result["misplaced"])))
             if details:
                 prefix = "" if result["label"] == "全書" else f"{result['label']}："
                 problems.append(prefix + "、".join(details))
@@ -2188,6 +2243,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             rows = [row for row, value, _node in nodes if value == number]
             entries.append({"kind": "dup", "start": number, "end": number, "row": rows[1] if len(rows) > 1 else 0,
                             "found": []})
+        for move in result.get("misplaced_moves", []):
+            entries.append({"kind": "misplaced", "start": int(move["number"]), "end": int(move["number"]),
+                            "row": move["row"], "found": [], "now": move["now"], "to": move["to"]})
         for row, number, kind, guess in result.get("anomaly_rows", []):
             entries.append({"kind": kind, "start": int(number), "end": guess, "row": row, "found": [],
                             "text": self.raw_lines[row].strip()[:16] if 0 <= row < len(self.raw_lines) else ""})
@@ -2250,6 +2308,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     def _on_missing_report_link(self, link: str):
         """點結果裡的缺口：跳到缺口前最後一章；點重複：跳到第二次出現的那一章。"""
+        if link == "reorder":
+            self.reorder_misplaced_chapters()
+            return
         if link.startswith("line|"):
             self._jump_to_line(int(link.split("|")[1]) + 1)
             return
