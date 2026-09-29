@@ -1351,8 +1351,11 @@ class ContextPreview(QTextEdit):
         self._anchor = -1         # 選到的那段是第幾個段落（捲動定位用）
         self.hide()
 
-    def stacked_under(self, table) -> QWidget:
-        """表格在上、預覽在下，中間的分隔可以拖動調整高度。"""
+    def stacked_under(self, table, click_again_closes: bool = True) -> QWidget:
+        """表格在上、預覽在下，中間的分隔可以拖動調整高度。click_again_closes：再點一次選到的那一列就收起預覽
+        （選取只是為了看內容的表格；選取另有用途的——合併多個檔案要靠它上移、下移——傳 False）。"""
+        if hasattr(table, "click_again_closes"):
+            table.click_again_closes = click_again_closes
         splitter = GripSplitter()
         splitter.addWidget(table)
         splitter.addWidget(self)

@@ -56,7 +56,7 @@ class MergeFilesDialog(QDialog):
         setup_columns(self.table, {0: 56, 1: 260, 2: 80})
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.preview = ContextPreview()
-        root.addWidget(self.preview.stacked_under(self.table), 1)
+        root.addWidget(self.preview.stacked_under(self.table, click_again_closes=False), 1)   # 選取用來上移、下移
 
         self.title_toggle = ToggleSwitch("開頭幾行沒有章節標題時，用檔名當章名", fill=False)
         self.title_toggle.setChecked(title_from_name)

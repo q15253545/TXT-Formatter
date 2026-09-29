@@ -1044,7 +1044,7 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     /* 目錄上方的提示列：好幾條疊在一起時各自有外框、中間留一點距離，圓角才不會黏在一起 */
     QFrame#tocHint {{
         background: {t.selection_bg};
-        border: 1px solid {blend(t.accent, t.selection_bg, 0.25)};
+        border: 1px solid {blend(t.icon_hover, t.selection_bg, 0.35)};   /* 主題的互動色（淺棕是棕色，不是勾選框的藍） */
         border-radius: 8px;
     }}
     QFrame#comboPane {{

@@ -153,6 +153,26 @@ class PreviewTable(QTableWidget):
     """結果表格：點一列時只捲上下、不捲左右。預覽欄很寬時，Qt 預設會把整格捲進畫面，
     橫向捲軸跟著跳到右邊；使用者自己拉的橫向位置要留著。"""
 
+    click_again_closes = False     # 下面有前後文預覽時由 ContextPreview.stacked_under 打開
+
+    @staticmethod
+    def _has_checkbox(item) -> bool:
+        # 格子預設就帶 ItemIsUserCheckable 旗標：有設過勾選狀態的才是真的勾選框
+        return (item is not None and bool(item.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+                and item.data(Qt.ItemDataRole.CheckStateRole) is not None)
+
+    def mousePressEvent(self, event):
+        """再點一次已經選到的那一列（沒按 Ctrl／Shift、不是點勾選框）：取消選取，下面的前後文跟著收起來。"""
+        if self.click_again_closes and event.button() == Qt.MouseButton.LeftButton                 and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            index = self.indexAt(event.position().toPoint())
+            item = self.item(index.row(), index.column()) if index.isValid() else None
+            selected = {row.row() for row in self.selectionModel().selectedRows()}
+            if index.isValid() and selected == {index.row()} and not self._has_checkbox(item):
+                self.clearSelection()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
     def scrollTo(self, index, hint=QTableWidget.ScrollHint.EnsureVisible):
         x = self.horizontalScrollBar().value()
         super().scrollTo(index, hint)
@@ -163,8 +183,7 @@ class PreviewTable(QTableWidget):
         cells = []
         for row in rows:
             for column in range(self.columnCount()):
-                item = self.item(row, column)
-                if item is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                if self._has_checkbox(self.item(row, column)):
                     cells.append((row, column))
                     break
         return cells
