@@ -845,11 +845,6 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         border-color: {t.accent};
         image: url({check_path});
     }}
-    /* 區塊標題本身是勾選框（偵測類型、檢查項目）：字跟 #appTitle 一樣，部分勾選畫「－」 */
-    QCheckBox#groupCheck {{
-        font-size: 15px;
-        font-weight: 600;
-    }}
     QCheckBox::indicator:indeterminate {{
         background: {t.accent};
         border-color: {t.accent};

@@ -1509,46 +1509,6 @@ def snippet_button(parent, line_edit, groups, tooltip: str) -> IconButton:
     return button
 
 
-class GroupCheckBox(QCheckBox):
-    """A section title that is itself the checkbox for a group of checkboxes (detect types, check items): a click
-    checks all of them — or, when all are checked, unchecks all; some checked shows the partial mark. Saves a row
-    of "select all / none" buttons next to the result table's own. A click on the title changes the members
-    silently and emits members_changed once, so the window rescans once instead of once per member."""
-
-    members_changed = Signal()
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(text, parent)
-        self.setObjectName("groupCheck")
-        self.setTristate(True)
-        self._members: list = []
-
-    def add_member(self, box: QCheckBox):
-        self._members.append(box)
-        box.toggled.connect(self._sync)
-        self._sync()
-
-    def nextCheckState(self):
-        on = self.checkState() != Qt.CheckState.Checked
-        for box in self._members:
-            box.blockSignals(True)
-            box.setChecked(on)
-            box.blockSignals(False)
-        self._sync()
-        self.members_changed.emit()
-
-    def _sync(self, *_args):
-        count = sum(box.isChecked() for box in self._members)
-        if count and count == len(self._members):
-            state = Qt.CheckState.Checked
-        else:
-            state = Qt.CheckState.PartiallyChecked if count else Qt.CheckState.Unchecked
-        self.blockSignals(True)
-        self.setCheckState(state)
-        self.blockSignals(False)
-
-
-
 def dropped_paths(event) -> list:
     """拖進來的本機檔案路徑（拖的是文字不是檔案就是空的）。"""
     mime = event.mimeData()

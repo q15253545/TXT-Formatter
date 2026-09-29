@@ -31,7 +31,7 @@ class DuplicateChaptersDialog(QDialog):
         self._keep: list[list[bool]] = []
         self._entries: list[tuple[int, int]] = []    # 表格第幾列 → (第幾組, 組裡第幾章)
 
-        root, footer = dialog_frame(self, intro="章號相同或內容重複的章節；勾選要保留的，沒勾的刪除（重貼標題只刪標題行）。")
+        root, footer = dialog_frame(self, intro="章號相同或內容重複的章節，勾選要保留的，其餘刪除。")
         root.setSpacing(12)
 
         self.status_label = QLabel("")

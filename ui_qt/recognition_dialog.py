@@ -762,7 +762,7 @@ class RecognitionDialog(QDialog):
         self.result_volume_rows: set = set()
         self._analyze(get_document_lines(), known_rows)
 
-        root, footer = dialog_frame(self, intro="設定哪些寫法算章、卷：用積木組合，或自己寫規則；可疑章節可以勾選後加入目錄。")
+        root, footer = dialog_frame(self, intro="設定哪些寫法算章、卷；可疑章節分頁可以把漏掉的行加進目錄。")
         root.setSpacing(12)
         self.tabs = QTabWidget()
         self.pages = {level: _LevelPage(self, level) for level in (2, 1)}

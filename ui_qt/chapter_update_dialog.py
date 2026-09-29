@@ -55,7 +55,7 @@ class ChapterUpdateDialog(QDialog):
         self._checked = {item["index"] for item in plan if item["suggested"]}
 
         root, footer = dialog_frame(
-            self, intro="比對新下載的檔案和本文：本文缺少的章節補進原本的位置，新章節接在最後。")
+            self, intro="比對新下載的檔案和本文，把本文缺少的章節和新章節加進來。")
         root.setSpacing(12)
 
         file_row = QHBoxLayout()

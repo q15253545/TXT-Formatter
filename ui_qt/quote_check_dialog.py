@@ -11,7 +11,7 @@ import re
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
 )
 
@@ -21,7 +21,7 @@ from core.quote_check import (
 from . import dialogs, i18n
 from .sortable_table import HeaderCheckBox, PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
 from .theme import active_tokens
-from .widgets import ContextPreview, Divider, GroupCheckBox, ScopeToggle, dialog_frame, flow_container, size_dialog
+from .widgets import ChoiceMenuButton, ContextPreview, ScopeToggle, dialog_frame, size_dialog
 
 # 每種問題該怎麼看待，寫在勾選框的提示裡。
 _KIND_TIPS = {
@@ -218,7 +218,7 @@ class QuoteCheckDialog(QDialog):
         self.result_lines: list | None = None
         self.applied_count = 0
 
-        root, footer = dialog_frame(self, intro="找出引號沒成對、對話斷行、重複標點與可疑字詞；有正確寫法的可以勾選後一次修正。")
+        root, footer = dialog_frame(self, intro="找出引號、斷行、標點與可疑字詞的問題，有正確寫法的可以勾選後一次修正。")
         root.setSpacing(12)
 
         # 「只檢查選取的章節」是範圍，所有工具視窗都放在最上面（預設關著，見 ScopeToggle）。
@@ -226,51 +226,33 @@ class QuoteCheckDialog(QDialog):
         self.scope_check.toggled.connect(self._run_scan)
         root.addWidget(self.scope_check)
 
-        self.kind_group = GroupCheckBox("檢查項目")
-        self.kind_group.members_changed.connect(self._refresh)
-        root.addWidget(self.kind_group)
-
-        kind_box, kind_flow = flow_container(uniform=True)
-        self._kind_checks = {}
-        for key, label in QUOTE_PROBLEM_LABELS.items():
-            if key == _SEPARATOR_KIND:
-                continue
-            checkbox = QCheckBox(label)
-            checkbox.setChecked(enabled_kinds is None or key in enabled_kinds)
-            checkbox.setToolTip(_KIND_TIPS.get(key, ""))
-            checkbox.toggled.connect(self._refresh)
-            self._kind_checks[key] = checkbox
-            self.kind_group.add_member(checkbox)
-            kind_flow.addWidget(checkbox)
-        root.addWidget(kind_box)
-        # 分隔線統一：同一本書裡 --- 和 === 混用時，由使用者決定要不要統一、統一成哪一種。
-        # 只列這本書出現過的樣式（附行數，多的在前）；選了之後，其他樣式的分隔線才列成「分隔線不一致」。
-        separator_row = QHBoxLayout()
-        separator_row.setSpacing(10)
+        # 檢查項目、可疑字詞（不是標點，另成一組）、分隔線統一成：三個設定同一列，各自一顆下拉，表格多出高度。
+        # 分隔線統一：同一本書裡 --- 和 === 混用時，由使用者決定要不要統一、統一成哪一種；只列這本書出現過的
+        # 樣式（附行數，多的在前），選了之後，其他樣式的分隔線才列成「分隔線不一致」。
+        settings_row = QHBoxLayout()
+        settings_row.setSpacing(10)
+        self.kind_buttons = {}
+        for title, labels in (("檢查項目", {key: label for key, label in QUOTE_PROBLEM_LABELS.items()
+                                            if key != _SEPARATOR_KIND}),
+                              ("可疑字詞", WORD_PROBLEM_LABELS)):
+            label = QLabel(title)
+            label.setObjectName("fileLabel")
+            settings_row.addWidget(label)
+            button = ChoiceMenuButton([(key, text, _KIND_TIPS.get(key, "")) for key, text in labels.items()],
+                                      None if enabled_kinds is None else set(enabled_kinds))
+            button.changed.connect(self._refresh)
+            self.kind_buttons[title] = button
+            settings_row.addWidget(button)
+            settings_row.addSpacing(8)
         separator_label = QLabel("分隔線統一成")
         separator_label.setObjectName("fileLabel")
-        separator_row.addWidget(separator_label)
+        settings_row.addWidget(separator_label)
         self.separator_combo = QComboBox()
         self.separator_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.separator_combo.currentIndexChanged.connect(self._run_scan)
-        separator_row.addWidget(self.separator_combo)
-        separator_row.addStretch(1)
-        root.addLayout(separator_row)
-        # 可疑字詞不是標點，另成一組；一樣逐行找、有正確寫法的可以修
-        self.word_group = GroupCheckBox("可疑字詞")
-        self.word_group.members_changed.connect(self._refresh)
-        root.addWidget(self.word_group)
-        word_box, word_flow = flow_container(uniform=True)
-        for key, label in WORD_PROBLEM_LABELS.items():
-            checkbox = QCheckBox(label)
-            checkbox.setChecked(enabled_kinds is None or key in enabled_kinds)
-            checkbox.setToolTip(_KIND_TIPS.get(key, ""))
-            checkbox.toggled.connect(self._refresh)
-            self._kind_checks[key] = checkbox
-            self.word_group.add_member(checkbox)
-            word_flow.addWidget(checkbox)
-        root.addWidget(word_box)
-        root.addWidget(Divider())
+        settings_row.addWidget(self.separator_combo)
+        settings_row.addStretch(1)
+        root.addLayout(settings_row)
 
         self.status_label = QLabel("尚未檢查")
         self.status_label.setObjectName("fileLabel")
@@ -314,7 +296,7 @@ class QuoteCheckDialog(QDialog):
     # ------------------------------------------------------------------
 
     def enabled_kinds(self) -> set:
-        return {key for key, box in self._kind_checks.items() if box.isChecked()}
+        return set().union(*(button.checked() for button in self.kind_buttons.values()))
 
     def separator_target(self):
         """使用者選的分隔線符號；不統一時是 None。"""
