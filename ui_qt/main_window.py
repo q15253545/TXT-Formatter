@@ -27,7 +27,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QProgressDialog, QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core.cn_numerals import chinese_to_arabic
@@ -89,7 +89,7 @@ from . import __version__
 from .window_common import (
     DEFAULT_STRUCTURE_MODE, EDITOR_BASE_FONT_PX, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, MARKER_GUIDE,
     MARK_SCAN_DELAY_MS, MAX_HIGHLIGHT_SPANS, MAX_HISTORY_CHARS, MAX_HISTORY_STEPS, MIN_HISTORY_STEPS,
-    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
+    MERGE_WARN_BYTES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
     WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals,
     _NUMBER_WITHOUT_UNIT, _ToolDialogWatcher, _chapter_line_mapper, _diff_line_mapper, _format_line_mapper,
     EPUB_ENCODING, WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
@@ -911,23 +911,22 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             if paths and self._confirm_discard_changes():
                 self.load_file_path(paths[0])
             return
-        parts = []
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            for path in paths:
-                encoding = None if is_docx(path) or is_epub(path) else smart_detect_encoding(path)
-                try:
-                    content, _damaged, _encoding = self._read_document(path, encoding)
-                except OSError as error:
-                    dialogs.error(self, "讀取失敗", f"無法開啟檔案：\n{path}\n\n{error}")
-                    return
-                if content is None:
-                    return
-                content, _boms, _zero_width = strip_invisible_chars(content)
-                parts.append((path, content))
-        finally:
-            QApplication.restoreOverrideCursor()
-        dialog = MergeFilesDialog(parts, bool(self._ui_state.get("merge_title_from_name", True)), self)
+        # 合計很大時先問：合成一份之後排版、檢查都跟著變慢（24 MB 的書一鍵排版約 4 秒）
+        total = sum(os.path.getsize(path) for path in paths if os.path.isfile(path))
+        if total > MERGE_WARN_BYTES and not dialogs.confirm(
+                self, "檔案很大",
+                f"這 {len(paths)} 個檔合計 {total / 1e6:.0f} MB。合併成一份之後，排版、檢查都會很慢，"
+                "記憶體也會用很多。確定要合併嗎？"):
+            return
+        parts, skipped = self._read_merge_parts(paths)
+        if parts is None:
+            self._show_status("已取消合併")
+            return
+        if len(parts) < 2:
+            names = "\n".join(f"{name}（{reason}）" for name, reason in skipped[:10])
+            dialogs.error(self, "無法合併", f"只讀到 {len(parts)} 個檔，沒辦法合併：\n\n{names}")
+            return
+        dialog = MergeFilesDialog(parts, bool(self._ui_state.get("merge_title_from_name", True)), self, skipped)
         if dialog.exec() != QDialog.DialogCode.Accepted or not self._confirm_discard_changes():
             return
         self._ui_state["merge_title_from_name"] = dialog.result_title_from_name
@@ -935,6 +934,41 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         folder = os.path.basename(os.path.dirname(os.path.abspath(dialog.result_parts[0][0])))
         title = extract_filename_metadata(folder)[0] if folder else ""
         self.load_file_path("", merged=(text, i18n.T(f"合併 {len(parts)} 個檔案"), title))
+
+    def _read_merge_parts(self, paths):
+        """一個一個讀要合併的檔，有進度條、可以取消（取消時回傳 (None, 略過的)）。讀不到的檔略過、記下原因，
+        不整批放棄；編碼不符的詢問可以「後面的檔案也這樣處理」。回傳（[(路徑, 文字)], [(檔名, 原因)]）。"""
+        parts, skipped = [], []
+        remember: dict = {}
+        progress = QProgressDialog(i18n.T("讀取檔案…"), i18n.T("取消"), 0, len(paths), self)
+        progress.setWindowTitle(i18n.T("合併多個檔案"))
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(400)          # 很快讀完的（幾十個小檔）不閃一下進度條
+        progress.setAutoClose(False)
+        try:
+            for index, path in enumerate(paths):
+                name = os.path.basename(path)
+                progress.setLabelText(i18n.T(f"讀取第 {index + 1}／{len(paths)} 個檔：") + name)
+                progress.setValue(index)
+                if progress.wasCanceled():
+                    return None, skipped
+                remember.pop("error", None)
+                try:
+                    encoding = None if is_docx(path) or is_epub(path) else smart_detect_encoding(path)
+                    content, _damaged, _encoding = self._read_document(path, encoding, remember)
+                except OSError as error:
+                    skipped.append((name, i18n.T("讀取失敗") + f"：{error.strerror or error}"))
+                    continue
+                if content is None:
+                    skipped.append((name, i18n.T("讀取失敗") if "error" in remember else i18n.T("編碼不符，已略過")))
+                    continue
+                content, _boms, _zero_width = strip_invisible_chars(content)
+                parts.append((path, content))
+            progress.setValue(len(paths))
+        finally:
+            progress.close()
+            progress.deleteLater()
+        return parts, skipped
 
     def _show_open_menu(self):
         self.update_chapters_action.setEnabled(self._has_document())
@@ -1111,26 +1145,27 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if info.get("author"):
             self.metadata_bar.author_input.setText(info["author"])
 
-    def _read_document(self, path: str, encoding: str):
+    def _read_document(self, path: str, encoding: str, remember: dict | None = None):
+        """remember：合併好幾個檔時給一個 dict——讀不了的 EPUB、Word 不跳錯誤（記在 remember["error"]，
+        呼叫端略過這個檔、最後一起列出），編碼不符的詢問可以「後面的檔案也這樣處理」。"""
         self._epub_info = None
-        if is_epub(path):
+        if is_epub(path) or is_docx(path):
+            kind = "EPUB" if is_epub(path) else "Word 檔"
             try:
-                text, self._epub_info = read_epub(path)
-                return text, 0, EPUB_ENCODING
-            except EpubError as error:
-                log.warning("讀取 EPUB 失敗：%s", error)
-                dialogs.error(self, "讀取失敗", f"無法讀取這個 EPUB：\n{path}\n\n{error}")
-                return None, 0, encoding
-        if is_docx(path):
-            try:
+                if is_epub(path):
+                    text, self._epub_info = read_epub(path)
+                    return text, 0, EPUB_ENCODING
                 return read_docx_text(path), 0, WORD_ENCODING
-            except DocxError as error:
-                log.warning("讀取 Word 檔失敗：%s", error)
-                dialogs.error(self, "讀取失敗", f"無法讀取這個 Word 檔：\n{path}\n\n{error}")
+            except (EpubError, DocxError) as error:
+                log.warning("讀取%s失敗：%s", kind, error)
+                if remember is not None:
+                    remember["error"] = str(error)
+                else:
+                    dialogs.error(self, "讀取失敗", f"無法讀取這個 {kind}：\n{path}\n\n{error}")
                 return None, 0, encoding
-        return self._read_text_document(path, encoding)
+        return self._read_text_document(path, encoding, remember)
 
-    def _read_text_document(self, path: str, encoding: str):
+    def _read_text_document(self, path: str, encoding: str, remember: dict | None = None):
         """先嚴格解碼；編碼不符時問過使用者才容錯開啟。
 
         不預設容錯：解不開的位元組會變成「�」，一旦照這樣編輯、匯出，原本
@@ -1143,7 +1178,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             except (UnicodeError, LookupError) as error:
                 log.warning("以 %s 嚴格解碼失敗：%s", encoding, error)
             choices = [label for label, codec in ENCODING_CODECS.items() if codec != encoding]
-            choice, label = dialogs.decode_failure(self, os.path.basename(path), encoding, choices)
+            saved = remember.get("decode") if remember is not None else None
+            if saved is not None and not (saved.get("action") == "retry"
+                                          and ENCODING_CODECS.get(saved.get("label")) == encoding):
+                choice, label = saved.get("action"), saved.get("label")      # 前面的檔勾了「後面也這樣處理」
+            else:
+                decided = {} if remember is not None else None
+                choice, label = dialogs.decode_failure(self, os.path.basename(path), encoding, choices, decided)
+                if decided:
+                    remember["decode"] = decided
             if choice == "retry" and label in ENCODING_CODECS:
                 encoding = ENCODING_CODECS[label]
                 continue

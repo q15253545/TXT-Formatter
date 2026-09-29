@@ -17,12 +17,14 @@ from .widgets import ContextPreview, ToggleSwitch, dialog_frame, size_dialog
 
 
 class MergeFilesDialog(QDialog):
-    def __init__(self, parts: list, title_from_name: bool = True, parent=None):
-        """parts：[(路徑, 文字)]，已經照檔名排好。接受後結果在 result_parts、result_title_from_name。"""
+    def __init__(self, parts: list, title_from_name: bool = True, parent=None, skipped=()):
+        """parts：[(路徑, 文字)]，已經照檔名排好；skipped：[(檔名, 原因)] 沒讀到、略過的檔。
+        接受後結果在 result_parts、result_title_from_name。"""
         super().__init__(parent)
         self.setWindowTitle("合併多個檔案")
         size_dialog(self, 820, 600)
         self._parts = list(parts)
+        self._skipped = list(skipped)
         self.result_parts = self.result_title_from_name = None
 
         root, footer = dialog_frame(self, intro="照檔名裡的數字排好順序，合併成一份新的本文。")
@@ -41,6 +43,7 @@ class MergeFilesDialog(QDialog):
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("fileLabel")
+        self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
         # 順序就是合併的順序：不開放點標題列排序，要調整用上移、下移
@@ -86,6 +89,10 @@ class MergeFilesDialog(QDialog):
         text = f"共 {len(self._parts)} 個檔案"
         if without_title:
             text += f"；{without_title} 個檔案開頭沒有章節標題"
+        if self._skipped:
+            names = "、".join(f"{name}（{reason}）" for name, reason in self._skipped[:3])
+            more = f"等 {len(self._skipped)} 個" if len(self._skipped) > 3 else ""
+            text += f"；沒讀到、不會合併：{names}{more}"
         i18n.set_text(self.status_label, text)
         if 0 <= selected < len(self._parts):
             self.table.selectRow(selected)

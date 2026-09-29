@@ -94,6 +94,7 @@ FULL_TOOLBAR_WIDTH = 940
 COMPACT_ARROW_WIDTH = 26     # 只顯示圖示時，選擇檔案、匯出 TXT 旁邊的箭頭寬度
 _NUMBER_WITHOUT_UNIT = re.compile(r"^第\s*(" + CN_NUM_FLOAT_PATTERN + r")[\s　]+\S")
 PENDING_LINE_MAP_LIMIT = 32     # 行號位移累積幾次就折成一張表（見 _push_line_map）
+MERGE_WARN_BYTES = 30_000_000   # 合併的檔合計超過這麼大先問（合成一份後排版、檢查都很慢）
 
 
 # 行尾持久標記（連同前面的空白），畫面上要隱藏；規則與 core.title_markers 一致。
