@@ -18,7 +18,7 @@ import re
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QTableWidget,
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -163,7 +163,8 @@ class _CandidatePane(QWidget):
 
             preview = re.sub(r"\s+", " ", candidate["preview"]).strip()
             if candidate.get("fix") is not None:
-                preview = f"{preview} → {candidate['fix'].strip()}"
+                # 整行只有遺失的字（??）時換成空行：箭頭後面什麼都沒有看不懂，寫出來
+                preview = f"{preview} → {candidate['fix'].strip() or i18n.T('（換成空行）')}"
             # 內容預覽可以橫向捲動，只擋住幾十行串成一行的極端情況
             if len(preview) > 1000:
                 preview = preview[:999] + "…"
@@ -236,7 +237,7 @@ class AdScanDialog(QDialog):
 
     candidateHighlighted = Signal(int, int)  # start_line, end_line（0-indexed，含首尾）
     deletionReady = Signal(list)             # 刪除後的整份本文
-    reviewRequested = Signal()               # 「在本文逐筆檢查」
+    reviewRequested = Signal(str, int)       # 「在本文逐筆檢查」：從哪一類（ad／note／repeat）、選到的那一筆從哪一行開始（沒選 -1）
 
     def __init__(self, raw_lines: list, parent=None, selected_ranges=None, selected_count: int = 0,
                  ad_categories=None, note_categories=None, title_rows=None, repeat_settings=None,
@@ -275,10 +276,13 @@ class AdScanDialog(QDialog):
         self.tabs.currentChanged.connect(self._scan_if_stale)
         root.addWidget(self.tabs, 1)
 
+        # 「在本文逐筆檢查」是換一種方式看（到本文一筆一筆跳），不是這個視窗的處理：放在左邊，跟處理／關閉分開
+        review_button = QPushButton("在本文逐筆檢查")
+        review_button.clicked.connect(self._request_review)
+        footer.addWidget(review_button)
+        footer.addStretch(1)
         buttons = QDialogButtonBox()
         cancel_button = buttons.addButton("關閉", QDialogButtonBox.ButtonRole.RejectRole)
-        review_button = buttons.addButton("在本文逐筆檢查", QDialogButtonBox.ButtonRole.ActionRole)
-        review_button.clicked.connect(self.reviewRequested.emit)
         # 網頁字元碼、文中的廣告片段是換字，其他都是刪除：會換字的分頁叫「處理」，只會刪除的叫「刪除」
         self.delete_button = buttons.addButton("刪除已勾選項目", QDialogButtonBox.ButtonRole.AcceptRole)
         self.delete_button.setObjectName("primary")
@@ -448,6 +452,12 @@ class AdScanDialog(QDialog):
         candidates = scan_ad_candidates(self._raw_lines, {"repeat"}, self._ranges(), self._title_rows,
                                         repeat_min_length=min_length, repeat_min_count=min_count)
         pane.set_candidates(candidates, "沒有重複出現的段落", state)
+
+    def _request_review(self):
+        tab = self.tabs.currentIndex()
+        candidate = self._current_pane()._selected_candidate()
+        self.reviewRequested.emit({ADS_TAB: "ad", NOTES_TAB: "note"}.get(tab, "repeat"),
+                                  candidate["start"] if candidate else -1)
 
     def _current_pane(self) -> _CandidatePane:
         return self._panes[self.tabs.currentIndex()]

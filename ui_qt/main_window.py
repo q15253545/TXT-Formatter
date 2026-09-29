@@ -141,6 +141,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._infer_volumes = False     # 章節管理的「自動補齊卷號與卷名」開關
         self._auto_apply_preview = False  # 「自動套用到一鍵排版」：一鍵排版前先把章節管理的預覽寫進本文
         self._merge_titles = False      # 「自動合併標題」：下行章名＋重複標題（預覽，套用到本文才寫進去）
+        # 預覽列按了「取消預覽」：只有這本書先不預覽，記下原本的開關（合併標題, 補齊卷），換書時恢復
+        self._suspended_previews = None
         # 合併下行標題的預覽：標題行號 → (章名所在行號, 章名)；目錄上對應的項目
         self.merged_titles: dict = {}
         self.merged_title_items: set = set()
@@ -1016,6 +1018,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         self.close_find_bar()
         self._drop_line_caches()
+        self._resume_previews()
         self.input_file = path
         self.detected_encoding = encoding
         self.raw_lines = content.split("\n")
@@ -2088,12 +2091,24 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.preview_bar.show()
 
     def cancel_toc_preview(self):
-        """預覽列的「取消預覽」：關掉章節管理的兩個預覽開關，目錄回到本文原本的樣子。"""
+        """預覽列的「取消預覽」：這本書先不預覽，目錄回到本文原本的樣子。開關只是暫時關掉：
+        開下一本書時恢復成原本的設定（開關是整個程式的設定，不該因為一本書不適合就一直關著）。"""
+        if self._suspended_previews is None:
+            self._suspended_previews = (self._merge_titles, self._infer_volumes)
         self.chapter_panel.set_merge_titles(False)
         self.chapter_panel.set_infer_volumes(False)
         self._merge_titles = self._infer_volumes = False
         self._rebuild_preview_toc()
-        self._show_status("已取消預覽：自動合併標題、自動補齊卷號與卷名都已關閉")
+        self._show_status("已取消這本書的預覽；開下一本書時照原本的開關預覽")
+
+    def _resume_previews(self):
+        """換書：取消預覽時暫時關掉的開關恢復（不重建目錄：開檔接著就會建）。"""
+        if self._suspended_previews is None:
+            return
+        self._merge_titles, self._infer_volumes = self._suspended_previews
+        self._suspended_previews = None
+        self.chapter_panel.set_merge_titles(self._merge_titles)
+        self.chapter_panel.set_infer_volumes(self._infer_volumes)
 
     def _update_order_hint(self):
         """有章放錯位置時，目錄上方提示「依章號重排」（跟缺章檢查的「順序錯亂」同一套判斷）。"""

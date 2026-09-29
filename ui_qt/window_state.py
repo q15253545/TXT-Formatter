@@ -178,9 +178,10 @@ class WindowStateMixin:
             "find_regex": self.find_bar.regex_button.isChecked(),
             "review_types": sorted(self.review_bar.review_types()),
             "mark_confidence": sorted(self.review_bar.mark_confidence()),
-            "infer_volumes": self._infer_volumes,
+            # 取消預覽只暫停這本書：記住的是原本的開關
+            "infer_volumes": (self._suspended_previews or (None, self._infer_volumes))[1],
             "auto_apply_preview": self._auto_apply_preview,
-            "merge_titles": self._merge_titles,
+            "merge_titles": (self._suspended_previews or (self._merge_titles, None))[0],
             "disabled_words": sorted(self.disabled_words),
             "special_levels": dict(self.special_levels),
             "max_title_length": self.max_title_length,

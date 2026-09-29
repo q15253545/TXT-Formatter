@@ -268,7 +268,7 @@ class ToolWindowsMixin:
                 self._when_warm(lambda: dialog.start_scan() if shiboken6.isValid(dialog) else None)
             dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
             dialog.deletionReady.connect(lambda lines, d=dialog: self._apply_ad_deletion(d, lines))
-            dialog.reviewRequested.connect(lambda: (self._focus_editor_from_tool(), self.start_review()))
+            dialog.reviewRequested.connect(self._review_from_scan)
             return dialog
 
         def reload(dialog):
@@ -297,6 +297,22 @@ class ToolWindowsMixin:
         self._mark_advance_pending = True
         self._on_marking_changed()
         self._show_status("逐筆檢查：F8 下一筆、Shift+F8 上一筆，Esc 結束；要看哪幾類在「篩選」裡勾（顏色定義見說明）")
+
+    def _review_from_scan(self, kind: str, row: int):
+        """非正文內容視窗的「在本文逐筆檢查」：篩選確定有勾那一類（從重複段落分頁按，預設不看重複段落就什麼都找不到），
+        表格選到一筆時從那一筆開始（游標放到那一行，逐筆檢查從游標接著找）。"""
+        types = self.review_bar.review_types()
+        if kind not in types:
+            self.review_bar.set_review_types(types | {kind})
+            self._on_review_types_changed()
+        self._focus_editor_from_tool()
+        if row >= 0:
+            self._jump_to_line(row + 1)
+        if self.review_bar.is_active():
+            self._mark_current = -1
+            self.goto_mark(True)
+        else:
+            self.start_review()
 
     def stop_review(self):
         """結束逐筆檢查：逐筆檢查列收起來，本文的字色一起收掉。"""

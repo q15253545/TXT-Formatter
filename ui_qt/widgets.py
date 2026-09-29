@@ -1657,8 +1657,10 @@ class ChoiceMenuButton(QPushButton):
 
 
 class NoticeBar(QFrame):
-    """目錄上方的提示列（漏掉的章節寫法、章號順序錯亂、預覽中）：一句話＋一排按鈕，
-    closable 時右上角有 ✕（「這本書不再提示」，由呼叫端記住）。"""
+    """目錄上方的提示列（漏掉的章節寫法、章號順序錯亂、預覽中）：一句話＋按鈕，
+    closable 時右上角有 ✕（「這本書不再提示」，由呼叫端記住）。
+    那句話在按鈕左邊放得下（折行也不比按鈕高）時按鈕放同一行，放不下才換到下一行：
+    好幾條同時出現時才不會把目錄擠掉一大塊。"""
 
     dismissed = Signal()
 
@@ -1668,29 +1670,66 @@ class NoticeBar(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 8 if closable else 12, 10)
         layout.setSpacing(8)
-        top = QHBoxLayout()
-        top.setSpacing(6)
+        self._top = QHBoxLayout()
+        self._top.setSpacing(6)
         self.label = QLabel("")
         self.label.setWordWrap(True)
-        top.addWidget(self.label, 1)
+        self._top.addWidget(self.label, 1)
+        self._button_host = QWidget()
+        self._buttons = QHBoxLayout(self._button_host)
+        self._buttons.setContentsMargins(0, 0, 0, 0)
+        self._buttons.setSpacing(6)
+        self._top.addWidget(self._button_host, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._inline = True
         self.close_button = None
         if closable:
             self.close_button = IconButton("x", "這本書不再提示", size=14)
             self.close_button.clicked.connect(self._dismiss)
-            top.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addLayout(top)
-        self._buttons = QHBoxLayout()
-        self._buttons.setSpacing(6)
-        self._buttons.addStretch(1)
-        layout.addLayout(self._buttons)
+            self._top.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(self._top)
+        self._below = QHBoxLayout()
+        self._below.setSpacing(6)
+        self._below.addStretch(1)
+        layout.addLayout(self._below)
+        self._relayout_timer = QTimer(self)
+        self._relayout_timer.setSingleShot(True)
+        self._relayout_timer.setInterval(0)
+        self._relayout_timer.timeout.connect(self._relayout)
         self.hide()
 
     def add_button(self, text: str, primary: bool = False) -> QPushButton:
         button = QPushButton(text)
         if primary:
             button.setObjectName("primary")
-        self._buttons.insertWidget(self._buttons.count() - 1, button)
+        self._buttons.addWidget(button)
+        self._relayout_timer.start()
         return button
+
+    def _fits_inline(self) -> bool:
+        margins = self.layout().contentsMargins()
+        room = self.width() - margins.left() - margins.right() - self._top.spacing() * 2
+        if self.close_button is not None:
+            room -= self.close_button.sizeHint().width()
+        room -= self._button_host.sizeHint().width()
+        # 那句話折成幾行也沒關係，只要不比按鈕高（放同一行不會多佔高度）
+        return bool(self.label.text()) and room >= 80 and             self.label.heightForWidth(room) <= self._button_host.sizeHint().height() + 4
+
+    def _relayout(self):
+        inline = self._fits_inline()
+        if inline == self._inline:
+            return
+        self._inline = inline
+        (self._top if not inline else self._below).removeWidget(self._button_host)
+        if inline:
+            self._top.insertWidget(1, self._button_host, 0, Qt.AlignmentFlag.AlignVCenter)
+        else:
+            self._below.insertWidget(0, self._button_host)
+
+    def event(self, event):
+        # 字換了（label 要求重新排版）、寬度變了、剛顯示：看按鈕放不放得進同一行
+        if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.Resize, QEvent.Type.Show):
+            self._relayout_timer.start()
+        return super().event(event)
 
     def _dismiss(self):
         self.hide()
