@@ -166,6 +166,7 @@ class WindowStateMixin:
             "strip_markers_on_export": self._strip_markers_on_export,
             "ask_old_files_on_export": self._ask_old_files_on_export,
             "export_format": self.export_format,
+            "export_split": self.export_split,
             "show_whitespace": self.content_panel.show_whitespace_toggle.isChecked(),
             "metadata_expanded": self.metadata_bar.toggle_button.isChecked(),
             "side_panel": side_panel if self.raw_lines and any(self.raw_lines) else
@@ -209,6 +210,7 @@ class WindowStateMixin:
         self._strip_markers_on_export = bool(state.get("strip_markers_on_export", True))
         self._ask_old_files_on_export = bool(state.get("ask_old_files_on_export", True))
         self._set_export_format(state.get("export_format", "TXT"))
+        self.export_split = bool(state.get("export_split", False)) and self.export_format == "TXT"
         if state.get("show_title_markers"):
             self.marker_button.setChecked(True)
         if state.get("show_whitespace"):

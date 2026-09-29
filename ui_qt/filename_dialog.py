@@ -1,9 +1,10 @@
 """匯出設定（匯出按鈕旁邊的箭頭）：連載中／已完結兩個檔名格式（各自即時預覽）、插入變數的小標籤、
-檔名繁簡、匯出格式（TXT／EPUB），以及匯出時要不要移除章節標記。"""
+檔名繁簡、匯出格式（TXT／EPUB）與方式（整本一個檔／每章一個檔），以及匯出時要不要移除章節標記。"""
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QStyle,
+    QStyleOptionComboBox,
 )
 
 from core.filename_meta import (
@@ -24,21 +25,23 @@ class _TemplateInput(QLineEdit):
 
 
 EXPORT_FORMATS = ("TXT", "EPUB")
+EXPORT_MODES = ("整本一個檔", "每章一個檔")
 
 
 class FilenameDialog(QDialog):
     """接受後結果在 result_ongoing、result_completed、result_script、result_strip_markers、result_ask_old_files、
-    result_format。"""
+    result_format、result_split。"""
 
     def __init__(self, ongoing: str, completed: str, script: str, fields: dict, status: str, parent=None,
-                 strip_markers: bool = True, ask_old_files: bool = True, export_format: str = "TXT"):
+                 strip_markers: bool = True, ask_old_files: bool = True, export_format: str = "TXT",
+                 split_chapters: bool = False):
         super().__init__(parent)
         self.setWindowTitle("匯出設定")
         self.setMinimumWidth(660)
         keep_on_screen(self)
         self._fields = fields
         self.result_ongoing = self.result_completed = self.result_script = self.result_strip_markers = None
-        self.result_ask_old_files = self.result_format = None
+        self.result_ask_old_files = self.result_format = self.result_split = None
 
         root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True,
                                     intro="檔名照書籍資料組成，連載中、已完結各一種格式。")
@@ -81,6 +84,14 @@ class FilenameDialog(QDialog):
         self.format_combo.setCurrentText(export_format if export_format in EXPORT_FORMATS else "TXT")
         self.format_combo.currentIndexChanged.connect(self._update_previews)
         format_row.addWidget(self.format_combo)
+        format_row.addSpacing(16)
+        format_row.addWidget(QLabel("匯出方式"))
+        # 每章一個檔：放進一個資料夾（core/file_split.py），只有 TXT 能選
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(EXPORT_MODES)
+        self.mode_combo.setCurrentIndex(1 if split_chapters else 0)
+        format_row.addWidget(self.mode_combo)
+        self.format_combo.currentIndexChanged.connect(self._update_mode_enabled)
         format_row.addStretch(1)
         root.addLayout(format_row)
         root.addSpacing(4)
@@ -114,11 +125,20 @@ class FilenameDialog(QDialog):
         footer.addLayout(bottom)
 
         self._update_previews()
+        self._update_mode_enabled()
         self._target.setFocus()
 
     def showEvent(self, event):
         # 開窗時游標放在格式最後面，不要整段反白（一按鍵就把格式整個蓋掉）
         super().showEvent(event)
+        # 全域規則是下拉框不照選項撐寬；這兩個選項都短，照實際字寬（含樣式表的內距）放得下最長的
+        for combo in (self.format_combo, self.mode_combo):
+            metrics = combo.fontMetrics()
+            longest = max(metrics.horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
+            option = QStyleOptionComboBox()
+            combo.initStyleOption(option)
+            combo.setMinimumWidth(combo.style().sizeFromContents(
+                QStyle.ContentsType.CT_ComboBox, option, QSize(longest, metrics.height()), combo).width())
         QTimer.singleShot(0, self._place_cursor)
 
     def _place_cursor(self):
@@ -162,6 +182,12 @@ class FilenameDialog(QDialog):
             edit.setCursorPosition(edit.cursorPosition() - 1)
         edit.setFocus()
 
+    def _update_mode_enabled(self, *_args):
+        epub = self.format_combo.currentText() == "EPUB"
+        if epub:
+            self.mode_combo.setCurrentIndex(0)
+        self.mode_combo.setEnabled(not epub)
+
     def _preview(self, template: str, default: str) -> str:
         name = build_smart_filename(self._fields, template.strip() or default)
         if self.format_combo.currentText() == "EPUB" and name.lower().endswith(".txt"):
@@ -178,6 +204,7 @@ class FilenameDialog(QDialog):
         self.strip_markers_toggle.setChecked(True)
         self.ask_old_files_toggle.setChecked(True)
         self.format_combo.setCurrentText("TXT")
+        self.mode_combo.setCurrentIndex(0)
 
     def _accept(self):
         self.result_ongoing = self.ongoing_input.text().strip() or DEFAULT_ONGOING_TEMPLATE
@@ -186,4 +213,5 @@ class FilenameDialog(QDialog):
         self.result_strip_markers = self.strip_markers_toggle.isChecked()
         self.result_ask_old_files = self.ask_old_files_toggle.isChecked()
         self.result_format = self.format_combo.currentText()
+        self.result_split = self.mode_combo.currentIndex() == 1 and self.result_format == "TXT"
         self.accept()

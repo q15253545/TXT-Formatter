@@ -55,7 +55,7 @@ class MergeFilesDialog(QDialog):
         self.preview = ContextPreview()
         root.addWidget(self.preview.stacked_under(self.table), 1)
 
-        self.title_toggle = ToggleSwitch("第一行不是章節標題時，用檔名當章名", fill=False)
+        self.title_toggle = ToggleSwitch("開頭幾行沒有章節標題時，用檔名當章名", fill=False)
         self.title_toggle.setChecked(title_from_name)
         root.addWidget(self.title_toggle)
 
@@ -85,7 +85,7 @@ class MergeFilesDialog(QDialog):
                 without_title += 1
         text = f"共 {len(self._parts)} 個檔案"
         if without_title:
-            text += f"；{without_title} 個檔案第一行不是章節標題"
+            text += f"；{without_title} 個檔案開頭沒有章節標題"
         i18n.set_text(self.status_label, text)
         if 0 <= selected < len(self._parts):
             self.table.selectRow(selected)

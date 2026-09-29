@@ -47,6 +47,7 @@ from core.docx_reader import DocxError, is_docx, read_docx_text
 from core.epub_reader import EpubError, is_epub, read_epub
 from core.epub_writer import EpubSection, build_epub
 from core.file_merge import merge_texts, natural_key
+from core.file_split import section_filenames, split_sections
 from core.chapter_update import dominant_script
 from core.encoding import detect_line_ending, looks_misdecoded, smart_detect_encoding, strip_invisible_chars
 from core.file_io import read_text, read_text_lossy, write_text_atomic
@@ -122,6 +123,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.detected_encoding = "utf-8"
         self._epub_info = None
         self.export_format = "TXT"      # 匯出設定的「匯出格式」：TXT／EPUB
+        self.export_split = False       # 匯出設定的「匯出方式」：每章一個檔（只有 TXT）
         self.raw_lines: list[str] = []
         self.user_chapter_rules: list = load_user_chapter_rules()
         self.auto_titles: dict = {}
@@ -1511,6 +1513,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             return False
         if self.export_format == "EPUB":
             return self._export_epub()
+        if self.export_split:
+            return self._export_split(strip_markers)
         default_name = self._suggest_export_filename()
         # 上次匯出的資料夾；還沒匯出過就放在原檔旁邊
         folder = (self._remembered_dir("last_export_dir")
@@ -1549,6 +1553,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     def _set_export_format(self, export_format):
         """匯出設定的「匯出格式」；工具列的匯出按鈕跟著寫「匯出 TXT／匯出 EPUB」。"""
         self.export_format = export_format if export_format in ("TXT", "EPUB") else "TXT"
+        if self.export_format != "TXT":
+            self.export_split = False
         label = f"匯出 {self.export_format}"
         i18n.set_text(self.save_button, label)
         if self._toolbar_compact:
@@ -1625,6 +1631,41 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._show_status(i18n.T("已匯出：") + path + i18n.T(f"（EPUB，目錄 {len(sections)} 項）"), translated=True)
         return True
 
+    def _export_split(self, strip_markers: bool | None = None) -> bool:
+        """匯出方式「每章一個檔」：目錄的每一項存成一個 TXT，放進一個以匯出檔名命名的資料夾
+        （core/file_split.py）。不算「已存檔」，也不問要不要移除舊檔。"""
+        self._sync_raw_lines()
+        self._ensure_toc_current()
+        start = (self._remembered_dir("last_export_dir")
+                 or (os.path.dirname(self.input_file) if self.input_file else "")
+                 or self._remembered_dir("last_open_dir"))
+        with native_dialog():
+            parent = QFileDialog.getExistingDirectory(self, i18n.T("選擇要放資料夾的位置"), start)
+        if not parent:
+            return False
+        folder = os.path.join(parent, os.path.splitext(self._suggest_export_filename())[0])
+        sections = split_sections(self.raw_lines, self.chapter_raw_map.values())
+        names = section_filenames([title for title, _body in sections])
+        existing = [name for name in names if os.path.exists(os.path.join(folder, name))]
+        if existing and not dialogs.confirm(
+                self, "資料夾裡已經有同名的檔案",
+                f"「{os.path.basename(folder)}」裡已經有 {len(existing)} 個同名的檔案，要取代嗎？"):
+            return False
+        strip = self._strip_markers_on_export if strip_markers is None else strip_markers
+        try:
+            os.makedirs(folder, exist_ok=True)
+            for name, (_title, body) in zip(names, sections):
+                content = "\n".join(body)
+                if strip:
+                    content, _count = strip_export_markers(content)
+                write_text_atomic(os.path.join(folder, name), content, encoding="utf-8-sig")
+        except (OSError, UnicodeError) as error:
+            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{folder}\n\n{error}")
+            return False
+        self._ui_state["last_export_dir"] = parent
+        self._show_status(i18n.T(f"已匯出 {len(names)} 個檔案到：") + folder, translated=True)
+        return True
+
     def _offer_old_file_cleanup(self, new_path: str) -> str:
         """匯出後：資料夾裡同一本書的舊檔（檔名的書名、作者一樣）、剛才開啟的檔案，問過才移到資源回收筒。
         回傳要接在狀態列後面的說明（沒做什麼就是空字串）。"""
@@ -1690,7 +1731,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         dialog = FilenameDialog(self.filename_ongoing, self.filename_completed, self.filename_script,
                                 self._filename_fields(), self.metadata_bar.status(), self,
                                 strip_markers=self._strip_markers_on_export,
-                                ask_old_files=self._ask_old_files_on_export, export_format=self.export_format)
+                                ask_old_files=self._ask_old_files_on_export, export_format=self.export_format,
+                                split_chapters=self.export_split)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._ask_old_files_on_export = dialog.result_ask_old_files
@@ -1698,9 +1740,12 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.filename_script = dialog.result_script
         self._strip_markers_on_export = dialog.result_strip_markers
         self._set_export_format(dialog.result_format)
+        self.export_split = dialog.result_split
         name = self._suggest_export_filename()
         if self.export_format == "EPUB":
             name = os.path.splitext(name)[0] + ".epub"
+        elif self.export_split:
+            name = i18n.T("資料夾「") + os.path.splitext(name)[0] + i18n.T("」，每章一個檔")
         self._show_status(i18n.T(f"匯出格式：{self.export_format}；") + i18n.T("匯出檔名：") + name
                           + i18n.T("；匯出時移除章節標記" if self._strip_markers_on_export else "；匯出時保留章節標記"),
                           translated=True)
