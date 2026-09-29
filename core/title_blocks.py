@@ -169,7 +169,7 @@ def refresh_block_rule(rule: dict):
 _ALL_SEPS = ["無", "空格", "、", ".", "：", "-"]
 _ARABIC = ["123", "全形１２"]
 _ANY_NUMBER = ["一二三", "123", "全形１２"]
-# 常用寫法：（代號, 層級, 積木）。代號跟 user_rules.PRESET_RULES（本文可疑章節用的常用格式）一樣。
+# 常用寫法：（代號, 層級, 積木）。代號跟 user_rules.PRESET_RULES（可疑章節用的常用格式）一樣。
 TEMPLATES = [
     ("hash_number", 2, {"frame": ["無"], "prefix": ["#"], "number": _ARABIC, "unit": ["無"],
                         "sep": _ALL_SEPS, "title": "要有"}),

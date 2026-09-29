@@ -213,7 +213,7 @@ def chapter_range_end(text):
 
 
 def parse_lv2(line):
-    # 自動辨識只收正規格式（第N章／回／節…、番外）；英文 Chapter N 是「自訂章節規則」的常用格式。
+    # 自動辨識只收正規格式（第N章／回／節…、番外）；英文 Chapter N 是辨識章節的常用寫法。
     # COMBO_LV2_NUM_REGEX 給連續編號、保留標題間隔這些「已經確定是標題」之後的處理使用。
     if "." in line or "．" in line:
         line = _LEADING_DOT.sub(lambda match: match.group(1), line)
@@ -250,7 +250,7 @@ def parse_lv1(line):
     if m and m.group("arc") and _CHAPTER_IN_ARC.search(m.group("arc")):
         return None
     # 只收「第N卷／部／篇／集」：不帶「第」的「集三千寵愛於一身」會被當成卷，那種寫法是
-    # 「自訂章節規則」的常用格式（要求編號後面有分隔）。LV1_A_REGEX 的另一種語序給連續編號用。
+    # 辨識章節的常用寫法（要求編號後面有分隔）。LV1_A_REGEX 的另一種語序給連續編號用。
     if m and m.group("number"):
         fields = m.groupdict(default="")
         return (_clean_arc(fields["arc"]), fields["prefix"] or "第", chinese_to_arabic(fields["number"]),
@@ -423,7 +423,7 @@ def looks_like_heading(text: str, max_length: int = MAX_TITLE_LENGTH) -> bool:
     return heading_word(text) is not None and not not_a_heading(text)
 
 
-# 自動辨識認得的字：（代號, 顯示, 這一組包含的寫法）。使用者可以在「自訂章節規則 → 辨識格式」
+# 自動辨識認得的字：（代號, 顯示, 這一組包含的寫法）。使用者可以在「辨識章節」
 # 關掉其中幾個，例如關掉「節」「部」，正文裡的「第一節課」「第一部手機」就不會被當成章節。
 CHAPTER_WORDS = (("章", "第N章", ("章",)), ("回", "第N回", ("回",)), ("節", "第N節", ("節", "节")),
                  ("折", "第N折", ("折",)), ("幕", "第N幕", ("幕",)), ("番外", "番外", ("番外",)))

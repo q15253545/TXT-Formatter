@@ -995,7 +995,7 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         background: {t.selection_bg};
         color: {t.tree_selected_text};
     }}
-    /* 自訂章節規則 → 辨識格式的分類清單：跟目錄樹同一套 hover／選取色 */
+    /* 辨識章節的組合清單：跟目錄樹同一套 hover／選取色 */
     /* 辨識章節左邊的組合清單：每一列是自己畫的（名稱、信心、開關），選到的那一列加淡底 */
     /* 目錄是空的時候，目錄卡片最上面那段提示（加成辨識章節的組合） */
     /* 目錄右下角的到最前面／到最後面：視窗底色的小膠囊（跟白色卡片有色差），浮在清單上 */

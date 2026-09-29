@@ -36,7 +36,7 @@ AD_CATEGORY_LABELS = {
 }
 # 換字（不是刪行）的類型：本文字色、排版前的廣告提醒都不算它們
 FIX_CATEGORIES = frozenset({"entity", "lost"})
-# 「作者感言與作品資訊」視窗只看這兩類；其餘（含重複段落）在「掃描無關連內容」視窗。
+# 非正文內容視窗「作者感言與作品資訊」分頁只看這兩類；其餘在「廣告與網頁字元」「重複段落」分頁。
 NOTE_CATEGORIES = ("author_note", "meta")
 AD_ONLY_CATEGORIES = tuple(key for key in AD_CATEGORY_LABELS if key not in NOTE_CATEGORIES)
 
@@ -146,7 +146,7 @@ def meta_line_kind(text):
     打開作者感言視窗時整本每一行都要問一次。
 
     單獨的日期只給「中」信心：日記體小說每一章開頭就是日期，如果給高信心
-    而使用者順手按「全選高信心」，整本書的章節開頭就被刪光了。
+    而使用者順手照信心勾選，整本書的章節開頭就被刪光了。
     """
     stripped = text.strip()
     if not stripped or len(stripped) > META_MAX_LENGTH:
@@ -1146,7 +1146,7 @@ def _scan_ad_candidates(lines, enabled, title_rows=None, repeat_min_length=REPEA
     # 不走下面那套「特徵愈多分數愈高」的算法。
     meta_by_line = (_map_in_chunks(meta_line_kind, lines) if "meta" in enabled
                     else [None] * total)
-    # 論壇轉貼資訊（使用者資料表裡的註冊日期、數字）算無關連內容，不在作品資訊裡再列一次
+    # 論壇轉貼資訊（使用者資料表裡的註冊日期、數字）算廣告，不在作品資訊裡再列一次
     header_blocks = (forum_header_blocks(lines, title_rows)
                      if enabled & {"meta", "forum", "author_note"} else [])
     forum_blocks = (header_blocks + forum_profile_blocks(lines, title_rows)

@@ -321,7 +321,7 @@ def missed_tail_chapters(lines, chapters, last_row, max_length=MAX_TITLE_LENGTH)
 
 
 def scan_chapter_candidates(lines, known_rows=frozenset(), max_length=MAX_TITLE_LENGTH):
-    """「本文可疑章節」：看起來像章節、但目前不在目錄裡的行。
+    """「可疑章節」：看起來像章節、但目前不在目錄裡的行。
     max_length 照「標題長度」的設定：常用格式本身不限章名長度，不擋的話正文裡一整句的條列
     （「4、依照規定應當…」）也會被列成高信心的可疑章節。
 

@@ -312,7 +312,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         side_layout.addWidget(self.options_panel)
         self.options_panel.hide()
 
-        # 內容檢查：掃描無關連內容、作者感言與作品資訊、標點校對、繁簡轉換＋字色標示開關
+        # 內容檢查：掃描非正文內容、逐筆檢查、標點校對、繁簡轉換、顯示內文空格
         self.content_panel = ContentPanel()
         self.content_panel.ad_scan_requested.connect(self.open_ad_scan_dialog)
         self.content_panel.review_requested.connect(self.start_review)
@@ -625,7 +625,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 只有圖示的按鈕放滑鼠提示（名稱＋快捷鍵）；有文字的按鈕不放，文字已經說了（UI_RULES.md）
         self.undo_button = self._add_header_button(layout, "undo-2", "上一步（Ctrl+Z）", self._undo, None)
         self.redo_button = self._add_header_button(layout, "redo-2", "下一步（Ctrl+Y）", self._redo, None)
-        # 編輯動作（上一步、下一步、清空）跟外觀設定（主題、繁簡）之間一條直線
+        # 編輯動作（上一步、下一步）跟外觀設定（主題、繁簡）之間一條直線
         layout.addSpacing(4)
         layout.addWidget(VDivider())
         layout.addSpacing(4)

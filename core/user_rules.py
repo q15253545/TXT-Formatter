@@ -1,4 +1,4 @@
-"""使用者自訂章節規則的比對，以及可在「自訂章節規則」裡勾選的常用格式。"""
+"""章節規則（辨識章節的組合、自己寫的規則）的比對，以及可疑章節用的常用格式。"""
 
 import re
 from functools import lru_cache
@@ -202,7 +202,7 @@ def special_word_rule(word: str, level: int = 2, enabled: bool = True) -> dict:
 
 
 # 巢狀量詞（(a+)+、(.*)* …）在比對失敗時會呈指數成長，是正則卡死的典型寫法。
-# 尋找面板與自訂章節規則共用這個判斷。
+# 尋找面板與辨識章節（自己寫的規則）共用這個判斷。
 RISKY_REGEX = re.compile(r"\([^)]*[+*][^)]*\)\s*[+*]")
 
 
@@ -237,7 +237,7 @@ _PRESET_COMPILED = tuple((preset["preset"], re.compile(preset["pattern"], re.IGN
 @lru_cache(maxsize=1 << 18)
 def preset_match(text):
     """這一行第一個符合的常用格式：（preset id, 比對結果）或 None。照內容快取
-    （「本文可疑章節」每次開都要把整本每一行比一遍）；內建格式都是安全的正則，直接用 re。"""
+    （「可疑章節」每次開都要把整本每一行比一遍）；內建格式都是安全的正則，直接用 re。"""
     if not text or len(text) > _MAX_RULE_TEXT:
         return None
     for candidate in (text, strip_noise_lead(text)):

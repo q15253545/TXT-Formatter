@@ -230,7 +230,7 @@ class _LevelPage(QWidget):
         self.lines_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         setup_columns(self.lines_table, {0: 80})
         self.lines_table.itemSelectionChanged.connect(self._on_line_selected)
-        # 選到一列：下面顯示那一行加上前後文（跟掃描視窗、本文可疑章節一樣）
+        # 選到一列：下面顯示那一行加上前後文（跟非正文內容、可疑章節一樣）
         self.lines_preview = ContextPreview()
         self.lines_box = self.lines_preview.stacked_under(self.lines_table)
         self.lines_box.setMinimumHeight(160)
@@ -515,7 +515,7 @@ class _LevelPage(QWidget):
             i18n.set_text(self.written_message, f"{name}：{hint}")
 
     def _on_pattern_edited(self, text: str):
-        """打字就更新規則、重算本文有幾行符合（取代以前的「測試目前文件」）。"""
+        """打字就更新規則、重算本文有幾行符合（不用另外按測試）。"""
         rule = self.current_rule()
         if not is_written_rule(rule):
             return
