@@ -22,6 +22,7 @@ from core.chapter_update import (
     LONGER, MISSING, NEW, append_all, apply_update, dominant_script, plan_update, toc_entries,
 )
 from core.docx_reader import is_docx
+from core.epub_reader import is_epub
 from core.encoding import smart_detect_encoding, strip_stray_bom
 from core.quote_check import QUOTE_PROBLEM_LABELS
 from core.script_convert import convert_body_text, opencc_available
@@ -720,7 +721,7 @@ class ToolWindowsMixin:
     def _load_update_source(self, path: str):
         """讀新檔、辨識章節（照目前的辨識設定）、跟本文比對：回傳（新檔的行, 目錄項目, 比對結果, 繁簡轉換）。"""
         content, _damaged, _encoding = self._read_document(
-            path, None if is_docx(path) else smart_detect_encoding(path))
+            path, None if is_docx(path) or is_epub(path) else smart_detect_encoding(path))
         if content is None:
             return None
         content, _removed = strip_stray_bom(content)

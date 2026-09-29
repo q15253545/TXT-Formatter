@@ -20,9 +20,10 @@ import sys
 import time
 from collections import Counter
 
-from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
+from PySide6.QtCore import QBuffer, QIODevice, QProcess, QRect, QTimer, Qt, QUrl
 from PySide6.QtGui import (
-    QAction, QColor, QDesktopServices, QFont, QKeySequence, QShortcut, QTextBlockFormat, QTextCharFormat,
+    QAction, QColor, QDesktopServices, QFont, QImage, QKeySequence, QPainter, QShortcut, QTextBlockFormat,
+    QTextCharFormat,
     QTextCursor, QTextFormat,
 )
 from PySide6.QtWidgets import (
@@ -43,6 +44,9 @@ from core.collection import (
     scan_chapter_candidates,
 )
 from core.docx_reader import DocxError, is_docx, read_docx_text
+from core.epub_reader import EpubError, is_epub, read_epub
+from core.epub_writer import EpubSection, build_epub
+from core.chapter_update import dominant_script
 from core.encoding import detect_line_ending, smart_detect_encoding, strip_stray_bom
 from core.file_io import read_text, read_text_lossy, write_text_atomic
 from core.filename_meta import (
@@ -85,7 +89,7 @@ from .window_common import (
     MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
     WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals,
     _NUMBER_WITHOUT_UNIT, _ToolDialogWatcher, _chapter_line_mapper, _diff_line_mapper, _format_line_mapper,
-    WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
+    EPUB_ENCODING, WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
 )
 from .window_state import WindowStateMixin
 from .window_tools import ToolWindowsMixin
@@ -114,6 +118,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         self.input_file = ""
         self.detected_encoding = "utf-8"
+        self._epub_info = None
+        self.export_format = "TXT"      # 匯出設定的「匯出格式」：TXT／EPUB
         self.raw_lines: list[str] = []
         self.user_chapter_rules: list = load_user_chapter_rules()
         self.auto_titles: dict = {}
@@ -907,7 +913,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     @action
     def load_file_path(self, path: str, encoding: str | None = None):
         word = is_docx(path)
-        encoding = WORD_ENCODING if word else encoding or smart_detect_encoding(path)
+        epub = is_epub(path)
+        packaged = word or epub       # 沒有文字編碼可選（讀出來就是 Unicode）
+        encoding = (WORD_ENCODING if word else EPUB_ENCODING if epub else
+                    encoding or smart_detect_encoding(path))
         try:
             content, damaged, encoding = self._read_document(path, encoding)
         except OSError as error:
@@ -938,8 +947,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.metadata_bar.set_structure(DEFAULT_STRUCTURE_MODE)
         encoding_choice = next((label for label, codec in ENCODING_CODECS.items() if codec == encoding), "自動")
         self.metadata_bar.set_encoding_choice(encoding_choice)
-        # Word 檔沒有文字編碼可選（讀出來就是 Unicode）
-        self.metadata_bar.encoding_combo.setEnabled(not word)
+        # Word、EPUB 沒有文字編碼可選（讀出來就是 Unicode）
+        self.metadata_bar.encoding_combo.setEnabled(not packaged)
 
         self._history = []
         self._history_position = -1
@@ -950,14 +959,17 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._mark_synced(content)
         self._rebuild_toc()
         self._autofill_book_metadata()
+        if epub:
+            self._fill_epub_metadata()
         try:
             size_mb = os.path.getsize(path) / (1024 * 1024)
         except OSError:      # 讀完之後檔案被移走或改名
-            size_mb = len(content.encode("utf-8" if word else encoding, "replace")) / (1024 * 1024)
+            size_mb = len(content.encode("utf-8" if packaged else encoding, "replace")) / (1024 * 1024)
         self.metadata_bar.set_filename(os.path.basename(path), f"{size_mb:.2f} MB")
         self.metadata_bar.set_encoding_badge(self.detected_encoding.upper())
         self._set_footer_encoding(
-            "DOCX" if word else f"{self.detected_encoding.upper()} · {detect_line_ending(path)}")
+            self.detected_encoding.upper() if packaged else
+            f"{self.detected_encoding.upper()} · {detect_line_ending(path)}")
         status = i18n.T("已載入：") + os.path.basename(path)
         if damaged:
             status += i18n.T(f"；有 {damaged} 個字元無法以 {encoding.upper()} 解碼（顯示為 �），存檔會永久遺失")
@@ -1035,7 +1047,24 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                 break
         self._warm_timer.start(0)
 
+    def _fill_epub_metadata(self):
+        """EPUB 裡寫的書名、作者比檔名可靠：有寫就用它蓋掉從檔名猜的（狀態還是照檔名）。"""
+        info = self._epub_info or {}
+        if info.get("title"):
+            self.metadata_bar.title_input.setText(info["title"])
+        if info.get("author"):
+            self.metadata_bar.author_input.setText(info["author"])
+
     def _read_document(self, path: str, encoding: str):
+        self._epub_info = None
+        if is_epub(path):
+            try:
+                text, self._epub_info = read_epub(path)
+                return text, 0, EPUB_ENCODING
+            except EpubError as error:
+                log.warning("讀取 EPUB 失敗：%s", error)
+                dialogs.error(self, "讀取失敗", f"無法讀取這個 EPUB：\n{path}\n\n{error}")
+                return None, 0, encoding
         if is_docx(path):
             try:
                 return read_docx_text(path), 0, WORD_ENCODING
@@ -1405,11 +1434,13 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @action
     def save_file_as(self, *, strip_markers: bool | None = None):
-        """匯出 TXT。strip_markers 為 None 時照「匯出時移除章節標記」的設定。
+        """匯出 TXT（匯出設定選 EPUB 時匯出 EPUB）。strip_markers 為 None 時照「匯出時移除章節標記」的設定。
         只能用名稱傳：按鈕的 clicked 會帶一個 checked=False 進來，當成位置參數就蓋掉設定了。"""
         content = self.editor.toPlainText()
         if not content.strip():
             return False
+        if self.export_format == "EPUB":
+            return self._export_epub()
         default_name = self._suggest_export_filename()
         # 上次匯出的資料夾；還沒匯出過就放在原檔旁邊
         folder = (self._remembered_dir("last_export_dir")
@@ -1443,6 +1474,85 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._document_dirty = False
         self._saved_text_hash = hash(content)
         self._show_status(i18n.T("已匯出：") + path + self._offer_old_file_cleanup(path), translated=True)
+        return True
+
+    def _set_export_format(self, export_format):
+        """匯出設定的「匯出格式」；工具列的匯出按鈕跟著寫「匯出 TXT／匯出 EPUB」。"""
+        self.export_format = export_format if export_format in ("TXT", "EPUB") else "TXT"
+        label = f"匯出 {self.export_format}"
+        i18n.set_text(self.save_button, label)
+        if self._toolbar_compact:
+            self.save_button.setToolTip(self.save_button.text() + "（Ctrl+S）")
+
+    def _epub_sections(self):
+        """目錄的每一項一段：（EpubSection 清單, 第一個目錄項目之前的行）。卷底下的章縮一層。"""
+        entries = sorted((row, item) for item, row in self.chapter_raw_map.items()
+                         if 0 <= row < len(self.raw_lines))
+        sections = []
+        for position, (row, item) in enumerate(entries):
+            end = entries[position + 1][0] if position + 1 < len(entries) else len(self.raw_lines)
+            title, _marker = strip_persistent_title_marker(self.raw_lines[row].strip())
+            depth, parent = 0, item.parent()
+            while parent is not None:
+                depth += 1
+                parent = parent.parent()
+            body, _count = strip_export_markers("\n".join(self.raw_lines[row + 1:end]))
+            sections.append(EpubSection(title or self.toc_full_labels.get(item, item.text(0)), depth,
+                                        body.split("\n")))
+        front_end = entries[0][0] if entries else len(self.raw_lines)
+        front, _count = strip_export_markers("\n".join(self.raw_lines[:front_end]))
+        return sections, front.split("\n")
+
+    def _epub_cover_png(self, title: str, author: str) -> bytes:
+        """沒有封面圖時的文字封面：書名、作者置中。"""
+        image = QImage(900, 1200, QImage.Format.Format_RGB32)
+        image.fill(QColor("#F4F4F2"))
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        family = self.font().family()
+        painter.setPen(QColor("#222222"))
+        painter.setFont(QFont(family, 60, QFont.Weight.Bold))
+        flags = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter) | int(Qt.TextFlag.TextWordWrap)
+        painter.drawText(QRect(90, 260, 720, 460), flags, title)
+        if author:
+            painter.setPen(QColor("#555555"))
+            painter.setFont(QFont(family, 30))
+            painter.drawText(QRect(90, 780, 720, 160), flags, author)
+        painter.end()
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        return bytes(buffer.data())
+
+    def _export_epub(self) -> bool:
+        """匯出 EPUB：目錄照 txt-tool 的目錄，書名、作者照書籍資料，封面是文字封面（core/epub_writer.py）。
+        不算「已存檔」：本文還是 TXT 的形式，關閉前照常提醒。"""
+        self._sync_raw_lines()
+        self._ensure_toc_current()
+        default_name = os.path.splitext(self._suggest_export_filename())[0] + ".epub"
+        folder = (self._remembered_dir("last_export_dir")
+                  or (os.path.dirname(self.input_file) if self.input_file else "")
+                  or self._remembered_dir("last_open_dir"))
+        with native_dialog():
+            path, _ = QFileDialog.getSaveFileName(self, i18n.T("另存新檔"),
+                                                  os.path.join(folder, default_name) if folder else default_name,
+                                                  i18n.T("EPUB 電子書 (*.epub)"))
+        if not path:
+            return False
+        if not path.lower().endswith(".epub"):
+            path += ".epub"
+        sections, front = self._epub_sections()
+        title = self.metadata_bar.book_title() or os.path.splitext(os.path.basename(path))[0]
+        author = self.metadata_bar.author()
+        language = "zh-Hans" if dominant_script(self.raw_lines) == "simp" else "zh-Hant"
+        try:
+            build_epub(path, title, author, sections, front, self._epub_cover_png(title, author), language)
+        except OSError as error:
+            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{path}\n\n{error}\n\n原本的檔案沒有被更動。")
+            return False
+        self._ui_state["last_export_dir"] = os.path.dirname(path)
+        self._show_status(i18n.T("已匯出：") + path + i18n.T(f"（EPUB，目錄 {len(sections)} 項）"), translated=True)
         return True
 
     def _offer_old_file_cleanup(self, new_path: str) -> str:
@@ -1510,14 +1620,18 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         dialog = FilenameDialog(self.filename_ongoing, self.filename_completed, self.filename_script,
                                 self._filename_fields(), self.metadata_bar.status(), self,
                                 strip_markers=self._strip_markers_on_export,
-                                ask_old_files=self._ask_old_files_on_export)
+                                ask_old_files=self._ask_old_files_on_export, export_format=self.export_format)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._ask_old_files_on_export = dialog.result_ask_old_files
         self.filename_ongoing, self.filename_completed = dialog.result_ongoing, dialog.result_completed
         self.filename_script = dialog.result_script
         self._strip_markers_on_export = dialog.result_strip_markers
-        self._show_status(i18n.T("匯出檔名：") + self._suggest_export_filename()
+        self._set_export_format(dialog.result_format)
+        name = self._suggest_export_filename()
+        if self.export_format == "EPUB":
+            name = os.path.splitext(name)[0] + ".epub"
+        self._show_status(i18n.T(f"匯出格式：{self.export_format}；") + i18n.T("匯出檔名：") + name
                           + i18n.T("；匯出時移除章節標記" if self._strip_markers_on_export else "；匯出時保留章節標記"),
                           translated=True)
 

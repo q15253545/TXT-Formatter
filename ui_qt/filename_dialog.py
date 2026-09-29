@@ -1,5 +1,5 @@
-"""匯出設定（匯出 TXT 旁邊的箭頭）：連載中／已完結兩個檔名格式（各自即時預覽）、插入變數的小標籤、
-檔名繁簡，以及匯出時要不要移除章節標記。"""
+"""匯出設定（匯出按鈕旁邊的箭頭）：連載中／已完結兩個檔名格式（各自即時預覽）、插入變數的小標籤、
+檔名繁簡、匯出格式（TXT／EPUB），以及匯出時要不要移除章節標記。"""
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -23,18 +23,22 @@ class _TemplateInput(QLineEdit):
         self.focused.emit()
 
 
+EXPORT_FORMATS = ("TXT", "EPUB")
+
+
 class FilenameDialog(QDialog):
-    """接受後結果在 result_ongoing、result_completed、result_script、result_strip_markers、result_ask_old_files。"""
+    """接受後結果在 result_ongoing、result_completed、result_script、result_strip_markers、result_ask_old_files、
+    result_format。"""
 
     def __init__(self, ongoing: str, completed: str, script: str, fields: dict, status: str, parent=None,
-                 strip_markers: bool = True, ask_old_files: bool = True):
+                 strip_markers: bool = True, ask_old_files: bool = True, export_format: str = "TXT"):
         super().__init__(parent)
         self.setWindowTitle("匯出設定")
         self.setMinimumWidth(660)
         keep_on_screen(self)
         self._fields = fields
         self.result_ongoing = self.result_completed = self.result_script = self.result_strip_markers = None
-        self.result_ask_old_files = None
+        self.result_ask_old_files = self.result_format = None
 
         root, footer = dialog_frame(self, (24, 20, 24, 14), enter_submits=True,
                                     intro="檔名照書籍資料組成，連載中、已完結各一種格式。")
@@ -69,6 +73,17 @@ class FilenameDialog(QDialog):
         root.addSpacing(6)
         root.addWidget(Divider())
         root.addSpacing(6)
+        format_row = QHBoxLayout()
+        format_row.setSpacing(10)
+        format_row.addWidget(QLabel("匯出格式"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(EXPORT_FORMATS)
+        self.format_combo.setCurrentText(export_format if export_format in EXPORT_FORMATS else "TXT")
+        self.format_combo.currentIndexChanged.connect(self._update_previews)
+        format_row.addWidget(self.format_combo)
+        format_row.addStretch(1)
+        root.addLayout(format_row)
+        root.addSpacing(4)
         self.strip_markers_toggle = ToggleSwitch("匯出時移除章節標記", fill=False)
         self.strip_markers_toggle.setChecked(strip_markers)
         root.addWidget(self.strip_markers_toggle)
@@ -149,6 +164,8 @@ class FilenameDialog(QDialog):
 
     def _preview(self, template: str, default: str) -> str:
         name = build_smart_filename(self._fields, template.strip() or default)
+        if self.format_combo.currentText() == "EPUB" and name.lower().endswith(".txt"):
+            name = name[:-4] + ".epub"
         return convert_script(name, i18n.combo_value(self.script_combo))
 
     def _update_previews(self, *_args):
@@ -160,6 +177,7 @@ class FilenameDialog(QDialog):
         self.completed_input.setText(DEFAULT_COMPLETED_TEMPLATE)
         self.strip_markers_toggle.setChecked(True)
         self.ask_old_files_toggle.setChecked(True)
+        self.format_combo.setCurrentText("TXT")
 
     def _accept(self):
         self.result_ongoing = self.ongoing_input.text().strip() or DEFAULT_ONGOING_TEMPLATE
@@ -167,4 +185,5 @@ class FilenameDialog(QDialog):
         self.result_script = i18n.combo_value(self.script_combo)
         self.result_strip_markers = self.strip_markers_toggle.isChecked()
         self.result_ask_old_files = self.ask_old_files_toggle.isChecked()
+        self.result_format = self.format_combo.currentText()
         self.accept()

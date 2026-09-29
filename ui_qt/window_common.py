@@ -22,9 +22,10 @@ TYPING_CHECKPOINT_DELAY_MS = 450
 DEFAULT_STRUCTURE_MODE = "自動判斷"
 
 # 能開的檔案：TXT，和 Word（.docx，只取文字）；存檔一律是 TXT
-OPENABLE_EXTENSIONS = (".txt", ".docx")
-OPEN_FILE_FILTER = "文字檔 (*.txt *.docx);;所有檔案 (*)"
+OPENABLE_EXTENSIONS = (".txt", ".docx", ".epub")
+OPEN_FILE_FILTER = "文字檔 (*.txt *.docx *.epub);;所有檔案 (*)"
 WORD_ENCODING = "docx"        # detected_encoding 的值：Word 檔沒有文字編碼
+EPUB_ENCODING = "epub"        # EPUB 也一樣（裡面的 XHTML 自己宣告編碼）
 
 
 def openable(path: str) -> bool:
