@@ -305,9 +305,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         side_layout = QVBoxLayout(self.side_card)
         side_layout.setContentsMargins(0, 0, 0, 0)
         self.options_panel = OptionsPanel(self.format_options)
-        self.options_panel.apply_requested.connect(self.apply_formatting)
         self.options_panel.option_toggled.connect(self._on_format_option_toggled)
-        self.options_panel.save_one_click_requested.connect(self.save_one_click_options)
+        self.options_panel.choice_changed.connect(self._on_format_choice_changed)
+        self.options_panel.changed.connect(self._save_one_click_settings)
         side_layout.addWidget(self.options_panel)
         self.options_panel.hide()
 
@@ -681,7 +681,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                        *self.side_rail.buttons.values()):
             button.setEnabled(enabled)
         self.metadata_bar.close_file_button.setVisible(enabled)
-        self.options_panel.set_apply_enabled(enabled)
         self.content_panel.set_actions_enabled(enabled)
         if not enabled:
             self._set_active_side_panel(None)
@@ -738,8 +737,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.chapter_panel.set_icon_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
         self.toc_compact_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint, tokens.checked_text)
         self.chapter_panel.set_report_theme(tokens)
-        self.options_panel.set_icon_colors(tokens.icon, tokens.primary_text, tokens.checked_text, tokens.icon_hover,
-                                           tokens.text_faint)
         self.content_panel.set_colors(tokens)
         self.find_bar.set_theme(tokens)
         self.side_rail.set_colors(tokens)
@@ -1421,10 +1418,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     def _on_format_option_toggled(self, label: str, on: bool, description: str):
         """排版設定的開關：切換之後說一句它會做什麼（開關本身不放滑鼠提示）。"""
         if on:
-            message = i18n.T(f"已開啟「{label}」：{description}（按「套用格式」才會動到本文）")
+            message = i18n.T(f"已開啟「{label}」：{description}（一鍵排版、目錄右鍵「套用格式」時使用）")
         else:
             message = i18n.T(f"已關閉「{label}」")
         self._show_status(message, translated=True)
+
+    def _on_format_choice_changed(self, label: str, value: str):
+        """排版設定的下拉：換了之後說一句現在是什麼、什麼時候用。"""
+        self._show_status(i18n.T(f"{label}改成「{value}」（一鍵排版、目錄右鍵「套用格式」時使用）"),
+                          translated=True)
 
     # ------------------------------------------------------------------
     # 介面繁／簡
@@ -2670,23 +2672,19 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     # ------------------------------------------------------------------
 
     @action
-    def apply_formatting(self):
-        if not self.raw_lines:
-            return
-        self._sync_raw_lines()
-        options = self.options_panel.current_options(self.structure_mode)
-        self._apply_format_options(options, "已套用格式到全文，可以按 Ctrl+Z 復原")
-
-    @action
     def one_click_format(self):
-        """一鍵排版：不管面板目前勾了什麼，直接套用一組固定的常用組合——
-        段落之間不空行、標題前兩行後一行、段首兩個全形空格、編號間隔用半形空格
-        （使用者按過「保存到一鍵排版」就用存下來的組合）。不做合併下行標題：
+        """一鍵排版：照排版設定卡片目前的設定排整份（卡片就是一鍵排版的設定，改了自動記住；
+        第一次用是內建的常用組合，見 _default_one_click_options）。不做合併下行標題：
         那是猜測，要在章節管理預覽過再套用。
 
         排版前先檢查缺章與高信心廣告：排版會重排整份文字，事後比較難回頭
         確認原本的問題，所以有狀況時先問過再動手。"""
         if not self.editor.toPlainText().strip():
+            return
+        options = self.options_panel.current_options(self.structure_mode)
+        if not describe_options(options) and not self._auto_apply_preview:
+            dialogs.info(self, "沒有開啟任何項目",
+                         "排版設定目前沒有開啟任何項目，先打開要套用的開關或選擇下拉選項。")
             return
         self._sync_raw_lines()
         # 「自動套用到一鍵排版」：章節管理的預覽先寫進本文，跟排版算同一步；取消時整個退回
@@ -2702,7 +2700,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             self._sync_raw_lines()
             self._ensure_toc_current()
             message = "已套用一鍵排版（" + "、".join(preview[1]) + "），可以按 Ctrl+Z 復原"
-        options = self._one_click_options()
         # 排版前的檢查直接用排版那一次的辨識結果，不另外再建一次結構（大檔每次要好幾秒）。
         applied = self._apply_format_options(
             options, message, confirm=self._confirm_one_click_warnings)
@@ -2710,12 +2707,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             if before is not None:
                 self._restore_state(before)
             self._show_status("已取消一鍵排版")
-            return
-        self.options_panel.reset_to_defaults()
 
-    def _one_click_options(self) -> FormatOptions:
-        """一鍵排版的組合：使用者按過「保存到一鍵排版」就用存下來的，否則用內建的。"""
-        saved = self._ui_state.get("one_click_options")
+    def _default_one_click_options(self, saved=None) -> FormatOptions:
+        """還沒有自己的一鍵排版設定時用的組合：舊版按「保存到一鍵排版」存下來的（saved），否則是內建的
+        段落之間不空行、標題前兩行後一行、段首兩個全形空格、編號間隔用半形空格。"""
         if isinstance(saved, dict):
             # 合併下行標題不在一鍵排版做（在章節管理預覽再套用）：存下來的組合裡有 merge_title 也不用
             known = {field.name for field in dataclasses.fields(FormatOptions)} - {"structure", "merge_title"}
@@ -2733,17 +2728,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             structure=self.structure_mode,
         )
 
-    @action
-    def save_one_click_options(self):
-        """把排版設定目前的開關與下拉存成一鍵排版的組合。"""
-        options = self.options_panel.current_options(self.structure_mode)
-        saved = dataclasses.asdict(options)
-        saved.pop("structure", None)
-        self._ui_state["one_click_options"] = saved
-        items = describe_options(options)
-        self._show_status(i18n.T("一鍵排版改用目前的設定：") + ("、".join(i18n.T(item) for item in items)
-                                                           if items else i18n.T("（沒有勾選任何項目）")),
-                          translated=True)
+    def _save_one_click_settings(self):
+        """排版設定卡片改了任何一項：記下來（關程式前也會再存一次，見 _collect_ui_state）。"""
+        self._ui_state["one_click_format"] = self.options_panel.options_state()
 
     def _confirm_one_click_warnings(self, result) -> bool:
         """有缺章或高信心廣告時彈窗確認；沒有狀況就直接放行。

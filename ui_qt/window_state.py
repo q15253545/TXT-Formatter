@@ -171,7 +171,7 @@ class WindowStateMixin:
             "splitter": bytes(self.splitter.saveState().toHex()).decode("ascii"),
             "side_width": self.side_card.width() if self.side_card.isVisible() else self._side_width,
             "toc_compact_mode": self.toc_compact_mode,
-            "format_options": self.options_panel.options_state(),
+            "one_click_format": self.options_panel.options_state(),
             "missing_mode": self.chapter_panel.missing_mode(),
             "title_tail_allowed": self.title_tail_allowed,
             "title_tail_custom": self.title_tail_custom,
@@ -216,8 +216,14 @@ class WindowStateMixin:
             self.metadata_bar.toggle_button.setChecked(True)
         self.toc_compact_mode = bool(state.get("toc_compact_mode"))
         self.toc_compact_button.setChecked(self.toc_compact_mode)
-        if isinstance(state.get("format_options"), dict):
-            self.options_panel.restore_options_state(state["format_options"])
+        # 排版設定卡片就是一鍵排版的設定。舊版的兩組設定（卡片上暫時的 format_options、按「保存到一鍵排版」
+        # 存的 one_click_options）不再用：有存過一鍵排版組合的照那組擺好卡片，否則用內建的常用組合。
+        if isinstance(state.get("one_click_format"), dict):
+            self.options_panel.restore_options_state(state["one_click_format"])
+        else:
+            self.options_panel.set_options(self._default_one_click_options(state.get("one_click_options")))
+        for old_key in ("format_options", "one_click_options"):
+            state.pop(old_key, None)
         mode = state.get("missing_mode")
         if isinstance(mode, str) and self.chapter_panel.missing_mode_combo.findText(mode) >= 0:
             i18n.set_combo_value(self.chapter_panel.missing_mode_combo, mode)
