@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
 )
 
-from core.duplicate_chapters import RELATION_LABELS, apply_keep_choices, find_duplicate_groups
+from core.duplicate_chapters import RELATION_LABELS, apply_keep_choices, find_duplicate_groups, find_similar_groups
 from . import dialogs, i18n
 from .theme import active_tokens
 from .widgets import ContextPreview, dialog_frame, size_dialog
@@ -31,7 +31,7 @@ class DuplicateChaptersDialog(QDialog):
         self._keep: list[list[bool]] = []
         self._entries: list[tuple[int, int]] = []    # 表格第幾列 → (第幾組, 組裡第幾章)
 
-        root, footer = dialog_frame(self, intro="相鄰、章號相同的章節；勾選要保留的，沒勾的刪除（重貼標題只刪標題行）。")
+        root, footer = dialog_frame(self, intro="章號相同或內容重複的章節；勾選要保留的，沒勾的刪除（重貼標題只刪標題行）。")
         root.setSpacing(12)
 
         select_row = QHBoxLayout()
@@ -54,7 +54,7 @@ class DuplicateChaptersDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        setup_columns(self.table, {0: 56, 1: 44, 2: 300, 3: 90})
+        setup_columns(self.table, {0: 56, 1: 84, 2: 280, 3: 90})
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.preview = ContextPreview()
@@ -88,7 +88,8 @@ class DuplicateChaptersDialog(QDialog):
         self._refresh()
 
     def _scan(self):
-        self._groups = find_duplicate_groups(self._raw_lines, self._title_rows)
+        adjacent = find_duplicate_groups(self._raw_lines, self._title_rows)
+        self._groups = adjacent + find_similar_groups(self._raw_lines, self._title_rows, adjacent)
 
     def _refresh(self):
         self.table.blockSignals(True)
@@ -103,13 +104,15 @@ class DuplicateChaptersDialog(QDialog):
             check_item.setCheckState(
                 Qt.CheckState.Checked if self._keep[group_index][member] else Qt.CheckState.Unchecked)
             self.table.setItem(row, 0, check_item)
-            self.table.setItem(row, 1, make_item(str(group_index + 1), row))
+            label = str(group_index + 1) if group.get("adjacent", True) else i18n.T(f"{group_index + 1} 不相鄰")
+            self.table.setItem(row, 1, make_item(label, row))
             self.table.setItem(row, 2, make_item(group["titles"][member], row))
             count_item = make_item(f"{group['counts'][member]:,}", row)
             count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.table.setItem(row, 3, count_item)
+            note = group.get("notes", [""] * len(group["rows"]))[member]
             relation = group["relations"][member]
-            self.table.setItem(row, 4, make_item(i18n.T(RELATION_LABELS.get(relation, "")), row))
+            self.table.setItem(row, 4, make_item(note or i18n.T(RELATION_LABELS.get(relation, "")), row))
         self.table.blockSignals(False)
         self._update_status()
 
@@ -118,10 +121,11 @@ class DuplicateChaptersDialog(QDialog):
 
     def _update_status(self):
         if not self._groups:
-            text = "沒有找到相鄰、章號相同的章節"
+            text = "沒有找到章號相同或內容重複的章節"
         else:
             dropped = sum(keep.count(False) for _group, keep in self._choices())
-            text = f"找到 {len(self._groups)} 組；會刪除 {dropped} 章"
+            apart = sum(1 for group in self._groups if not group.get("adjacent", True))
+            text = f"找到 {len(self._groups)} 組" + (f"（{apart} 組不相鄰）" if apart else "") + f"；會刪除 {dropped} 章"
         i18n.set_text(self.status_label, text)
         self.merge_button.setEnabled(bool(self._choices()))
 

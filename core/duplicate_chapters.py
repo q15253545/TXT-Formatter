@@ -22,6 +22,7 @@
 """
 
 import re
+from functools import lru_cache
 
 from .chapter_parse import parse_lv2
 from .title_markers import strip_persistent_title_marker
@@ -105,7 +106,17 @@ def find_duplicate_groups(lines, title_rows) -> list:
 
 
 def _sentences(lines) -> set:
-    text = _SPACES.sub("", "\n".join(lines))
+    return _split_sentences("\n".join(lines))
+
+
+@lru_cache(maxsize=4096)
+def _text_sentences(text: str) -> frozenset:
+    """照整章的文字快取：改了本文重新找時，沒改到的章不用再切一次。"""
+    return frozenset(_split_sentences(text))
+
+
+def _split_sentences(text: str) -> set:
+    text = _SPACES.sub("", text)
     return {part for part in _SENTENCE_SPLIT.split(text) if len(part) >= _SENTENCE_MIN}
 
 
@@ -162,7 +173,82 @@ def _make_group(lines, rows, parsed, chapter_ends) -> dict:
     return {"rows": list(rows), "titles": titles, "keep_title": keep_title,
             "same_title": same_title, "between": between, "ends": list(chapter_ends),
             "counts": [item["count"] for item in info], "relations": relations,
-            "default_keep": _default_keep(titles, keep_title, same_title, info, relations)}
+            "default_keep": _default_keep(titles, keep_title, same_title, info, relations), "adjacent": True}
+
+
+_BLANKS = " \t　\u00a0\r\f\v\n"     # char_count 不算的字，加上換行
+SIMILAR_RATIO = 0.6       # 不相鄰的兩章：較短那份有六成的句子在另一份裡才列出來
+COMMON_SENTENCE = 20      # 出現在超過這麼多章的句子（固定的開場白、分隔語）不拿來比
+SIMILAR_TITLE_LENGTH = 12
+
+
+def find_similar_groups(lines, title_rows, adjacent_groups=()) -> list:
+    """不相鄰、內容重複的章（同一章換了標題又貼了一次）：每一對一組，格式跟 find_duplicate_groups 一樣，
+    另外 adjacent＝False、notes＝內容比對欄要顯示的字、default_keep 全部保留（比相鄰的保守）。
+
+    每個句子（10 字以上）記在哪幾章出現，只比對真的有共同句子的章，不用每一章對每一章比。
+    已經在相鄰重複裡的兩章不重複列。正文不到 DUPLICATE_BODY_LIMIT 字的章不比。"""
+    rows = sorted(row for row in set(title_rows) if 0 <= row < len(lines))
+    chapters = []
+    for index, row in enumerate(rows):
+        clean, marker, parsed = _parse_title(lines[row])
+        if marker == "exclude" or not clean:
+            continue
+        end = rows[index + 1] if index + 1 < len(rows) else len(lines)
+        # 整章接起來、用 str.count 算空白（逐行 char_count／translate 在十幾萬行的書上要多花 0.3 秒）
+        text = "\n".join(lines[row + 1:end])
+        count = len(text) - sum(text.count(char) for char in _BLANKS)
+        if count < DUPLICATE_BODY_LIMIT:
+            continue
+        chapters.append({"row": row, "end": end, "title": clean, "count": count,
+                         "sentences": _text_sentences(text)})
+    where: dict = {}
+    for position, chapter in enumerate(chapters):
+        for sentence in chapter["sentences"]:
+            where.setdefault(sentence, []).append(position)
+    shared: dict = {}
+    for positions in where.values():
+        if 1 < len(positions) <= COMMON_SENTENCE:
+            for first_index, first in enumerate(positions):
+                for second in positions[first_index + 1:]:
+                    shared[(first, second)] = shared.get((first, second), 0) + 1
+    adjacent = {frozenset(pair) for group in adjacent_groups
+                for pair in zip(group["rows"], group["rows"][1:])}
+    # 互相重複的章併成一組（同一段內容貼了三、四次時是一組，不是兩兩一組）
+    parent = {}
+
+    def root(position):
+        while parent.get(position, position) != position:
+            position = parent[position]
+        return position
+
+    ratios = {}
+    for (first, second), common in shared.items():
+        a, b = chapters[first], chapters[second]
+        ratio = common / min(len(a["sentences"]), len(b["sentences"]))
+        if ratio < SIMILAR_RATIO or second == first + 1 or frozenset((a["row"], b["row"])) in adjacent:
+            continue
+        ratios[(first, second)] = ratio
+        parent[root(second)] = root(first)
+    clusters: dict = {}
+    for first, second in ratios:
+        for position in (first, second):
+            clusters.setdefault(root(position), set()).add(position)
+    groups = []
+    for members in sorted(sorted(cluster) for cluster in clusters.values()):
+        head = chapters[members[0]]
+        label = head["title"] if len(head["title"]) <= SIMILAR_TITLE_LENGTH else head["title"][:SIMILAR_TITLE_LENGTH] + "…"
+        notes = [""]
+        for position in members[1:]:
+            ratio = ratios.get((members[0], position))
+            notes.append(f"與{label} {round(ratio * 100)}% 相同" if ratio else f"與{label}內容重複")
+        picked = [chapters[position] for position in members]
+        groups.append({"rows": [chapter["row"] for chapter in picked], "titles": [chapter["title"] for chapter in picked],
+                       "keep_title": head["title"], "same_title": False, "between": [],
+                       "ends": [chapter["end"] for chapter in picked], "counts": [chapter["count"] for chapter in picked],
+                       "relations": [""] * len(picked), "notes": notes,
+                       "adjacent": False, "default_keep": [True] * len(picked)})
+    return groups
 
 
 def merge_duplicate_groups(lines, groups) -> list:
