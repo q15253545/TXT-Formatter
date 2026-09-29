@@ -9,6 +9,7 @@ from .title_blocks import TEMPLATES
 from .user_rules import PRESET_RULES, preset_match
 from .chapter_parse import (
     CN_NUM_PATTERN,
+    chapter_range_end,
     MAX_TITLE_LENGTH,
     is_noise_prefix,
     parse_lv1,
@@ -701,8 +702,11 @@ def chapter_gap_report(numbers, label, mode="僅檢查中間缺口", previous_la
         segment_titles = titles[position:position + len(segment)] if titles else None
         position += len(segment)
         covered = set(segment)
-        # 「第62、3章」一章裡有兩個章號：後面那章也算有
+        # 「第62、3章」一章裡有兩個章號：後面那章也算有；「第38-40章」整段都算有
         for number, title in zip(segment, segment_titles or ()):
+            range_end = chapter_range_end(title)
+            if range_end:
+                covered.update(range(int(number) + 1, range_end + 1))
             also = _MERGED_NUMBER.search(title or "")
             if also:
                 tail = also.group(1)

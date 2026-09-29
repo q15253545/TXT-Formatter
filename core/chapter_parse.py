@@ -14,6 +14,9 @@ CN_NUM_FLOAT_PATTERN = CN_NUM_PATTERN + r"(?:[\.．]\d+)?"
 CN_NUM_FLOAT_OPT_PATTERN = r"[0-9０-９一二兩两三四五六七八九十百千萬万億亿兆〇零" + CN_UPPER_DIGITS + r"]*(?:[\.．]\d+)?"
 
 SEP = r"[ \t:：]+"
+# 一個標題涵蓋好幾章：「第38-40章」「第三十八——四十章」「第5至6章」
+RANGE_SEP = r"(?:[-－~～—–]{1,2}|至|到)"
+MAX_RANGE_SPAN = 10
 
 # 章節前面常見、但沒有任何意義的前綴：網站匯出的 TXT 常在每一章前面加上
 # 「正文」「VIP章節」。規則會把「第N章」前面的字當成篇名／書名保留下來
@@ -71,7 +74,8 @@ LV1_B_REGEX = re.compile(
 
 COMBO_LV2_REGEX = re.compile(
     r"^[\s【\[\(-]*" + ARC_PATTERN + VOL_PATTERN +
-    rf"第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})(?:\s*[、，,]\s*(?P<also>[0-9０-９]{{1,4}}))?\s*(?P<unit>[章回節节折幕])"
+    rf"第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})(?:\s*[、，,]\s*(?P<also>[0-9０-９]{{1,4}})"
+    rf"|\s*{RANGE_SEP}\s*(?P<range_end>{CN_NUM_PATTERN}))?\s*(?P<unit>[章回節节折幕])"
     r"[\s】\]\)-]*(?P<title>.*)$", re.IGNORECASE)
 
 COMBO_LV2_EXTRA_REGEX = re.compile(
@@ -189,6 +193,22 @@ _LEADING_CHAPTER = re.compile(rf"^\s*第\s*(?P<number>{CN_NUM_FLOAT_PATTERN})\s*
                              r"[\s:：、·\-—]*(?P<title>.*)$")
 
 
+def _valid_range(start, end) -> bool:
+    return float(start).is_integer() and start < end <= start + MAX_RANGE_SPAN
+
+
+_RANGE_TITLE = re.compile(rf"第\s*({CN_NUM_PATTERN})\s*{RANGE_SEP}\s*({CN_NUM_PATTERN})\s*[章回節节折幕]")
+
+
+def chapter_range_end(text):
+    """「第38-40章」這種一個標題涵蓋好幾章的：回傳最後一章的號碼（40）；不是就回傳 None。"""
+    match = _RANGE_TITLE.search(text or "")
+    if not match:
+        return None
+    start, end = chinese_to_arabic(match.group(1)), chinese_to_arabic(match.group(2))
+    return int(end) if _valid_range(start, end) else None
+
+
 def parse_lv2(line):
     # 自動辨識只收正規格式（第N章／回／節…、番外）；英文 Chapter N 是「自訂章節規則」的常用格式。
     # COMBO_LV2_NUM_REGEX 給連續編號、保留標題間隔這些「已經確定是標題」之後的處理使用。
@@ -205,8 +225,10 @@ def parse_lv2(line):
                 if outer and outer.group("unit") == fields.get("unit"):
                     return ("", "", "第", chinese_to_arabic(outer.group("number")), outer.group("unit"),
                             outer.group("title"))
-            return (_clean_arc(fields["arc"]), fields["volume"], prefix,
-                    chinese_to_arabic(fields["number"]) if fields["number"] else 0.0,
+            number = chinese_to_arabic(fields["number"]) if fields["number"] else 0.0
+            if fields.get("range_end") and not _valid_range(number, chinese_to_arabic(fields["range_end"])):
+                return None
+            return (_clean_arc(fields["arc"]), fields["volume"], prefix, number,
                     fields.get("unit", "章"), fields["title"])
     weak = parse_weak_numbered_title(line)
     if weak:
@@ -626,7 +648,8 @@ def resolve_chapter_number(number, number_text, previous):
 
 def original_number_text(text, unit):
     """取出標題中該單位對應的原始編號文字，供保留原本的數字系統。"""
-    match = re.search(r"(?:第|番外)\s*(" + CN_NUM_FLOAT_PATTERN + r")\s*" + re.escape(unit), text)
+    match = re.search(r"(?:第|番外)\s*(" + CN_NUM_FLOAT_PATTERN + r"(?:\s*" + RANGE_SEP + r"\s*" + CN_NUM_PATTERN
+                      + r")?)\s*" + re.escape(unit), text)
     if match:
         return match.group(1)
     weak = parse_weak_numbered_title(text)

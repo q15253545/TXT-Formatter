@@ -27,7 +27,7 @@ from .text_format import (
 from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 from .chapter_parse import (
     CN_NUM_FLOAT_PATTERN, INLINE_SPACE_REGEX,
-    CN_NUM_PATTERN, parse_lv1, parse_lv2, parse_special, parse_mixed_volume_chapter_header,
+    CN_NUM_PATTERN, RANGE_SEP, chapter_range_end, parse_lv1, parse_lv2, parse_special, parse_mixed_volume_chapter_header,
     is_weak_numbered_title, is_valid_auto_title, strip_title_body, volume_dash_number,
     preserve_title_separator, original_number_text, resolve_chapter_number, heading_word, heading_words, title_length_limit, too_long_for_title,
     word_key, not_a_heading,
@@ -36,6 +36,9 @@ from .collection import analyze_collection_structure
 from .paragraph_split import SPLIT_OFF, split_long_paragraphs
 from .reflow import collapse_inline_spaces, reflow_lines
 from .user_rules import match_user_chapter_rule
+
+
+_RANGE_TEXT = re.compile(r"(" + CN_NUM_PATTERN + r")\s*(" + RANGE_SEP + r")\s*(" + CN_NUM_PATTERN + r")")
 
 
 def format_custom_title(options: FormatOptions, extra_prefix: str, prefix_tag: str, num_val: float,
@@ -55,7 +58,13 @@ def format_custom_title(options: FormatOptions, extra_prefix: str, prefix_tag: s
             final_num = str(num_val)
         else:
             num_int = int(num_val)
-            if num_style == "中文數字": final_num = arabic_to_chinese(num_int)
+            # 「第38-40章」：範圍的兩端一起換寫法，連接符號照原文
+            span = _RANGE_TEXT.fullmatch(str(number_text or "").strip())
+            if span and num_style in ("中文數字", "阿拉伯數字"):
+                convert = arabic_to_chinese if num_style == "中文數字" else str
+                final_num = (convert(num_int) + span.group(2)
+                             + convert(int(chinese_to_arabic(span.group(3)))))
+            elif num_style == "中文數字": final_num = arabic_to_chinese(num_int)
             elif num_style == "阿拉伯數字": final_num = str(num_int)
             else: final_num = number_text or str(num_int)
         tag = f"{prefix_tag}{final_num}{unit_tag}"
@@ -506,7 +515,8 @@ def render_collection_title(ctx: BuildContext, state: RenderState, apply_format,
         _, _, prefix, number, unit, body_title = data
         body_title = strip_title_body(body_title)
         if state.opts.keep_number or not apply_format:     # only layout rewrites the number
-            number_match = re.search(r'第\s*(' + CN_NUM_FLOAT_PATTERN + r')\s*' + re.escape(unit), line_str)
+            number_match = re.search(r'第\s*(' + CN_NUM_FLOAT_PATTERN + r'(?:\s*' + RANGE_SEP + r'\s*'
+                                     + CN_NUM_PATTERN + r')?)\s*' + re.escape(unit), line_str)
             number_text = number_match.group(1) if number_match else str(int(number))
             chapter_title = f'第{number_text}{unit} {body_title}'.strip()
         else:
@@ -809,10 +819,12 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
         # 情況才把原始編號文字傳進去，其餘維持原本的阿拉伯數字寫法（最新章
         # 會用在建議檔名上，「第2章」比「第二章」好排序）。
         zero_number_text = original_number_text(chosen_raw, ch_unit) if not ch_num else None
+        # 「第38-40章」：最新章是第 40 章
+        range_end = chapter_range_end(chosen_raw) if ch_num else None
         state.last_found_ch = ctx.format_custom_title(
-            extra_prefix, ch_prefix, ch_num, ch_unit, '', apply_format, zero_number_text).strip()
+            extra_prefix, ch_prefix, range_end or ch_num, ch_unit, '', apply_format, zero_number_text).strip()
     if ch_num:
-        state.last_chapter_number = ch_num
+        state.last_chapter_number = chapter_range_end(chosen_raw) or ch_num
     parent = state.current_lv1_node if state.current_lv1_node else ''
     item_id = ctx.tree.insert(parent, 'end', text=chosen_title)
     record_title(ctx, state, item_id, chosen_title, state.processed_render_lines, apply_format,
