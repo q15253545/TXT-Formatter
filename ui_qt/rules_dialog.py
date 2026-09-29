@@ -30,7 +30,10 @@ from core import safe_regex
 from core.title_blocks import block_rule, template
 from core.user_rules import is_risky_pattern, match_user_chapter_rule, preset_rule, rule_from_sample
 from . import dialogs, i18n
-from .sortable_table import PreviewTable, CONFIDENCE_ORDER, data_index, limit_rows, enable_sorting, make_item, resort, setup_columns
+from .sortable_table import (
+    HeaderCheckBox, PreviewTable, CONFIDENCE_ORDER, confidence_menu_button, data_index, limit_rows, enable_sorting, make_item, resort,
+    setup_columns,
+)
 from .recognition_dialog import managed_rule
 from .theme import active_tokens
 from .widgets import ContextPreview, Divider, dialog_frame, fit_window_to_screen, size_dialog, snippet_button
@@ -314,19 +317,9 @@ class RulesDialog(QDialog):
         i18n.skip(self.format_combo)   # 內容是算出來的，切換繁簡時由 _format_label 重組
         self.format_combo.currentIndexChanged.connect(lambda _index: self._refresh_candidates())
         filter_row.addWidget(self.format_combo, 1)
+        # 勾選方式跟掃描視窗同一組（表格有「信心」欄的都一樣）：依信心勾選＋表格左上角的總勾選框
+        filter_row.addWidget(confidence_menu_button(self._check_confidence))
         root.addLayout(filter_row)
-        # 勾選按鈕跟掃描視窗同一組（表格有「信心」欄的都一樣）
-        select_row = QHBoxLayout()
-        select_row.setSpacing(8)
-        for label, slot in (("勾選高信心", lambda: self._check_confidence("高")),
-                            ("勾選中信心", lambda: self._check_confidence("中")),
-                            ("勾選低信心", lambda: self._check_confidence("低")),
-                            ("全選", self._check_all), ("全部取消", self._uncheck_all)):
-            button = QPushButton(label)
-            button.clicked.connect(slot)
-            select_row.addWidget(button)
-        select_row.addStretch(1)
-        root.addLayout(select_row)
 
         self.candidate_status = QLabel("")
         self.candidate_status.setObjectName("fileLabel")
@@ -337,6 +330,10 @@ class RulesDialog(QDialog):
         self.candidate_table.verticalHeader().setVisible(False)
         self.candidate_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.candidate_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.candidate_header_check = HeaderCheckBox(
+            self.candidate_table,
+            lambda: (len(self._checked & set(self._visible_candidates())), len(self._visible_candidates())),
+            self._set_all_checked)
         setup_columns(self.candidate_table, {0: "contents", 1: "contents", 2: "contents"})
         self.candidate_table.itemChanged.connect(self._on_candidate_changed)
         self.candidate_table.itemSelectionChanged.connect(self._on_candidate_selected)
@@ -457,6 +454,7 @@ class RulesDialog(QDialog):
             text += f"（太多了，只列出 {shown} 行，信心高的優先）"
         i18n.set_text(self.candidate_status, text)
         self.add_lines_button.setEnabled(bool(self._checked))
+        self.candidate_header_check.refresh()
 
     def _on_candidate_changed(self, item: QTableWidgetItem):
         if item.column() != 0:
@@ -477,17 +475,16 @@ class RulesDialog(QDialog):
         self.candidate_preview.show_rows(self._lines, candidate["index"], candidate["index"], active_tokens().accent)
         self.candidateHighlighted.emit(candidate["index"], candidate["index"])
 
-    def _check_confidence(self, level: str):
-        self._checked |= {index for index in self._visible_candidates()
-                          if self._candidates[index]["confidence"] == level}
+    def _check_confidence(self, levels: set):
+        """依信心勾選：列出來的候選只勾那幾種信心的（其餘取消）；其他格式的勾選不動。"""
+        visible = set(self._visible_candidates())
+        self._checked = (self._checked - visible) | {index for index in visible
+                                                     if self._candidates[index]["confidence"] in levels}
         self._refresh_candidates()
 
-    def _check_all(self):
-        self._checked |= set(self._visible_candidates())
-        self._refresh_candidates()
-
-    def _uncheck_all(self):
-        self._checked -= set(self._visible_candidates())
+    def _set_all_checked(self, checked: bool):
+        visible = set(self._visible_candidates())
+        self._checked = self._checked | visible if checked else self._checked - visible
         self._refresh_candidates()
 
     def _save_format_as_rule(self):

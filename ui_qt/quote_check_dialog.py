@@ -12,14 +12,14 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-    QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
+    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
 )
 
 from core.quote_check import (
     QUOTE_PROBLEM_LABELS, SEPARATOR_LENGTH, WORD_PROBLEM_LABELS, apply_fixes, scan_quote_problems, separator_styles,
 )
 from . import dialogs, i18n
-from .sortable_table import PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
+from .sortable_table import HeaderCheckBox, PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
 from .theme import active_tokens
 from .widgets import ContextPreview, Divider, GroupCheckBox, ScopeToggle, dialog_frame, flow_container, size_dialog
 
@@ -272,15 +272,6 @@ class QuoteCheckDialog(QDialog):
         root.addWidget(word_box)
         root.addWidget(Divider())
 
-        select_row = QHBoxLayout()
-        select_row.setSpacing(8)
-        for label, slot in (("勾選可自動修正的項目", self._check_fixable), ("全部取消", self._uncheck_all)):
-            button = QPushButton(label)
-            button.clicked.connect(slot)
-            select_row.addWidget(button)
-        select_row.addStretch(1)
-        root.addLayout(select_row)
-
         self.status_label = QLabel("尚未檢查")
         self.status_label.setObjectName("fileLabel")
         root.addWidget(self.status_label)
@@ -293,6 +284,11 @@ class QuoteCheckDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         # 「內容」與「修正後」都是長文字：內容先給表格寬度的四成，修正後吃剩下的。
+        # 總勾選框只管可以自動修正的項目（只是提醒的沒有勾選框）
+        self.header_check = HeaderCheckBox(
+            self.table, lambda: (len(self._checked), sum(1 for index in self._visible
+                                                          if self._all_problems[index]["fix"])),
+            self._set_all_checked, _FIX_COLUMN)
         setup_columns(self.table, {_FIX_COLUMN: "contents", _KIND_COLUMN: "contents", _TEXT_COLUMN: 0.45})
         self._diff_delegate = _DiffDelegate(self.table)
         self.table.setItemDelegateForColumn(_TEXT_COLUMN, self._diff_delegate)
@@ -446,6 +442,7 @@ class QuoteCheckDialog(QDialog):
             text += f"。有 {wrapped} 段話分成好幾行、引號到最後一行才關（每行開頭沒有補引號），這些沒有列出"
         i18n.set_text(self.status_label, text)
         self.fix_button.setEnabled(bool(self._checked))
+        self.header_check.refresh()
 
     def _on_item_changed(self, item: QTableWidgetItem):
         if item.column() != _FIX_COLUMN:
@@ -480,12 +477,8 @@ class QuoteCheckDialog(QDialog):
             self.preview.show_rows(self._raw_lines, row, row, tokens.text)
         return problem
 
-    def _check_fixable(self):
-        self._checked |= {index for index in self._visible if self._all_problems[index]["fix"]}
-        self._refresh()
-
-    def _uncheck_all(self):
-        self._checked = set()
+    def _set_all_checked(self, checked: bool):
+        self._checked = {index for index in self._visible if self._all_problems[index]["fix"]} if checked else set()
         self._refresh()
 
     def _apply_fixes(self):

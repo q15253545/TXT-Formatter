@@ -6,11 +6,11 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+    QDialog, QDialogButtonBox, QLabel, QTableWidget, QTableWidgetItem,
 )
 
 from . import i18n
-from .sortable_table import PreviewTable, make_item, setup_columns
+from .sortable_table import HeaderCheckBox, PreviewTable, make_item, setup_columns
 from .theme import active_tokens
 from .widgets import ContextPreview, dialog_frame, size_dialog
 
@@ -29,15 +29,6 @@ class ChapterOrderDialog(QDialog):
         root, footer = dialog_frame(self, intro="放錯位置的章；勾選要搬的，整章搬到章號該在的位置。")
         root.setSpacing(12)
 
-        select_row = QHBoxLayout()
-        select_row.setSpacing(8)
-        for label, handler in (("全選", self._check_all), ("全部取消", self._uncheck_all)):
-            button = QPushButton(label)
-            button.clicked.connect(handler)
-            select_row.addWidget(button)
-        select_row.addStretch(1)
-        root.addLayout(select_row)
-
         self.status_label = QLabel("")
         self.status_label.setObjectName("fileLabel")
         root.addWidget(self.status_label)
@@ -48,7 +39,9 @@ class ChapterOrderDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        setup_columns(self.table, {0: 56, 1: 260, 2: 150})
+        setup_columns(self.table, {0: 96, 1: 260, 2: 150})
+        self.header_check = HeaderCheckBox(self.table, lambda: (len(self._checked), len(self._moves)),
+                                           self._set_all_checked)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.preview = ContextPreview()
@@ -81,6 +74,7 @@ class ChapterOrderDialog(QDialog):
     def _update_status(self):
         i18n.set_text(self.status_label, f"找到 {len(self._moves)} 章；已勾選 {len(self._checked)} 章")
         self.move_button.setEnabled(bool(self._checked))
+        self.header_check.refresh()
 
     def _on_item_changed(self, item: QTableWidgetItem):
         if item.column() != 0:
@@ -99,12 +93,8 @@ class ChapterOrderDialog(QDialog):
         move = self._moves[rows[0].row()]
         self.preview.show_rows(self._raw_lines, move["start"], move["end"] - 1, active_tokens().text)
 
-    def _check_all(self):
-        self._checked = set(range(len(self._moves)))
-        self._refresh()
-
-    def _uncheck_all(self):
-        self._checked = set()
+    def _set_all_checked(self, checked: bool):
+        self._checked = set(range(len(self._moves))) if checked else set()
         self._refresh()
 
     def checked_moves(self) -> list:

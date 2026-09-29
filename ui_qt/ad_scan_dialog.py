@@ -15,7 +15,7 @@ import re
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QTableWidget,
+    QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -30,11 +30,10 @@ from .widgets import (
     slider_with_spin,
 )
 from .sortable_table import (
-    PreviewTable,
+    HeaderCheckBox, PreviewTable, confidence_menu_button,
     CONFIDENCE_ORDER, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns,
 )
 
-_CONFIDENCE_BY_BUTTON = {"勾選高信心": "高", "勾選中信心": "中", "勾選低信心": "低"}
 
 # 只有需要解釋的類型才寫提示；其餘看名字就懂。
 _CATEGORY_TIPS = {
@@ -95,24 +94,22 @@ class _CandidatePane(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
+        # 依信心勾選跟找到幾個放同一列；全選／全部取消是表格左上角的總勾選框
         select_row = QHBoxLayout()
-        select_row.setSpacing(8)
-        for label in ("勾選高信心", "勾選中信心", "勾選低信心", "全選", "全部取消"):
-            button = QPushButton(label)
-            button.clicked.connect(lambda _checked, m=label: self.select_mode(m))
-            select_row.addWidget(button)
-        select_row.addStretch(1)
-        layout.addLayout(select_row)
-
+        select_row.setSpacing(12)
+        select_row.addWidget(confidence_menu_button(self.check_confidence))
         self.status_label = QLabel("尚未掃描")
         self.status_label.setObjectName("fileLabel")
-        layout.addWidget(self.status_label)
+        select_row.addWidget(self.status_label, 1)
+        layout.addLayout(select_row)
 
         self.table = PreviewTable(0, 3)
         self.table.setHorizontalHeaderLabels(["信心", second_column, "內容預覽"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.header_check = HeaderCheckBox(self.table, lambda: (len(self._selected), len(self._shown)),
+                                           self._set_all_checked)
         setup_columns(self.table, {0: "contents", 1: 200 if second_column == "類型" else 90})
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
@@ -178,6 +175,7 @@ class _CandidatePane(QWidget):
         self._update_preview()
 
     def update_status(self):
+        self.header_check.refresh()
         if not self._candidates:
             i18n.set_text(self.status_label, self._empty_text)
             return
@@ -223,15 +221,13 @@ class _CandidatePane(QWidget):
         self.preview.show_rows(lines, candidate["start"], candidate["end"], color, spans)
         return candidate
 
-    def select_mode(self, button_label: str):
-        if button_label == "全選":
-            self._selected = set(self._shown)
-        elif button_label == "全部取消":
-            self._selected = set()
-        else:
-            # 加勾那一種信心，原本勾的保留（跟自訂章節規則的「勾選高信心」一樣）
-            target = _CONFIDENCE_BY_BUTTON[button_label]
-            self._selected |= {i for i in self._shown if self._candidates[i]["confidence"] == target}
+    def check_confidence(self, levels: set):
+        """依信心勾選：列出來的候選只勾那幾種信心的，其餘取消。"""
+        self._selected = {index for index in self._shown if self._candidates[index]["confidence"] in levels}
+        self.refresh()
+
+    def _set_all_checked(self, checked: bool):
+        self._selected = set(self._shown) if checked else set()
         self.refresh()
 
 

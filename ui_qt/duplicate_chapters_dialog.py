@@ -7,14 +7,14 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+    QDialog, QDialogButtonBox, QLabel, QTableWidget, QTableWidgetItem,
 )
 
 from core.duplicate_chapters import RELATION_LABELS, apply_keep_choices, find_duplicate_groups, find_similar_groups
 from . import dialogs, i18n
 from .theme import active_tokens
 from .widgets import ContextPreview, dialog_frame, size_dialog
-from .sortable_table import PreviewTable, carry_over, make_item, setup_columns
+from .sortable_table import HeaderCheckBox, PreviewTable, carry_over, make_item, setup_columns
 
 
 class DuplicateChaptersDialog(QDialog):
@@ -34,15 +34,6 @@ class DuplicateChaptersDialog(QDialog):
         root, footer = dialog_frame(self, intro="章號相同或內容重複的章節；勾選要保留的，沒勾的刪除（重貼標題只刪標題行）。")
         root.setSpacing(12)
 
-        select_row = QHBoxLayout()
-        select_row.setSpacing(8)
-        for label, handler in (("全選", self._check_all), ("全部取消", self._uncheck_all)):
-            button = QPushButton(label)
-            button.clicked.connect(handler)
-            select_row.addWidget(button)
-        select_row.addStretch(1)
-        root.addLayout(select_row)
-
         self.status_label = QLabel("")
         self.status_label.setObjectName("fileLabel")
         root.addWidget(self.status_label)
@@ -54,7 +45,9 @@ class DuplicateChaptersDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        setup_columns(self.table, {0: 56, 1: 84, 2: 280, 3: 90})
+        setup_columns(self.table, {0: 96, 1: 84, 2: 280, 3: 90})
+        self.header_check = HeaderCheckBox(
+            self.table, lambda: (sum(map(sum, self._keep)), sum(map(len, self._keep))), self._set_all_checked)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.preview = ContextPreview()
@@ -128,6 +121,7 @@ class DuplicateChaptersDialog(QDialog):
             text = f"找到 {len(self._groups)} 組" + (f"（{apart} 組不相鄰）" if apart else "") + f"；會刪除 {dropped} 章"
         i18n.set_text(self.status_label, text)
         self.merge_button.setEnabled(bool(self._choices()))
+        self.header_check.refresh()
 
     def _on_item_changed(self, item: QTableWidgetItem):
         if item.column() != 0 or not 0 <= item.row() < len(self._entries):
@@ -147,12 +141,8 @@ class DuplicateChaptersDialog(QDialog):
         self.preview.show_rows(self._raw_lines, start, end, active_tokens().text)
         self.groupHighlighted.emit(start, end)
 
-    def _check_all(self):
-        self._keep = [[True] * len(group["rows"]) for group in self._groups]
-        self._refresh()
-
-    def _uncheck_all(self):
-        self._keep = [[False] * len(group["rows"]) for group in self._groups]
+    def _set_all_checked(self, checked: bool):
+        self._keep = [[checked] * len(group["rows"]) for group in self._groups]
         self._refresh()
 
     def _merge_checked(self):
