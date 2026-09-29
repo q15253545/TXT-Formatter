@@ -2956,7 +2956,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_escape(self):
-        """Esc：先取消剪下狀態，再來結束逐筆檢查，都沒有的話收起開著的功能卡片（功能卡片沒有自己的收起鈕）。"""
+        """Esc 一次收一樣，由近到遠：取消剪下 → 結束逐筆檢查 → 收起尋找取代 → 清掉本文上的跳轉底色
+        （從視窗點一列跳過來的）→ 收起開著的功能卡片（功能卡片沒有自己的收起鈕）。"""
         if self._cut_state is not None:
             self.cancel_cut()
             return
@@ -2965,6 +2966,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             return
         if self.find_bar.isVisible():
             self.close_find_bar()
+        elif self.editor.extraSelections():
+            self.editor.setExtraSelections([])
         elif self.side_card.isVisible():
             self._set_active_side_panel(None)
 

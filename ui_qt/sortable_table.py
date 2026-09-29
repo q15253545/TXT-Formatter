@@ -124,7 +124,8 @@ class HeaderCheckBox(QCheckBox):
 
     def eventFilter(self, watched, event):
         if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
-            QTimer.singleShot(0, self._place)
+            # 以自己為 context：視窗已經關掉、這個勾選框被刪掉時，排好的呼叫會自動取消
+            QTimer.singleShot(0, self, self._place)
         return False
 
     def _place(self):
