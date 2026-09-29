@@ -288,6 +288,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.metadata_bar.structure_changed.connect(self._on_structure_changed)
         self.metadata_bar.encoding_changed.connect(self._on_encoding_changed)
         self._panel_toggle_buttons.append(self.metadata_bar.toggle_button)
+        self._panel_toggle_buttons.append(self.metadata_bar.close_file_button)
+        self.metadata_bar.close_file_button.clicked.connect(self.clear_all)
         root.addWidget(self.metadata_bar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -611,7 +613,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 只有圖示的按鈕放滑鼠提示（名稱＋快捷鍵）；有文字的按鈕不放，文字已經說了（UI_RULES.md）
         self.undo_button = self._add_header_button(layout, "undo-2", "上一步（Ctrl+Z）", self._undo, None)
         self.redo_button = self._add_header_button(layout, "redo-2", "下一步（Ctrl+Y）", self._redo, None)
-        self.clear_button = self._add_header_button(layout, "eraser", "清空", self.clear_all, None)
         # 編輯動作（上一步、下一步、清空）跟外觀設定（主題、繁簡）之間一條直線
         layout.addSpacing(4)
         layout.addWidget(VDivider())
@@ -673,9 +674,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         return button
 
     def _set_document_actions_enabled(self, enabled: bool):
-        for button in (self.one_click_button, self.save_button, self.filename_button, self.clear_button,
+        for button in (self.one_click_button, self.save_button, self.filename_button,
                        *self.side_rail.buttons.values()):
             button.setEnabled(enabled)
+        self.metadata_bar.close_file_button.setVisible(enabled)
         self.options_panel.set_apply_enabled(enabled)
         self.content_panel.set_actions_enabled(enabled)
         if not enabled:
@@ -759,7 +761,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 按鈕高，「匯出 TXT」夾在圖示按鈕和繁簡切換旁邊就顯得矮一截。
         header_buttons = ([self.open_button, self.open_menu_button, self.one_click_button,
                            self.save_button, self.filename_button,
-                           self.undo_button, self.redo_button, self.clear_button, self.theme_button])
+                           self.undo_button, self.redo_button, self.theme_button])
         for button in header_buttons:
             button.setMinimumHeight(0)
             button.setMaximumHeight(16777215)
@@ -1756,10 +1758,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @action
     def clear_all(self):
-        """清空目前檔案與所有章節標記狀態，回到剛啟動時的樣子。
+        """關閉檔案（檔名旁的「關閉檔案」）：清掉目前的本文與所有章節標記狀態，回到剛啟動時的樣子。
 
-        復原歷史整個重設（不是疊加一筆「清空後」的快照）：
-        清空之後沒有「上一步」可以復原，這是刻意的——清空前的內容已經
+        復原歷史整個重設（不是疊加一筆「關閉後」的快照）：
+        關閉之後沒有「上一步」可以復原，這是刻意的——關閉前的內容已經
         用「另存新檔」或原始檔案保住了，不需要靠復原堆疊撐著。
         """
         if not self.input_file and not self.editor.toPlainText().strip():
@@ -1767,7 +1769,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if self._document_dirty:
             if not self._confirm_discard_changes():
                 return
-        elif not dialogs.confirm(self, "清空重來", "確定要清空目前的內容與所有章節標記狀態嗎？"):
+        elif not dialogs.confirm(self, "關閉檔案", "確定要關閉目前的檔案嗎？本文與目錄都會清掉，不能用上一步復原。"):
             return
         self.close_find_bar()
         self._drop_line_caches()
@@ -1807,7 +1809,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._document_dirty = False
         self._saved_text_hash = hash("")
         self._set_document_actions_enabled(False)
-        self._show_status("已清空，可以重新選擇檔案")
+        self._show_status("已關閉檔案，可以重新選擇檔案")
 
     def _title_check(self):
         return build_title_check(self.title_tail_allowed, self.title_tail_custom, self.max_title_length)

@@ -146,7 +146,7 @@ class WindowStateMixin:
     def _toolbar_icon_buttons(self) -> tuple:
         """工具列上只顯示圖示時是單一圖示的按鈕（不含兩個箭頭、繁簡切換）。"""
         return (self.open_button, self.one_click_button, self.save_button, self.undo_button,
-                self.redo_button, self.clear_button, self.theme_button)
+                self.redo_button, self.theme_button)
 
     def _collect_ui_state(self) -> dict:
         """關閉前的介面狀態。只記「怎麼用這個程式」的偏好，不記跟某個檔案
