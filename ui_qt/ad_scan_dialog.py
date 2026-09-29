@@ -270,6 +270,9 @@ class AdScanDialog(QDialog):
         self.tabs.addTab(self._build_repeat_page(repeat_settings), "重複段落")
         self.tabs.setCurrentIndex(start_tab)
         self.tabs.currentChanged.connect(self._update_action_label)
+        # 只掃看得到的那一頁：其他分頁切過去才掃（大檔每一頁要零點幾秒）
+        self._stale: set = set()
+        self.tabs.currentChanged.connect(self._scan_if_stale)
         root.addWidget(self.tabs, 1)
 
         buttons = QDialogButtonBox()
@@ -397,14 +400,29 @@ class AdScanDialog(QDialog):
         return self._selected_ranges if self.scope_check.isChecked() else None
 
     def _run_scan(self, *_args, keep_state: bool = False):
+        """範圍、本文變了：目前這一頁馬上重掃，其他頁記成過期，切過去時才掃。"""
         if self._waiting:
             return          # start_scan() picks up the current settings
-        for key in _CATEGORY_TABS:
+        self._stale = {key for key in self._panes if key != self.tabs.currentIndex()}
+        self._stale_keep = keep_state
+        self._scan_tab(self.tabs.currentIndex(), keep_state)
+
+    def _scan_tab(self, key: int, keep_state: bool):
+        if key == REPEAT_TAB:
+            self._scan_repeats(keep_state=keep_state)
+        else:
             self._scan_categories(key, keep_state=keep_state)
-        self._scan_repeats(keep_state=keep_state)
+
+    def _scan_if_stale(self, key: int):
+        if key in self._stale:
+            self._stale.discard(key)
+            self._scan_tab(key, self._stale_keep)
 
     def _scan_categories(self, key: int, keep_state: bool = False):
         if self._waiting:
+            return
+        if key != self.tabs.currentIndex():
+            self._stale.add(key)        # 偵測類型改了但不在這一頁（理論上不會）：切過去再掃
             return
         pane = self._panes[key]
         categories = self._category_buttons[key].checked()

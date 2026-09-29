@@ -33,7 +33,11 @@ class SuspectsPage(QWidget):
         self._max_title_length = int(max_title_length)
         self._save_format = save_format
         self._add_lines = add_lines
-        self._analyze(lines, known_rows)
+        # 掃描本文（大檔要零點幾秒）等第一次看這一頁才做：打開辨識章節多半是改組合，不一定會看可疑章節
+        self._pending = (list(lines), set(known_rows or ()))
+        self.candidates: list = []
+        self._checked: set[int] = set()
+        self._format_counts: dict[str, int] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 12, 4, 4)
@@ -85,7 +89,21 @@ class SuspectsPage(QWidget):
         self.add_lines_button.clicked.connect(self._on_add_lines)
         action_row.addWidget(self.add_lines_button)
         root.addLayout(action_row)
+        self.status_label.setText("")
+
+    def ensure_scanned(self):
+        """還沒掃過就現在掃（第一次顯示、要切到某種格式、要勾選的結果時）。"""
+        if self._pending is None:
+            return
+        lines, known_rows = self._pending
+        self._pending = None
+        self._analyze(lines, known_rows)
+        self._populate_format_combo()
         self.refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.ensure_scanned()
 
     # ------------------------------------------------------------------ 本文
 
@@ -99,10 +117,11 @@ class SuspectsPage(QWidget):
             self._format_counts[candidate["format"]] = self._format_counts.get(candidate["format"], 0) + 1
 
     def reload(self, lines, known_rows=None):
-        """視窗開著時本文被改過：換成新的一份重算；勾選的行號可能已經對不上，清掉重來。"""
-        self._analyze(lines, known_rows)
-        self._populate_format_combo()
-        self.refresh()
+        """視窗開著時本文被改過：換成新的一份重算；勾選的行號可能已經對不上，清掉重來。還沒看過這一頁時只記下來。"""
+        self._pending = (list(lines), set(known_rows or ()))
+        self._checked = set()
+        if self.isVisible():
+            self.ensure_scanned()
 
     def checked_count(self) -> int:
         return len(self._checked)
@@ -145,6 +164,7 @@ class SuspectsPage(QWidget):
 
     def show_format(self, fmt=None):
         """只看某一種格式（None＝全部）。"""
+        self.ensure_scanned()
         index = self.format_combo.findData(fmt) if fmt is not None else 0
         self.format_combo.setCurrentIndex(max(index, 0))
 

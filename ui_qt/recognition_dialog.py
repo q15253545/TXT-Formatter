@@ -771,7 +771,7 @@ class RecognitionDialog(QDialog):
         self.suspects.candidateHighlighted.connect(self.candidateHighlighted.emit)
         self.suspects.countChanged.connect(
             lambda count: self.tabs.setTabText(_SUSPECTS_TAB, i18n.T(f"可疑章節（{count}）")))
-        self.tabs.addTab(self.suspects, i18n.T(f"可疑章節（{len(self.suspects.candidates)}）"))
+        self.tabs.addTab(self.suspects, i18n.T("可疑章節"))        # 掃過之後標題寫出幾行（countChanged）
         root.addWidget(self.tabs, 1)
 
         length_row = QHBoxLayout()
