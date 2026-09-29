@@ -83,7 +83,7 @@ from .text_positions import PositionMap
 from .theme import DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
     AppWidgetPolisher, Card, ClickableLabel, DropOverlay, Editor, IconButton, IconTextButton, LanguageToggle,
-    ElidedLabel, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, VDivider, dropped_paths, make_card_header,
+    ElidedLabel, GripSplitter, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, VDivider, dropped_paths, make_card_header,
 )
 from . import __version__
 from .window_common import (
@@ -394,6 +394,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         tree_body = QVBoxLayout()
         tree_body.setContentsMargins(4, 8, 4, 8)
+        tree_body.setSpacing(6)            # 提示列之間、提示列跟目錄之間留一點距離
         # 目錄上方的提示列（widgets.NoticeBar），由上到下：
         # 預覽中——章節管理的預覽開關開著：套用到本文、取消預覽都在這裡，跟預覽的目錄在一起；
         self.preview_bar = NoticeBar()
@@ -745,6 +746,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.side_rail.set_colors(tokens)
         for bar in (self.preview_bar, self.toc_hint, self.order_hint):
             bar.set_colors(tokens)
+        GripSplitter.set_theme_colors(tokens.border, tokens.icon_hover)
         self._apply_editor_style()
         trailing = QColor(tokens.warn_text)
         trailing.setAlpha(60 if tokens.is_dark else 38)

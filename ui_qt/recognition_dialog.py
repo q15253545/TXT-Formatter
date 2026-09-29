@@ -34,7 +34,8 @@ from .sortable_table import PreviewTable, make_item, setup_columns
 from .suspects_page import SuspectsPage
 from .theme import active_tokens
 from .widgets import (
-    ContextPreview, Divider, IconTextButton, ToggleSwitch, dialog_frame, flow_container, size_dialog, slider_with_spin,
+    ContextPreview, GripSplitter, IconTextButton, ToggleSwitch, dialog_frame, flow_container, pinned_section, size_dialog,
+    slider_with_spin,
 )
 
 _COLUMN_NAMES = {"frame": "外框", "prefix": "前綴", "number": "數字", "unit": "單位", "sep": "分隔", "title": "章名"}
@@ -132,16 +133,16 @@ class _LevelPage(QWidget):
         layout.setSpacing(0)
         # Combo list | blocks: a draggable divider, both sides keep a minimum width (the dialog's minimum
         # width follows, see RecognitionDialog._fit_minimum_width), so a narrow window never squashes the blocks.
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setHandleWidth(14)
+        # 分隔線就是拖的地方（GripSplitter），跟積木／本文的行、表格／前後文的分隔同一種
+        self.splitter = GripSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setHandleWidth(29)
         layout.addWidget(self.splitter)
 
         left_host = QFrame()
         left_host.setObjectName("comboPane")
         left_host.setMinimumWidth(LEFT_MIN_WIDTH)
         left = QVBoxLayout(left_host)
-        left.setContentsMargins(0, 0, 14, 0)
+        left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(8)
         self.add_button = QPushButton("＋ 新增組合")
         self.add_button.setObjectName("menuButton")
@@ -192,8 +193,9 @@ class _LevelPage(QWidget):
         self.delete_button.clicked.connect(self._delete_current)
         name_row.addWidget(self.delete_button)
         right.addLayout(name_row)
-        # 積木在上、「看本文的行」在下，中間的分隔可以拖：展開看本文的行時積木區自己捲動，
-        # 改積木時下面的行數、表格跟著變，兩邊一起看得到。
+        # 積木在上、結果列＋「看本文的行」在下，中間的分隔可以拖：展開看本文的行時積木區自己捲動，
+        # 改積木時下面的行數、表格跟著變，兩邊一起看得到。分隔線在積木跟結果列之間（結果列是下面那一區的標題，
+        # 跟著下面走），跟其他視窗「線在兩區正中間、拖的就是那條線」一樣；收起來時沒有東西可以調，線也不顯示。
         # 捲動區跟內容都透明（panelScroll）：不然沒有欄底色的那幾欄會露出捲動區預設的底色（深色）
         blocks_scroll = _scrolling(self._build_blocks())
         blocks_scroll.setMinimumHeight(140)
@@ -225,7 +227,12 @@ class _LevelPage(QWidget):
         self.lines_button.set_colors(tokens.icon, tokens.icon_hover, tokens.checked_text, tokens.text_faint)
         self.lines_button.toggled.connect(self._toggle_lines)
         bar_layout.addWidget(self.lines_button)
-        top_layout.addWidget(bar)
+        lower = QWidget()
+        lower_layout = QVBoxLayout(lower)
+        lower_layout.setContentsMargins(0, 0, 0, 0)
+        lower_layout.setSpacing(10)
+        lower_layout.addWidget(bar)
+        self._lines_host = lower
         self.lines_table = PreviewTable(0, 2)
         self.lines_table.setHorizontalHeaderLabels(["狀態", "內容"])
         self.lines_table.verticalHeader().setVisible(False)
@@ -238,12 +245,13 @@ class _LevelPage(QWidget):
         self.lines_box = self.lines_preview.stacked_under(self.lines_table)
         self.lines_box.setMinimumHeight(160)
         self.lines_box.hide()
-        self.blocks_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.blocks_splitter.setObjectName("gripSplitter")     # 畫出一條線：看得出來可以拖
-        self.blocks_splitter.setChildrenCollapsible(False)
-        self.blocks_splitter.setHandleWidth(10)
+        lower_layout.addWidget(self.lines_box, 1)
+        self.blocks_splitter = GripSplitter()
         self.blocks_splitter.addWidget(top)
-        self.blocks_splitter.addWidget(self.lines_box)
+        self.blocks_splitter.addWidget(lower)
+        self.blocks_splitter.setStretchFactor(0, 1)
+        self.blocks_splitter.setStretchFactor(1, 0)
+        self._toggle_lines(False)
         right.addWidget(self.blocks_splitter, 1)
         right_host.setMinimumWidth(right_host.minimumSizeHint().width())
         self.splitter.addWidget(right_host)
@@ -698,6 +706,10 @@ class _LevelPage(QWidget):
     def _toggle_lines(self, shown: bool):
         self.lines_box.setVisible(shown)
         self.lines_button.set_icon_name("chevron-up" if shown else "chevron-down")
+        # 收起來時下面只剩結果列：高度固定、分隔線藏起來（沒有東西可以調），跟積木之間留原本的間距
+        self._lines_host.layout().setContentsMargins(0, 0 if shown else 10, 0, 0)
+        self._lines_host.setMaximumHeight(16777215 if shown else self._lines_host.sizeHint().height())
+        self.blocks_splitter.handle(1).setEnabled(shown)
         if shown:
             # 打開時上下大約各一半（本文的行多一點）；之後使用者拖過就照拖過的
             total = sum(self.blocks_splitter.sizes()) or self.blocks_splitter.height()
@@ -784,15 +796,15 @@ class RecognitionDialog(QDialog):
         # 跟其他分頁一樣放進捲動區：不然這一頁（表格＋前後文）會把整個視窗的最小高度撐高，矮螢幕放不下
         self.tabs.addTab(_scrolling(self.suspects), i18n.T("可疑章節"))   # 掃過之後標題寫出幾行（countChanged）
         root.addWidget(self.tabs, 1)
-        # 下面兩列是整個視窗共用的設定（每一頁都看得到），跟分頁內容用一條線分開
-        root.addWidget(Divider())
+        # 下面兩列是整個視窗共用的設定（每一頁都看得到）：跟按鈕列一樣固定在底部、用滿版的分隔線隔開
+        shared = pinned_section(self)
 
         length_row = QHBoxLayout()
         length_row.setSpacing(10)
         _length_slider, self.title_length_spin = slider_with_spin(
             length_row, "標題最長", (10, 200), self._max_title_length, " 字")
         self.title_length_spin.valueChanged.connect(self._on_check_changed)
-        root.addLayout(length_row)
+        shared.addLayout(length_row)
 
         tail_row = QHBoxLayout()
         tail_row.setSpacing(8)
@@ -801,7 +813,7 @@ class RecognitionDialog(QDialog):
         tail_row.addWidget(tail_label)
         self._tail_box, self._tail_flow = flow_container(h_spacing=6, v_spacing=6)
         tail_row.addWidget(self._tail_box, 1)
-        root.addLayout(tail_row)
+        shared.addLayout(tail_row)
         self._tail_toggles: dict = {}
         self.tail_input = QLineEdit()
         self.tail_input.setPlaceholderText(i18n.T("＋ 標點"))

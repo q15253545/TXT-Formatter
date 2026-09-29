@@ -336,13 +336,6 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         background: transparent;
         width: 10px;
     }}
-    /* 工具視窗裡上下兩區中間可以拖的分隔：畫一條細線（滑鼠移上去變互動色），不然看不出來能拖 */
-    QSplitter#gripSplitter::handle:vertical {{
-        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 transparent, stop: 0.4 transparent, stop: 0.41 {t.border}, stop: 0.59 {t.border}, stop: 0.6 transparent, stop: 1 transparent);
-    }}
-    QSplitter#gripSplitter::handle:vertical:hover {{
-        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 transparent, stop: 0.4 transparent, stop: 0.41 {t.icon_hover}, stop: 0.59 {t.icon_hover}, stop: 0.6 transparent, stop: 1 transparent);
-    }}
 
     QTreeWidget {{
         background: transparent;
@@ -1048,13 +1041,14 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     QLabel#reviewTitle {{
         font-weight: 600;
     }}
+    /* 目錄上方的提示列：好幾條疊在一起時各自有外框、中間留一點距離，圓角才不會黏在一起 */
     QFrame#tocHint {{
         background: {t.selection_bg};
+        border: 1px solid {blend(t.accent, t.selection_bg, 0.25)};
         border-radius: 8px;
     }}
     QFrame#comboPane {{
         border: none;
-        border-right: 1px solid {t.border};
     }}
     QListWidget#comboList {{
         background: transparent;

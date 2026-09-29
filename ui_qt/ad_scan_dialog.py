@@ -458,6 +458,8 @@ class AdScanDialog(QDialog):
         candidate = self._current_pane()._selected_candidate()
         self.reviewRequested.emit({ADS_TAB: "ad", NOTES_TAB: "note"}.get(tab, "repeat"),
                                   candidate["start"] if candidate else -1)
+        # 改到本文逐筆看：視窗留著會擋住本文，內容也會隨著在本文刪改而過期；要一次處理很多筆再開
+        self.reject()
 
     def _current_pane(self) -> _CandidatePane:
         return self._panes[self.tabs.currentIndex()]

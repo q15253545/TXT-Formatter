@@ -14,7 +14,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit,
     QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QTabBar, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout,
+    QSizePolicy, QSplitter, QSplitterHandle, QTabBar, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout,
     QWidget,
 )
 
@@ -608,6 +608,71 @@ def dialog_frame(dialog, margins=(20, 18, 20, 14), enter_submits: bool = False, 
     footer.setSpacing(10)
     outer.addLayout(footer)
     return body, footer
+
+
+def pinned_section(dialog, margins=(20, 12, 20, 12)) -> QVBoxLayout:
+    """dialog_frame 的按鈕列上面再加一段固定在底部的設定（每個分頁都用得到的，例如辨識章節的標題最長）：
+    跟按鈕列一樣用貫穿整個視窗的分隔線隔開，不隨內容捲走。回傳放設定用的 QVBoxLayout。"""
+    outer = dialog.layout()
+    host = QWidget()
+    section = QVBoxLayout(host)
+    section.setContentsMargins(*margins)
+    section.setSpacing(12)
+    index = outer.count() - 2          # 按鈕列那條分隔線的位置
+    outer.insertWidget(index, host)
+    outer.insertWidget(index, Divider())
+    return section
+
+
+class GripSplitter(QSplitter):
+    """工具視窗裡上下兩區中間可以拖的分隔：中間畫一條 1px 的線，跟 Divider 同色、同粗細（樣式表畫的漸層線
+    在 150% 縮放下會變成兩三個像素、跟旁邊的分隔線粗細不一），滑鼠移上去變互動色、游標變成上下箭頭。"""
+
+    colors = ("#E2E7EE", "#3869D8")      # （平常, 滑鼠移上去）：主視窗套主題時設定（set_theme_colors）
+
+    def __init__(self, orientation=Qt.Orientation.Vertical, parent=None):
+        super().__init__(orientation, parent)
+        self.setChildrenCollapsible(False)
+        self.setHandleWidth(11)
+
+    @classmethod
+    def set_theme_colors(cls, line: str, hover: str):
+        cls.colors = (line, hover)
+
+    def createHandle(self):
+        return _GripHandle(self.orientation(), self)
+
+
+class _GripHandle(QSplitterHandle):
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def paintEvent(self, event):
+        if not self.isEnabled():
+            return                      # 停用（旁邊那區收起來、沒有東西可以調）：不畫線
+        painter = QPainter(self)
+        color = QColor(GripSplitter.colors[1 if self.underMouse() else 0])
+        if self.orientation() == Qt.Orientation.Vertical:
+            painter.fillRect(0, self.height() // 2, self.width(), 1, color)
+        else:
+            painter.fillRect(self.width() // 2, 0, 1, self.height(), color)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.EnabledChange:
+            vertical = self.orientation() == Qt.Orientation.Vertical
+            self.setCursor(Qt.CursorShape.ArrowCursor if not self.isEnabled()
+                           else Qt.CursorShape.SplitVCursor if vertical else Qt.CursorShape.SplitHCursor)
+            self.update()
+        super().changeEvent(event)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
 
 
 class Divider(QFrame):
@@ -1288,10 +1353,7 @@ class ContextPreview(QTextEdit):
 
     def stacked_under(self, table) -> QWidget:
         """表格在上、預覽在下，中間的分隔可以拖動調整高度。"""
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setObjectName("gripSplitter")      # 畫出一條線：看得出來可以拖
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(10)
+        splitter = GripSplitter()
         splitter.addWidget(table)
         splitter.addWidget(self)
         splitter.setStretchFactor(0, 3)
