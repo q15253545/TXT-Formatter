@@ -195,7 +195,7 @@ class ToolWindowsMixin:
 
     @action
     def open_duplicate_chapters_dialog(self):
-        """相鄰、章號相同的章節列成清單，勾選後合併（判斷規則見 core/duplicate_chapters.py）。"""
+        """相鄰、章號相同的章節一列一章，勾選要保留的（判斷規則見 core/duplicate_chapters.py）。"""
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
@@ -221,7 +221,7 @@ class ToolWindowsMixin:
         self.editor.setExtraSelections([])
         self._replace_text_from_tool(lines)
         self._refresh_tool_dialog(dialog)
-        self._show_status(f"已合併重複章節（刪除 {removed} 行標題與空行），可以按 Ctrl+Z 復原")
+        self._show_status(f"已刪除未保留的章節（共 {removed} 行），可以按 Ctrl+Z 復原")
 
     def _saved_ad_categories(self) -> set:
         """掃描無關連內容視窗記住的偵測類型（不含重複段落，那在自己的分頁）。
