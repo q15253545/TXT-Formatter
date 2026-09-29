@@ -17,13 +17,11 @@ MISSING_CHECK_MODES = ["僅檢查中間缺口", "每卷從第1章起算", "同�
 # 操作對象才清楚；這裡只留整體性的動作。
 _ACTIONS = [
     ("file-search", "辨識章節", "recognition_requested"),
-    ("list-ordered", "自訂章節規則", "rules_requested"),
 ]
 
 
 class ChapterPanel(QWidget):
     recognition_requested = Signal()
-    rules_requested = Signal()
     check_missing_requested = Signal()
     missing_mode_changed = Signal()
     merge_titles_toggled = Signal(bool)

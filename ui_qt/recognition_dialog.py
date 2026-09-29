@@ -1,30 +1,37 @@
-"""「辨識章節」對話框（章節管理的第一顆按鈕）：用積木組出章、卷的標題寫法，設定特殊標題的層級，
-以及所有自動辨識共用的標題長度與章名結尾。
+"""「辨識章節」對話框（章節管理的第一顆按鈕）：設定哪些寫法算章、卷——用積木組合，或自己寫正則；
+特殊標題的層級；所有自動辨識共用的標題長度與章名結尾；「可疑章節」分頁列出像標題、還沒進目錄的行。
 
-章、卷各一頁：左邊是組合清單（最上面是內建的「第N章」「第N卷」，只能改單位、不能刪），
-右邊六欄積木（外框、前綴、數字、單位、分隔、章名），同一欄可以選好幾個。組合存成自訂規則
-（多一個 blocks 欄位，見 core/title_blocks.py）；自己寫的正則留在「自訂章節規則」。"""
+章、卷各一頁：左邊是清單（最上面是內建的「第N章」「第N卷」，只能改單位、不能刪；接著是積木組合、
+自己寫的規則），右邊選到積木組合時是六欄積木（外框、前綴、數字、單位、分隔、章名），選到自己寫的規則時
+換成正則編輯區（從範例產生、常用片段）。組合存成自訂規則（多一個 blocks 欄位，見 core/title_blocks.py）；
+自己寫的規則沒有 blocks，照清單順序排在組合前面比對。"""
+
+import re
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMenu, QPushButton, QScrollArea, QSplitter, QTableWidget, QTabWidget, QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTabWidget, QVBoxLayout,
+    QWidget,
 )
 
 from core.chapter_parse import (
     DEFAULT_TITLE_TAIL_ALLOWED, MAX_TITLE_LENGTH, SPECIAL_LEVELS, SPECIAL_WORDS, build_title_check, heading_word,
-    looks_like_heading, may_have_heading_word, title_tail_groups, word_key,
+    looks_like_heading, may_have_heading_word, title_tail_groups, weak_candidate_to_user_rule, word_key,
 )
+from core import safe_regex
 from core.persistence import RULES_FILE, _save_json
 from core.title_blocks import (
     COLUMNS, auto_name, block_rule, blocks_from_sample, confidence, options, template, templates_by_confidence,
 )
 from core.title_markers import strip_persistent_title_marker
 from core.user_rules import (
-    SPECIAL_WORD_MAX, match_user_chapter_rule, preset_rule, special_word_rule, special_word_variants,
+    SPECIAL_WORD_MAX, is_risky_pattern, match_user_chapter_rule, preset_rule, rule_from_sample, special_word_rule,
+    special_word_variants,
 )
 from . import dialogs, i18n
 from .sortable_table import PreviewTable, make_item, setup_columns
+from .suspects_page import SuspectsPage
 from .theme import active_tokens
 from .widgets import (
     ContextPreview, IconTextButton, ToggleSwitch, dialog_frame, flow_container, size_dialog, slider_with_spin,
@@ -43,10 +50,22 @@ _SPECIAL_ROWS = ([(key, label) for key, label, _variants in SPECIAL_WORDS]
 _LINES_SHOWN = 300
 LEFT_MIN_WIDTH = 200       # combo list: the "+ 新增組合" button and a combo name still fit
 LEFT_DEFAULT_WIDTH = 250
+_SUSPECTS_TAB = 3
+# 自己寫規則的常用片段（跟尋找取代的「＋」同一組寫法）：(名稱, 插入的正則, 說明)。
+# 直接擺成一排小按鈕，點了插入到游標位置；說明是給不懂正則的人看的白話，不解釋語法。
+_SNIPPETS = (
+    ("章號", r"(?P<number>[0-9０-９]{1,8})", "數字章號（001、12…）；缺章檢查與連續編號都靠它"),
+    ("中文章號", r"(?P<number>[一二兩两三四五六七八九十百千零〇]{1,8})", "中文數字章號（一、十二…）"),
+    ("章名", r"(?P<title>\S.*?)", "章號後面那段標題文字"),
+    ("任意文字", ".*", "任何字都可以，長度不限"),
+    ("空白", r"\s*", "可有可無的空白"),
+    ("行首", "^", "從這一行的開頭開始比對"),
+    ("行尾", "$", "比對到這一行結束"),
+)
 
 
 def managed_rule(rule: dict) -> bool:
-    """這條規則歸「辨識章節」管（積木組合、名稱＋篇、自訂特殊標題），不在「自訂章節規則」的清單裡。"""
+    """積木組合、名稱＋篇、自訂特殊標題（其餘是自己寫的正則規則）。"""
     return bool(rule.get("blocks")) or rule.get("preset") == _NAMED_VOLUME or bool(rule.get("special"))
 
 
@@ -65,6 +84,26 @@ def _scrolling(page: QWidget) -> QScrollArea:
     page.setObjectName("panelScrollContent")
     scroll.setWidget(page)
     return scroll
+
+
+def is_written_rule(rule) -> bool:
+    """清單上的一項是自己寫的正則規則（不是內建、不是積木組合）。"""
+    return rule is not None and not rule.get("blocks")
+
+
+def pattern_problem(pattern: str) -> str:
+    """正則有問題時回傳一句說明（空白、寫錯）；可以用就回傳空字串。"""
+    if not pattern.strip():
+        return "規則是空的"
+    try:
+        safe_regex.compile(pattern, re.IGNORECASE)
+    except safe_regex.errors as error:
+        return f"正則錯誤：{error}"
+    return ""
+
+
+RISKY_WARNING = ("⚠ 這個正則有巢狀量詞（例如 (a+)+、(.*)*），在長段落上可能跑很久；"
+                 "它會在每次重建目錄時對每一行執行，可能讓程式卡住")
 
 
 def _count_text(collected: int, pending: int) -> str:
@@ -103,6 +142,7 @@ class _LevelPage(QWidget):
         self.add_button.setObjectName("menuButton")
         menu = QMenu(self.add_button)
         menu.addAction(i18n.T("空白組合"), self._add_blank)
+        menu.addAction(i18n.T("自己寫規則（正則）…"), self._add_written)
         for grade, items in templates_by_confidence(level):
             menu.addSeparator()
             header = menu.addAction(i18n.T(f"{grade}信心"))
@@ -158,7 +198,11 @@ class _LevelPage(QWidget):
         top_layout = QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(10)
-        top_layout.addWidget(blocks_scroll, 1)
+        # 選到自己寫的規則時，積木換成正則編輯區（名稱列、下面的結果列共用）
+        self.editor_stack = QStackedWidget()
+        self.editor_stack.addWidget(blocks_scroll)
+        self.editor_stack.addWidget(self._build_written_editor())
+        top_layout.addWidget(self.editor_stack, 1)
 
         bar = QFrame()
         bar.setObjectName("resultBar")
@@ -211,6 +255,51 @@ class _LevelPage(QWidget):
 
     # ------------------------------------------------------------------ 版面
 
+    def _build_written_editor(self) -> QWidget:
+        """自己寫的規則：從範例產生、正則、常用片段（點了插入到游標位置）、片段說明與錯誤提示。"""
+        host = QWidget()
+        grid = QGridLayout(host)
+        grid.setContentsMargins(0, 4, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        labels = []
+        for row, text in enumerate(("從範例產生", "規則", "插入")):
+            label = QLabel(text)
+            label.setObjectName("fileLabel")
+            labels.append(label)
+            grid.addWidget(label, row, 0)
+        sample_row = QHBoxLayout()
+        sample_row.setSpacing(8)
+        self.written_sample = QLineEdit()
+        self.written_sample.setPlaceholderText(i18n.T("貼上一行章節標題，例如：Chapter 12 過河"))
+        self.written_sample.returnPressed.connect(self._written_from_sample)
+        sample_row.addWidget(self.written_sample, 1)
+        generate = QPushButton("產生")
+        generate.clicked.connect(self._written_from_sample)
+        sample_row.addWidget(generate)
+        grid.addLayout(sample_row, 0, 1)
+        self.pattern_input = QLineEdit()
+        self.pattern_input.setObjectName("patternInput")
+        self.pattern_input.textEdited.connect(self._on_pattern_edited)
+        grid.addWidget(self.pattern_input, 1, 1)
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        for name, text, hint in _SNIPPETS:
+            chip = QPushButton(name)
+            chip.setObjectName("blockChip")
+            chip.clicked.connect(lambda _checked=False, text=text, hint=hint, name=name:
+                                 self._insert_snippet(name, text, hint))
+            chips.addWidget(chip)
+        chips.addStretch(1)
+        grid.addLayout(chips, 2, 1)
+        self.written_message = QLabel("")
+        self.written_message.setObjectName("fileLabel")
+        self.written_message.setWordWrap(True)
+        grid.addWidget(self.written_message, 3, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(4, 1)
+        return host
+
     def _build_blocks(self) -> QWidget:
         host = QWidget()
         grid = QGridLayout(host)
@@ -258,7 +347,9 @@ class _LevelPage(QWidget):
     # ------------------------------------------------------------------ 組合清單
 
     def entries(self) -> list:
-        return [None] + self._dialog.combos[self.level]
+        """清單上的每一項：內建（None）、積木組合、這一層的自己寫的規則。"""
+        written = [rule for rule in self._dialog._plain if rule.get("level", 2) == self.level]
+        return [None] + self._dialog.combos[self.level] + written
 
     def current_rule(self):
         row = self.combo_list.currentRow()
@@ -299,13 +390,13 @@ class _LevelPage(QWidget):
         if rule is not None:
             i18n.skip(name)
         top.addWidget(name)
-        if rule is not None:
+        if rule is not None and not is_written_rule(rule):
             badge = QLabel(confidence(rule["blocks"]))
             badge.setObjectName("confidence")
             top.addWidget(badge)
         top.addStretch(1)
         text.addLayout(top)
-        info = QLabel("內建" if rule is None else "")
+        info = QLabel("內建" if rule is None else "自己寫" if is_written_rule(rule) else "")
         info.setObjectName("fileLabel")
         text.addWidget(info)
         layout.addLayout(text, 1)
@@ -332,7 +423,7 @@ class _LevelPage(QWidget):
         if rule is not None:
             widget.name_label.setText(rule["name"])
             badge = widget.findChild(QLabel, "confidence")
-            if badge is not None:
+            if badge is not None and not is_written_rule(rule):
                 badge.setText(confidence(rule["blocks"]))
         widget.toggle.blockSignals(True)
         widget.toggle.setChecked(self._entry_enabled(rule))
@@ -367,21 +458,85 @@ class _LevelPage(QWidget):
         self._add_rule(blocks)
 
     def _add_from_sample(self):
-        blocks = blocks_from_sample(self.sample_input.text(), self.level)
-        if blocks is None:
+        """貼一行標題：積木組得出來就建積木組合；組不出來（英文、特殊寫法）改建一條自己寫的規則。"""
+        sample = self.sample_input.text().strip()
+        if not sample:
+            return
+        blocks = blocks_from_sample(sample, self.level)
+        if blocks is not None:
+            self.sample_message.clear()
+            self.sample_message.hide()
+            self.sample_input.clear()
+            self._add_rule(blocks)
+            return
+        rule = rule_from_sample(sample)
+        if rule is None:
             i18n.set_text(self.sample_message, "這一行找不到編號")
             self.sample_message.show()
             return
-        self.sample_message.clear()
-        self.sample_message.hide()
         self.sample_input.clear()
-        self._add_rule(blocks)
+        self._add_written(rule)
+        i18n.set_text(self.sample_message, "積木組不出這種寫法，已建成自己寫的規則")
+        self.sample_message.show()
+
+    def _add_written(self, rule=None):
+        """新增一條自己寫的規則（從範例產生的，或空白的讓使用者自己寫），放在這一層的最後面。"""
+        existing = {item["name"] for item in self._dialog._plain}
+        number = len(self._dialog._plain) + 1
+        while f"自訂規則 {number}" in existing:
+            number += 1
+        rule = dict(rule or {"pattern": ""}, level=self.level, enabled=True)
+        rule["name"] = rule.get("name") or f"自訂規則 {number}"
+        self._dialog._plain.append(rule)
+        self.rebuild_list(len(self.entries()) - 1)
+        (self.pattern_input if not rule["pattern"] else self.name_input).setFocus()
+
+    def _written_from_sample(self):
+        rule = self.current_rule()
+        sample = self.written_sample.text().strip()
+        if not is_written_rule(rule) or not sample:
+            return
+        generated = rule_from_sample(sample)
+        if generated is None:
+            i18n.set_text(self.written_message, "這一行找不到章號（數字或中文數字），無法自動產生規則")
+            return
+        rule["pattern"] = generated["pattern"]
+        self.pattern_input.setText(rule["pattern"])
+        self._on_pattern_edited(rule["pattern"])
+
+    def _insert_snippet(self, name: str, text: str, hint: str):
+        rule = self.current_rule()
+        if not is_written_rule(rule):
+            return
+        self.pattern_input.insert(text)
+        self.pattern_input.setFocus()
+        self._on_pattern_edited(self.pattern_input.text())
+        if not self.written_message.property("problem"):
+            i18n.set_text(self.written_message, f"{name}：{hint}")
+
+    def _on_pattern_edited(self, text: str):
+        """打字就更新規則、重算本文有幾行符合（取代以前的「測試目前文件」）。"""
+        rule = self.current_rule()
+        if not is_written_rule(rule):
+            return
+        rule["pattern"] = text.strip()
+        problem = pattern_problem(rule["pattern"])
+        if not problem and is_risky_pattern(rule["pattern"]):
+            problem = RISKY_WARNING
+        self.written_message.setProperty("problem", bool(problem))
+        i18n.set_text(self.written_message, problem)
+        self.count_label.setText("…")
+        self._count_timer.start()
 
     def _delete_current(self):
         row = self.combo_list.currentRow()
-        if row <= 0:
+        rule = self.current_rule()
+        if row <= 0 or rule is None:
             return
-        del self._dialog.combos[self.level][row - 1]
+        if is_written_rule(rule):
+            self._dialog._plain = [item for item in self._dialog._plain if item is not rule]
+        else:
+            self._dialog.combos[self.level] = [item for item in self._dialog.combos[self.level] if item is not rule]
         self.rebuild_list(row - 1)
 
     def _on_name_edited(self, text: str):
@@ -389,6 +544,10 @@ class _LevelPage(QWidget):
         if rule is None:
             return
         name = text.strip()
+        if is_written_rule(rule):
+            rule["name"] = name or rule["name"]
+            self._refresh_row(self.combo_list.currentRow())
+            return
         rule["name"] = name or auto_name(rule["blocks"])
         if name:
             rule["named"] = True
@@ -470,10 +629,20 @@ class _LevelPage(QWidget):
             return
         rule = self.current_rule()
         builtin = rule is None
-        blocks = self.blocks(rule)
+        written = is_written_rule(rule)
         self.name_input.setText(_BUILTIN_NAMES[self.level] if builtin else rule["name"])
         self.name_input.setReadOnly(builtin)
         self.delete_button.setVisible(not builtin)
+        i18n.set_text(self.delete_button, "刪除規則" if written else "刪除組合")
+        self.editor_stack.setCurrentIndex(1 if written else 0)
+        self.confidence_label.setVisible(not written)
+        if written:
+            self.written_sample.clear()
+            self.pattern_input.setText(rule["pattern"])
+            self._on_pattern_edited(rule["pattern"])
+            self.result_label.setText(rule["name"])
+            return
+        blocks = self.blocks(rule)
         grade = "高" if builtin else confidence(blocks)
         i18n.set_text(self.confidence_label, f"{grade}信心")
         for column, chips in self.chips.items():
@@ -501,6 +670,18 @@ class _LevelPage(QWidget):
             units = set(self.blocks()["unit"])
             rows = [(row, clean, known) for row, known, clean in dialog.heading_rows
                     if heading_word(clean) in units]
+        elif is_written_rule(rule):
+            # 自己寫的規則不受章名結尾限制（那只擋自動辨識）；寫錯的正則不算，行數寫「—」
+            if pattern_problem(rule["pattern"]):
+                self.count_label.setText("—")
+                self._line_rows = []
+                if self.lines_button.isChecked():
+                    self._fill_lines()
+                return
+            test_rule = dict(rule, enabled=True)
+            for row, clean, known in dialog.rule_lines():
+                if match_user_chapter_rule(clean, [test_rule]):
+                    rows.append((row, clean, known))
         else:
             check = dialog.title_check()
             test_rule = dict(rule, enabled=True)
@@ -545,7 +726,8 @@ class _LevelPage(QWidget):
 class RecognitionDialog(QDialog):
     """按「保存並重掃」之後結果在 result_rules（整份自訂規則清單：自己寫的正則在前、組合在後）、
     result_disabled_words、result_special_levels、result_max_title_length、result_title_tail、
-    result_title_tail_custom。"""
+    result_title_tail_custom；在「可疑章節」勾了行一起加入時，result_lines 是加上 [::] 之後的整份本文、
+    result_volume_rows 是其中要當成卷的行（沒有就是 None／空集合）。"""
 
     candidateHighlighted = Signal(int, int)
 
@@ -576,15 +758,23 @@ class RecognitionDialog(QDialog):
         self.result_title_tail_custom = None
         self._max_title_length = int(max_title_length)
         self._rule_lines = None
+        self.result_lines = None
+        self.result_volume_rows: set = set()
         self._analyze(get_document_lines(), known_rows)
 
-        root, footer = dialog_frame(self, intro="用積木組出章、卷標題的寫法；也可以關掉單位、設定特殊標題是卷或章。")
+        root, footer = dialog_frame(self, intro="設定哪些寫法算章、卷：用積木組合，或自己寫規則；可疑章節可以勾選後加入目錄。")
         root.setSpacing(12)
         self.tabs = QTabWidget()
         self.pages = {level: _LevelPage(self, level) for level in (2, 1)}
         self.tabs.addTab(_scrolling(self.pages[2]), "章")
         self.tabs.addTab(_scrolling(self.pages[1]), "卷")
         self.tabs.addTab(_scrolling(self._build_special_page()), "特殊標題")
+        self.suspects = SuspectsPage(self._lines, self._known_rows, self._max_title_length,
+                                     self._save_suspect_format, self._add_suspect_lines)
+        self.suspects.candidateHighlighted.connect(self.candidateHighlighted.emit)
+        self.suspects.countChanged.connect(
+            lambda count: self.tabs.setTabText(_SUSPECTS_TAB, i18n.T(f"可疑章節（{count}）")))
+        self.tabs.addTab(self.suspects, i18n.T(f"可疑章節（{len(self.suspects.candidates)}）"))
         root.addWidget(self.tabs, 1)
 
         length_row = QHBoxLayout()
@@ -671,8 +861,9 @@ class RecognitionDialog(QDialog):
         return self._rule_lines
 
     def reload(self, lines, known_rows=None):
-        """對話框開著時本文被改過：換成新的一份重算收錄數。"""
+        """對話框開著時本文被改過：換成新的一份重算收錄數與可疑章節。"""
         self._analyze(lines, known_rows)
+        self.suspects.reload(lines, known_rows)
         for page in self.pages.values():
             page.show_current()
         self._update_special_counts()
@@ -973,10 +1164,86 @@ class RecognitionDialog(QDialog):
         return [special_word_rule(rule["special"], rule["level"], rule.get("enabled", True))
                 for rule in self.custom_specials] + rules
 
-    def _commit(self):
+    def show_candidates(self, fmt=None):
+        """切到「可疑章節」分頁，只看某一種格式（None＝全部）。"""
+        self.suspects.show_format(fmt)
+        self.tabs.setCurrentIndex(_SUSPECTS_TAB)
+
+    def _save_suspect_format(self, fmt: str, candidate) -> str:
+        """可疑章節的「把這種格式存成規則」：常用寫法加成組合（已經有一樣的就打開它），
+        其他寫法加成自己寫的規則。按「保存並重掃」才生效。回傳寫在狀態列的一句話。"""
+        if fmt.startswith("preset:"):
+            preset_id = fmt.split(":", 1)[1]
+            if preset_id == _NAMED_VOLUME:
+                if self._named_volume is None:
+                    self._named_volume = preset_rule(_NAMED_VOLUME)
+                self._named_volume["enabled"] = True
+                self.special_toggles[_NAMED_VOLUME].setChecked(True)
+                return "已打開特殊標題的「名稱＋篇」，按「保存並重掃」後生效"
+            level, blocks = template(preset_id)
+            rule = block_rule(blocks, level)
+            existing = next((item for item in self.combos[level] if item.get("pattern") == rule["pattern"]), None)
+            if existing is None:
+                self.combos[level].append(rule)
+            else:
+                existing["enabled"] = True
+                rule = existing
+            self.pages[level].rebuild_list(self.pages[level].combo_list.currentRow())
+            return f"已加入組合「{rule['name']}」，按「保存並重掃」後生效"
+        rule = weak_candidate_to_user_rule(candidate)
+        rule["name"] = candidate["label"]
+        if any(existing.get("pattern") == rule["pattern"] for existing in self._plain):
+            return "相同寫法的規則已經在清單裡了"
+        self._plain.append(rule)
+        page = self.pages[1 if rule.get("level") == 1 else 2]
+        page.rebuild_list(page.combo_list.currentRow())
+        return f"已加入自己寫的規則「{rule['name']}」，按「保存並重掃」後生效"
+
+    def _add_suspect_lines(self):
+        """可疑章節的「加入已勾選項目」：勾的行加上 [::]，同時保存全部設定並關閉視窗。"""
+        self.result_lines, self.result_volume_rows = self.suspects.checked_lines_result()
+        self._commit(ask_about_checked=False)
+
+    def _check_written_rules(self) -> bool:
+        """保存前檢查自己寫的規則：寫錯、空白的不能存（切到那一條、說明哪裡錯）；有巢狀量詞的問一次。"""
+        for rule in self._plain:
+            problem = pattern_problem(rule.get("pattern", ""))
+            risky = not problem and is_risky_pattern(rule["pattern"])
+            if not problem and not risky:
+                continue
+            page = self.pages[1 if rule.get("level") == 1 else 2]
+            self.tabs.setCurrentIndex(0 if page.level == 2 else 1)
+            page.combo_list.setCurrentRow(next(index for index, entry in enumerate(page.entries()) if entry is rule))
+            if problem:
+                dialogs.error(self, "規則寫錯了", f"「{rule['name']}」：{problem}")
+                return False
+            if not dialogs.confirm(self, "正則可能很慢", f"「{rule['name']}」{RISKY_WARNING}。\n\n仍要使用嗎？"):
+                return False
+        return True
+
+    def _commit(self, ask_about_checked: bool = True):
+        if not self._check_written_rules():
+            self.result_lines, self.result_volume_rows = None, set()
+            return
+        # 在可疑章節勾了行卻直接按「保存並重掃」：多半是想一起加入，先問清楚，不要默默丟掉，也不要默默改本文
+        if ask_about_checked and self.suspects.checked_count() and self.result_lines is None:
+            box = QMessageBox(QMessageBox.Icon.Question, i18n.T("一起加入目錄？"),
+                              i18n.T(f"你在「可疑章節」勾了 {self.suspects.checked_count()} 行，要一起加入目錄嗎？"),
+                              parent=self)
+            add_button = box.addButton(i18n.T("一起加入"), QMessageBox.ButtonRole.AcceptRole)
+            rules_only = box.addButton(i18n.T("只保存設定"), QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(i18n.T("返回"), QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(add_button)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is add_button:
+                self.result_lines, self.result_volume_rows = self.suspects.checked_lines_result()
+            elif clicked is not rules_only:
+                return
         rules = [dict(rule) for rule in self._plain] + self.managed_rules()
         if not _save_json(RULES_FILE, rules):
             dialogs.error(self, "無法保存", "章節規則無法寫入設定檔。")
+            self.result_lines, self.result_volume_rows = None, set()
             return
         self.result_rules = rules
         self.result_disabled_words = frozenset(self.disabled)

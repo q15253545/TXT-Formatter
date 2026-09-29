@@ -130,7 +130,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.force_lv1_chapters: set = set()
         self.force_lv2_chapters: set = set()
         self.structure_mode = DEFAULT_STRUCTURE_MODE
-        # 標題結尾允許字元（自訂章節規則 → 標題結尾）
+        # 標題結尾允許字元（辨識章節的「章名結尾可以是」）
         self.title_tail_allowed = DEFAULT_TITLE_TAIL_ALLOWED
         self.title_tail_custom = ""     # 使用者在「標題結尾」分頁自己加的標點
         self.disabled_words = frozenset()           # 「辨識章節」關掉的章節單位、特殊標題
@@ -156,7 +156,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.chapter_index_map: dict = {}
         self.chapter_records: dict = {}
         self.toc_boundary_map: dict = {}
-        # 開著的工具對話框（標點校對、掃描無關連內容、自訂章節規則）：非模式，
+        # 開著的工具對話框（標點校對、掃描非正文內容、辨識章節）：非模式，
         # 開著時也能編輯本文。同一種只開一個。
         self._tool_dialogs: dict = {}
         self._tool_dialog_watcher = _ToolDialogWatcher(self)
@@ -334,7 +334,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         self.chapter_panel = ChapterPanel()
         self.chapter_panel.recognition_requested.connect(self.open_recognition_dialog)
-        self.chapter_panel.rules_requested.connect(self.open_rules_dialog)
         self.chapter_panel.check_missing_requested.connect(self.check_missing_chapters)
         self.chapter_panel.missing_mode_changed.connect(self._refresh_missing_report)
         self.chapter_panel.merge_titles_toggled.connect(self._on_merge_titles_toggled)
@@ -1851,8 +1850,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         """自訂規則的正則在期限內跑不完：這次開啟期間已停用，告訴使用者是哪一條。"""
         names = pop_timed_out_rules()
         if names:
-            self._show_status(f"自訂章節規則「{'、'.join(names)}」執行太久，已暫停使用；"
-                              "請到「自訂章節規則」修改寫法")
+            self._show_status(f"自己寫的章節規則「{'、'.join(names)}」執行太久，已暫停使用；"
+                              "請到「辨識章節」修改寫法")
 
     def _label_path(self, item) -> tuple:
         path = []
@@ -2140,11 +2139,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     @action
     def _accept_toc_hint(self):
         if self._toc_hint_format:
-            fmt = self._toc_hint_format
-            self.open_rules_dialog()
-            dialog = self._tool_dialogs.get("rules")
-            if dialog is not None:
-                dialog.show_candidates(fmt)
+            self.open_suspect_chapters(self._toc_hint_format)
             return
         if not self._toc_hint_template:
             return

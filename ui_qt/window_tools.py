@@ -1,5 +1,5 @@
 """主視窗：工具視窗（字數、重複章節、掃描無關連內容、作者感言、標點校對、繁簡轉換、
-辨識章節、自訂章節規則、新增章節）與本文字色標示。
+辨識章節（含可疑章節）、新增章節）與本文字色標示。
 
 工具視窗是非模式的：開著也能改本文，切回視窗時照文字版本決定要不要重算（_open_tool_dialog）。
 MainWindow 的一部分（mixin），只用 MainWindow 的屬性與方法。"""
@@ -41,7 +41,6 @@ from .insert_title_dialog import InsertTitleDialog
 from .quote_check_dialog import QuoteCheckDialog
 from .script_convert_dialog import ScriptConvertDialog
 from .recognition_dialog import RecognitionDialog
-from .rules_dialog import RulesDialog
 from .word_count_dialog import WordCountDialog
 from .window_common import MARK_SCAN_DELAY_MS, OPEN_FILE_FILTER
 
@@ -838,10 +837,18 @@ class ToolWindowsMixin:
 
         self._open_tool_dialog("recognition", create, reload, self._on_recognition_dialog_closed)
 
+    def open_suspect_chapters(self, fmt=None):
+        """打開辨識章節的「可疑章節」分頁（目錄上方的提示「查看可疑章節」），只看某一種格式。"""
+        self.open_recognition_dialog()
+        dialog = self._tool_dialogs.get("recognition")
+        if dialog is not None:
+            dialog.show_candidates(fmt)
+
     @action
     def _on_recognition_dialog_closed(self, dialog, accepted: bool):
         if not accepted or dialog.result_rules is None:
             return
+        added = self._add_suspect_lines(dialog)
         new = (dialog.result_rules, dialog.result_title_tail, dialog.result_title_tail_custom or "",
                dialog.result_disabled_words, dialog.result_max_title_length, dialog.result_special_levels)
         old = (self.user_chapter_rules, self.title_tail_allowed, self.title_tail_custom, self.disabled_words,
@@ -853,61 +860,30 @@ class ToolWindowsMixin:
             self.auto_titles = {row: record for row, record in self.auto_titles.items()
                                 if record.get("kind") == "work"}
         self.rescan_toc()
-        self._show_status("已保存辨識章節的設定")
-
-    def open_rules_dialog(self):
-        """自訂章節規則（自己寫的正則、本文可疑章節）。非模式：開著時可以從本文複製一行貼到「從範例產生」。"""
-        self._sync_raw_lines()
-        # 目錄在打字之後可能還沒重建，行號會對不上：已經是章節的行被當成
-        # 「可疑章節」再列一次，或真正沒辨識到的反而被跳過。
-        if self.raw_lines and any(line.strip() for line in self.raw_lines):
-            self._ensure_toc_current()
-
-        def create():
-            dialog = RulesDialog(self.user_chapter_rules, lambda: list(self.raw_lines), self,
-                                 known_rows=self._handled_title_rows(),
-                                 max_title_length=self.max_title_length)
-            dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
-            return dialog
-
-        def reload(dialog):
-            dialog.reload(self.raw_lines, self._handled_title_rows())
-
-        self._open_tool_dialog("rules", create, reload, self._on_rules_dialog_closed)
-
-    @action
-    def _on_rules_dialog_closed(self, dialog, accepted: bool):
-        result_rules = dialog.result_rules
-        result_lines = dialog.result_lines
-        volume_rows = set(dialog.result_volume_rows)
-        if not accepted or result_rules is None:
-            return
-        if result_lines is not None and dialog._tool_version != self._text_version:
-            # 按下按鈕前本文又改了（理論上切回對話框時就會重算，這裡保險）：
-            # 勾選的行號已經對不上，只存規則，不動本文。
-            result_lines = None
-            self._show_status("本文在勾選之後改過了，只保存規則；要加入的行請重新勾選")
-        added = 0
-        if result_lines is not None:
-            # 只在行尾加 [::]，行數不變，章節狀態的行號也不用搬。
-            added = sum(1 for old, new in zip(self.raw_lines, result_lines) if old != new)
-            generated = "\n".join(result_lines)
-            self.raw_lines = list(result_lines)
-            self._set_editor_text(generated, lambda row: row)
-            self._mark_synced(generated)
-            # 卷級格式逐行加入時要設成卷；[::] 本身只代表「這一行是標題」。
-            self.force_lv1_chapters |= volume_rows
-            self.force_lv2_chapters -= volume_rows
-        detection_changed = result_rules != self.user_chapter_rules
-        self.user_chapter_rules = result_rules
-        if detection_changed:
-            # 排版時會把當時目錄裡的標題都記成自動標題，重掃時優先採用；規則、標題結尾改了，
-            # 就要照新的設定重新辨識，不然停用的規則、關掉的標點都改不動目錄。作品名稱照舊。
-            self.auto_titles = {row: record for row, record in self.auto_titles.items()
-                                if record.get("kind") == "work"}
-        self.rescan_toc()
-        if result_lines is not None:
+        if added is not None:
             self._checkpoint_document()
-            self._show_status(f"已把 {added} 行加入目錄，並保存 {len(self.user_chapter_rules)} 條自訂章節規則")
-        elif dialog._tool_version == self._text_version:
-            self._show_status(f"已保存 {len(self.user_chapter_rules)} 條自訂章節規則")
+            self._show_status(f"已把 {added} 行加入目錄，並保存辨識章節的設定")
+        elif dialog.result_lines is None or dialog._tool_version == self._text_version:
+            self._show_status("已保存辨識章節的設定")
+
+    def _add_suspect_lines(self, dialog):
+        """可疑章節勾選加入的行：行尾加 [::]、卷級格式設成卷。回傳加了幾行；沒有要加或本文已經改過時回傳 None。"""
+        result_lines = dialog.result_lines
+        if result_lines is None:
+            return None
+        if dialog._tool_version != self._text_version:
+            # 按下按鈕前本文又改了（理論上切回對話框時就會重算，這裡保險）：
+            # 勾選的行號已經對不上，只存設定，不動本文。
+            self._show_status("本文在勾選之後改過了，只保存設定；要加入的行請重新勾選")
+            return None
+        volume_rows = set(dialog.result_volume_rows)
+        # 只在行尾加 [::]，行數不變，章節狀態的行號也不用搬。
+        added = sum(1 for old, new in zip(self.raw_lines, result_lines) if old != new)
+        generated = "\n".join(result_lines)
+        self.raw_lines = list(result_lines)
+        self._set_editor_text(generated, lambda row: row)
+        self._mark_synced(generated)
+        # 卷級格式逐行加入時要設成卷；[::] 本身只代表「這一行是標題」。
+        self.force_lv1_chapters |= volume_rows
+        self.force_lv2_chapters -= volume_rows
+        return added
