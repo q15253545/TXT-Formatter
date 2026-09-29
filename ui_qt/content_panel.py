@@ -1,5 +1,5 @@
 """左側「內容檢查」卡片（左側圖示列「檢查」）：掃描無關連內容、作者感言與作品資訊、
-標點校對、章節字數、繁簡轉換，以及只影響畫面的開關：本文字色、內文空格。
+標點校對、繁簡轉換，以及只影響畫面的開關：本文字色、內文空格。
 
 本文字色一個開關同時標廣告與作者感言、作品資訊；要標哪些類型照兩個掃描視窗裡（記住的）勾選，
 想只看其中一種，把另一個視窗的類型都取消就好。顏色的意思寫在檔名列的「說明」裡。
@@ -17,7 +17,6 @@ _ACTIONS = [
     ("scan-search", "掃描無關連內容", "ad_scan_requested"),
     ("notebook-pen", "作者感言與作品資訊", "note_scan_requested"),
     ("quote", "標點校對", "quote_check_requested"),
-    ("file-text", "章節字數", "word_count_requested"),
     ("text-select", "繁簡轉換", "script_convert_requested"),
 ]
 CONFIDENCE_LEVELS = ("高", "中", "低")
@@ -28,7 +27,6 @@ class ContentPanel(QWidget):
     ad_scan_requested = Signal()
     note_scan_requested = Signal()
     quote_check_requested = Signal()
-    word_count_requested = Signal()
     script_convert_requested = Signal()
     marking_changed = Signal()          # 本文字色開關變了
     confidence_changed = Signal()       # 字色要標哪些信心變了（不必重掃，只重畫）

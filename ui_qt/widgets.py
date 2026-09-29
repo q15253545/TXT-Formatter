@@ -775,7 +775,7 @@ class IconTextButton(QPushButton):
 
 
 class HoverIconButton(QPushButton):
-    """卡片裡的一般按鈕（掃描無關連內容、合併重複章節…）：滑鼠移上去時圖示跟文字
+    """卡片裡的一般按鈕（掃描非正文內容、辨識章節…）：滑鼠移上去時圖示跟文字
     一起變色（文字色由樣式表的 QPushButton:hover 負責），停用時圖示變淡。"""
 
     def __init__(self, icon_name: str, text: str, *, size: int = 16, parent=None):

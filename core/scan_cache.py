@@ -12,6 +12,7 @@ from .duplicate_chapters import _text_sentences
 from .quote_check import _check_line
 from .title_markers import strip_persistent_title_marker
 from .user_rules import preset_match
+from .word_count import line_char_count
 
 _CANDIDATE_MAX_LENGTH = 60
 
@@ -28,6 +29,7 @@ def warm_other_caches(lines):
     """Punctuation check and chapter-candidate lookups."""
     for line in lines:
         _check_line(line)
+        line_char_count(line)
         text = line.strip()
         if text and len(text) <= _CANDIDATE_MAX_LENGTH:
             clean, marker = strip_persistent_title_marker(text)
@@ -59,7 +61,7 @@ def clear_line_caches():
     gc.unfreeze()
     _LINE_PROFILES.clear()
     for cached in (compact_ad_text, forum_line_strength, meta_line_kind, _check_line, preset_match, heading_word, heading_number,
-                   parse_weak_numbered_title, _text_sentences):
+                   parse_weak_numbered_title, _text_sentences, line_char_count):
         cached.cache_clear()
     # Collect now: unfrozen garbage (the last book's cyclic leftovers) would otherwise sit in the oldest
     # generation until this book's warm-up freezes it again, and pile up with every file opened.

@@ -771,7 +771,7 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
                 # 只比數字不足以證明是同一章：「第1章 開始」與「第1節 插曲」
                 # 是兩個不同的標題；「甲篇 第1章」與「乙篇 第1章」也是。
                 # 單位、前綴、篇名、卷名都一致，而且章名一樣（或其中一個只有章號）才算重複；
-                # 「第12章 風起」「第12章 雲湧」多半是作者編號打錯，兩章都留著，交給「合併重複章節」勾選。
+                # 「第12章 風起」「第12章 雲湧」多半是作者編號打錯，兩章都留著，交給「重複章節」勾選。
                 if ch_num > 0 and _same_chapter_identity(p_data, arc, vol, ch_prefix, ch_num, ch_unit) \
                         and _same_title_body(ch_body, strip_title_body(p_body)):
                     dup_cands.append((nxt, p_body, peek))

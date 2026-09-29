@@ -202,7 +202,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 匯出時要不要移除標記：只看章節標記說明裡的勾選，跟「顯示章節標記」無關。
         self._strip_markers_on_export = True
         self._ask_old_files_on_export = True
-        # 缺章檢查結果：按過一次「檢查缺章」之後，每次目錄重建都自動重算。
+        # 檢查章節的結果：按過一次「檢查章節」之後，每次目錄重建都自動重算。
         self._missing_report_active = False
         self._missing_groups: list = []
         # 按「重新整理目錄」時，最新卷／最新章無條件重新填入。
@@ -316,7 +316,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.content_panel.ad_scan_requested.connect(self.open_ad_scan_dialog)
         self.content_panel.note_scan_requested.connect(self.open_note_scan_dialog)
         self.content_panel.quote_check_requested.connect(self.open_quote_check_dialog)
-        self.content_panel.word_count_requested.connect(self.open_word_count_dialog)
         self.content_panel.script_convert_requested.connect(self.open_script_convert_dialog)
         self.content_panel.marking_changed.connect(self._on_marking_changed)
         self.content_panel.confidence_changed.connect(self._on_mark_confidence_changed)
@@ -336,7 +335,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.chapter_panel = ChapterPanel()
         self.chapter_panel.recognition_requested.connect(self.open_recognition_dialog)
         self.chapter_panel.rules_requested.connect(self.open_rules_dialog)
-        self.chapter_panel.merge_duplicates_requested.connect(self.open_duplicate_chapters_dialog)
         self.chapter_panel.check_missing_requested.connect(self.check_missing_chapters)
         self.chapter_panel.missing_mode_changed.connect(self._refresh_missing_report)
         self.chapter_panel.merge_titles_toggled.connect(self._on_merge_titles_toggled)
@@ -2498,7 +2496,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @timed
     def _refresh_missing_report(self):
-        if not self._missing_report_active:
+        # 章節管理卡片收起來時不算（看不到）；再打開卡片時重算一次
+        if not self._missing_report_active or not self.chapter_panel.isVisible():
             return
         results = self._find_collection_missing_from_toc()
         self._missing_groups = [result["nodes"] for result in results]
@@ -2509,6 +2508,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             "start_unverified": any(result["start_unverified"] for result in results),
             "groups": [{"label": result["label"], "entries": self._report_entries(result, uncollected)}
                        for result in results],
+            "words": [entry for entry in self._word_counts()[0] if entry["note"]],
         })
 
     def _report_entries(self, result, uncollected) -> list:
@@ -2596,6 +2596,12 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if link == "reorder":
             self.reorder_misplaced_chapters()
             return
+        if link == "duplicates":
+            self.open_duplicate_chapters_dialog()
+            return
+        if link == "words":
+            self.open_word_count_dialog()
+            return
         if link.startswith("line|"):
             self._jump_to_line(int(link.split("|")[1]) + 1)
             return
@@ -2631,6 +2637,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.side_rail.set_active({self.options_panel: "options", self.chapter_panel: "chapter",
                                    self.content_panel: "content", self.find_bar: "find"}.get(panel))
         self.side_card.setVisible(panel is not None)
+        if panel is self.chapter_panel:
+            self._refresh_missing_report()
         if was_open != (panel is not None):
             self._resize_cards_for_side_panel(sizes, opening=panel is not None)
 

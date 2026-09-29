@@ -296,7 +296,7 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         font-size: 12px;
         color: {t.text_muted};
     }}
-    /* 章節管理裡「檢查缺章」的結果區：比卡片底色深一階的小區塊。 */
+    /* 章節管理裡「檢查章節」的結果區：比卡片底色深一階的小區塊。 */
     #reportPane {{
         background: {t.bg};
         border: 1px solid {t.border};

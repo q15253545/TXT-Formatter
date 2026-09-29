@@ -18,14 +18,12 @@ MISSING_CHECK_MODES = ["僅檢查中間缺口", "每卷從第1章起算", "同�
 _ACTIONS = [
     ("file-search", "辨識章節", "recognition_requested"),
     ("list-ordered", "自訂章節規則", "rules_requested"),
-    ("merge", "合併重複章節", "merge_duplicates_requested"),
 ]
 
 
 class ChapterPanel(QWidget):
     recognition_requested = Signal()
     rules_requested = Signal()
-    merge_duplicates_requested = Signal()
     check_missing_requested = Signal()
     missing_mode_changed = Signal()
     merge_titles_toggled = Signal(bool)
@@ -87,11 +85,12 @@ class ChapterPanel(QWidget):
         root.addWidget(self.show_markers_toggle)
         root.addWidget(Divider())
 
-        # 缺章檢查：範圍只有看結果時才要選，放在結果區最上面，卡片上只留按鈕。
+        # 檢查章節：缺章、重複、順序錯亂、字數異常一起列在結果區，每一類旁邊直接是處理的入口
+        # （重複章節、依章號重排、章節字數）。範圍只有看結果時才要選，放在結果區最上面。
         self.missing_mode_combo = QComboBox()
         self.missing_mode_combo.addItems(MISSING_CHECK_MODES)
         self.missing_mode_combo.currentIndexChanged.connect(lambda _index: self.missing_mode_changed.emit())
-        self.check_missing_button = HoverIconButton("list-checks", "檢查缺章")
+        self.check_missing_button = HoverIconButton("list-checks", "檢查章節")
         self.check_missing_button.clicked.connect(self.check_missing_requested.emit)
         root.addWidget(self.check_missing_button)
 
@@ -125,7 +124,7 @@ class ChapterPanel(QWidget):
         self.auto_apply_toggle.setChecked(on)
 
     def _build_report_pane(self) -> QWidget:
-        """檢查缺章的結果：固定顯示在按鈕下方，不再用狀態列（狀態列會被下
+        """檢查章節的結果：固定顯示在按鈕下方，不再用狀態列（狀態列會被下
         一個操作的訊息蓋掉）。之後每次目錄重建都自動重算，一邊合併、修改
         章節，一邊就能看到問題清單縮短，不用反覆按檢查。"""
         self.report_pane = QFrame()
@@ -196,7 +195,7 @@ class ChapterPanel(QWidget):
             self._render_report()
 
     def _render_report(self):
-        """由上到下分段：總結 → 各卷的缺口／重複（可點，跳到附近章節）→ 備註。"""
+        """由上到下分段：總結 → 各卷的缺口／重複／順序錯亂（可點，跳到附近章節）→ 字數異常 → 其他檢查的入口、備註。"""
         T = i18n.T
         report = self._report
         tokens = self._tokens
@@ -204,16 +203,18 @@ class ChapterPanel(QWidget):
         ok = tokens.ok_text if tokens else "#1F7A4C"
         muted = tokens.text_muted if tokens else "#647084"
         accent = tokens.accent if tokens else "#3869D8"
+        link = f'<a href="{{}}" style="color:{accent};text-decoration:none">{{}}</a>'
         parts = []
         total, mode = report["total"], T(report["mode"])
+        words = report.get("words", [])
         if total == 0:
             parts.append(f'<p style="color:{muted}">{T("目前目錄沒有可連號檢查的正式章節。")}</p>')
         else:
-            problem_count = sum(len(group["entries"]) for group in report["groups"])
+            problem_count = sum(len(group["entries"]) for group in report["groups"]) + len(words)
             if problem_count:
                 headline = f'<b style="color:{warn}">{T(f"發現 {problem_count} 處問題")}</b>'
             else:
-                headline = f'<b style="color:{ok}">✓ {T("未發現缺章")}</b>'
+                headline = f'<b style="color:{ok}">✓ {T("未發現問題")}</b>'
             parts.append(f'<p style="margin:0">{headline}<br>'
                          f'<span style="color:{muted}">{T(f"共 {total} 個正式章節")} · {mode}</span></p>')
             clean_groups = 0
@@ -223,11 +224,14 @@ class ChapterPanel(QWidget):
                     continue
                 label = html.escape(group["label"]) if group["label"] != "全書" else T("全書")
                 lines, typos, strays, misplaced = [], [], [], []
-                link = f'<a href="{{}}" style="color:{accent};text-decoration:none">{{}}</a>'
+                any_dup = False
                 for entry in group["entries"]:
                     start, end = entry["start"], entry["end"]
                     if entry["kind"] == "dup":
-                        lines.append(link.format(f"{index}|{start}|dup", T(f"第 {start} 章重複")))
+                        # 第一筆重複旁邊直接是處理的入口（重複章節視窗）
+                        handle = "" if any_dup else "　" + link.format("duplicates", T("處理重複章節"))
+                        any_dup = True
+                        lines.append(link.format(f"{index}|{start}|dup", T(f"第 {start} 章重複")) + handle)
                         continue
                     if entry["kind"] == "misplaced":
                         misplaced.append(link.format(f"line|{entry['row']}", T(
@@ -268,7 +272,22 @@ class ChapterPanel(QWidget):
             if clean_groups and clean_groups < len(report["groups"]):
                 parts.append(f'<p style="margin-top:8px;margin-bottom:0;color:{muted}">'
                              f'{T(f"其餘 {clean_groups} 組章節編號連續。")}</p>')
-        notes = [T("番外與小數章不列入檢查。")]
+        if words:
+            # 沒有正文、比中位數短很多（只剩作者的話、正文被截掉）、長很多（兩章之間少了標題）：最多列五章
+            items = []
+            for entry in words[:5]:
+                note = T(entry["note"]) if entry["note"] == "沒有正文" else T(f"{entry['note']}，{entry['count']:,} 字")
+                items.append(link.format(f"line|{entry['row']}", html.escape(entry["title"])) + f"（{note}）")
+            if len(words) > 5:
+                items.append(f'<span style="color:{muted}">{T(f"還有 {len(words) - 5} 章")}</span>')
+            parts.append(f'<p style="margin-top:8px;margin-bottom:0"><b>{T("字數異常")}</b>　'
+                         + link.format("words", T("看章節字數")) + "<br>"
+                         + "<br>".join(f"· {item}" for item in items) + "</p>")
+        # 其他檢查的入口：內容重複（章號不同、不相鄰）的章只在重複章節視窗裡找，這裡不會列出
+        parts.append(f'<p style="margin-top:8px;margin-bottom:0">{T("更多：")}'
+                     + link.format("duplicates", T("重複章節")) + "　"
+                     + link.format("words", T("章節字數")) + "</p>")
+        notes = [T("番外與小數章不列入缺章檢查。")]
         parts.append(f'<p style="margin-top:8px;color:{muted}">' + "<br>".join(notes) + "</p>")
         self.report_label.setText("".join(parts))
 

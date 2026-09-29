@@ -1,4 +1,4 @@
-"""合併重複章節（從「章節管理」開啟）。
+"""重複章節（從章節管理「檢查章節」的結果開啟）。
 
 列出目錄裡相鄰、章號相同的章節，一列一章，勾選要保留的；按「刪除未保留的章節」才動本文。
 非模式：開著的時候可以直接在本文比對兩段內容；本文改過之後，主視窗會呼叫 reload() 重新找。
@@ -23,7 +23,7 @@ class DuplicateChaptersDialog(QDialog):
 
     def __init__(self, raw_lines: list, title_rows, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("合併重複章節")
+        self.setWindowTitle("重複章節")
         size_dialog(self, 860, 600)
         self._raw_lines = list(raw_lines)
         self._title_rows = set(title_rows)
