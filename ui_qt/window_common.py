@@ -51,7 +51,7 @@ MARKER_GUIDE = [
 MIN_WINDOW_WIDTH = 680
 MIN_WINDOW_HEIGHT = 420       # 書籍資料收起時；展開時再加上它的高度（_update_minimum_height）
 # 章節管理的預覽開關：狀態列說明的結尾
-_PREVIEW_NOTE = "（預覽，按「套用到本文」才寫入）"
+_PREVIEW_NOTE = "（預覽，在目錄上方按「套用到本文」才寫入）"
 
 
 class _LayoutWatcher(QObject):

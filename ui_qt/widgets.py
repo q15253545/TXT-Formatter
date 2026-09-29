@@ -1635,6 +1635,51 @@ class DropOverlay(QWidget):
             self.dropped.emit(key, paths)
 
 
+class NoticeBar(QFrame):
+    """目錄上方的提示列（漏掉的章節寫法、章號順序錯亂、預覽中）：一句話＋一排按鈕，
+    closable 時右上角有 ✕（「這本書不再提示」，由呼叫端記住）。"""
+
+    dismissed = Signal()
+
+    def __init__(self, closable: bool = False, parent=None):
+        super().__init__(parent)
+        self.setObjectName("tocHint")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 8 if closable else 12, 10)
+        layout.setSpacing(8)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        self.label = QLabel("")
+        self.label.setWordWrap(True)
+        top.addWidget(self.label, 1)
+        self.close_button = None
+        if closable:
+            self.close_button = IconButton("x", "這本書不再提示", size=14)
+            self.close_button.clicked.connect(self._dismiss)
+            top.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(top)
+        self._buttons = QHBoxLayout()
+        self._buttons.setSpacing(6)
+        self._buttons.addStretch(1)
+        layout.addLayout(self._buttons)
+        self.hide()
+
+    def add_button(self, text: str, primary: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        if primary:
+            button.setObjectName("primary")
+        self._buttons.insertWidget(self._buttons.count() - 1, button)
+        return button
+
+    def _dismiss(self):
+        self.hide()
+        self.dismissed.emit()
+
+    def set_colors(self, tokens):
+        if self.close_button is not None:
+            self.close_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
+
+
 class ScrollEndButtons(QFrame):
     """捲動區右下角浮著的「到最前面／到最後面」兩顆小按鈕：內容長到需要捲動時才出現，
     不佔卡片標題列的位置。按下去做什麼由呼叫端決定（top／bottom 訊號）。"""

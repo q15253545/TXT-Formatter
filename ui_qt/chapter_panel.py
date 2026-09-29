@@ -32,7 +32,6 @@ class ChapterPanel(QWidget):
     infer_volumes_toggled = Signal(bool)
     show_markers_toggled = Signal(bool)
     auto_apply_preview_toggled = Signal(bool)
-    apply_volumes_requested = Signal()
     # 點檢查結果裡的某一筆：「群組索引|章號|gap 或 dup」
     report_link_activated = Signal(str)
     report_closed = Signal()
@@ -79,11 +78,7 @@ class ChapterPanel(QWidget):
         self.auto_apply_toggle = ToggleSwitch("自動套用到一鍵排版")
         self.auto_apply_toggle.clicked.connect(lambda checked: self.auto_apply_preview_toggled.emit(checked))
         root.addWidget(self.auto_apply_toggle)
-        # 開關只是預覽；確認後按這裡才寫進本文（合併標題、補上的卷一起寫）
-        self.apply_volumes_button = QPushButton("套用到本文")
-        self.apply_volumes_button.setEnabled(False)
-        self.apply_volumes_button.clicked.connect(self.apply_volumes_requested.emit)
-        root.addWidget(self.apply_volumes_button)
+        # 開關只是預覽；「套用到本文」「取消預覽」在目錄上方的預覽列，跟預覽的目錄在一起
 
         root.addWidget(Divider())
         # 章節標記（[::] 這類，寫在檔案裡保存目錄的手動調整）顯示與否；匯出時要不要拿掉在匯出設定
@@ -109,31 +104,22 @@ class ChapterPanel(QWidget):
         self._tokens = None
 
     def _on_merge_titles_toggled(self, on: bool):
-        self._refresh_apply_button()
         self.merge_titles_toggled.emit(on)
 
     def _on_infer_volumes_toggled(self, on: bool):
-        self._refresh_apply_button()
         self.infer_volumes_toggled.emit(on)
-
-    def _refresh_apply_button(self):
-        """合併標題或補齊卷任一個開著，才有東西可以套用。"""
-        self.apply_volumes_button.setEnabled(
-            self.merge_titles_toggle.isChecked() or self.infer_volumes_toggle.isChecked())
 
     def set_merge_titles(self, on: bool):
         """還原上次的設定（不送出訊號）。"""
         self.merge_titles_toggle.blockSignals(True)
         self.merge_titles_toggle.setChecked(on)
         self.merge_titles_toggle.blockSignals(False)
-        self._refresh_apply_button()
 
     def set_infer_volumes(self, on: bool):
         """還原上次的設定（不送出訊號）。"""
         self.infer_volumes_toggle.blockSignals(True)
         self.infer_volumes_toggle.setChecked(on)
         self.infer_volumes_toggle.blockSignals(False)
-        self._refresh_apply_button()
 
     def set_auto_apply(self, on: bool):
         self.auto_apply_toggle.setChecked(on)

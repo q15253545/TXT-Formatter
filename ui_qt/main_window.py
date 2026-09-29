@@ -27,8 +27,8 @@ from PySide6.QtGui import (
     QTextCursor, QTextFormat,
 )
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QPushButton, QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core.cn_numerals import chinese_to_arabic
@@ -83,7 +83,7 @@ from .text_positions import PositionMap
 from .theme import DARK, DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
     AppWidgetPolisher, Card, ClickableLabel, DropOverlay, Editor, IconButton, IconTextButton, LanguageToggle,
-    ElidedLabel, ScrollEndButtons, SideRail, ThemeButton, VDivider, dropped_paths, make_card_header,
+    ElidedLabel, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, VDivider, dropped_paths, make_card_header,
 )
 from . import __version__
 from .window_common import (
@@ -342,7 +342,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.chapter_panel.merge_titles_toggled.connect(self._on_merge_titles_toggled)
         self.chapter_panel.infer_volumes_toggled.connect(self._on_infer_volumes_toggled)
         self.chapter_panel.auto_apply_preview_toggled.connect(self._on_auto_apply_preview_toggled)
-        self.chapter_panel.apply_volumes_requested.connect(self.apply_toc_preview)
         self.chapter_panel.report_link_activated.connect(self._on_missing_report_link)
         self.chapter_panel.report_closed.connect(self._on_missing_report_closed)
         side_layout.addWidget(self.chapter_panel)
@@ -408,19 +407,24 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         tree_body = QVBoxLayout()
         tree_body.setContentsMargins(4, 8, 4, 8)
-        # 目錄是空的、本文卻有很多同一種常用寫法（1 標題、#1…）：提示一鍵加成辨識章節的組合
-        self.toc_hint = QFrame()
-        self.toc_hint.setObjectName("tocHint")
-        hint_layout = QVBoxLayout(self.toc_hint)
-        hint_layout.setContentsMargins(12, 10, 12, 10)
-        hint_layout.setSpacing(8)
-        self.toc_hint_label = QLabel("")
-        self.toc_hint_label.setWordWrap(True)
-        hint_layout.addWidget(self.toc_hint_label)
-        self.toc_hint_button = QPushButton("加入辨識章節")
+        # 目錄上方的提示列（widgets.NoticeBar），由上到下：
+        # 預覽中——章節管理的預覽開關開著：套用到本文、取消預覽都在這裡，跟預覽的目錄在一起；
+        self.preview_bar = NoticeBar()
+        self.preview_apply_button = self.preview_bar.add_button("套用到本文", primary=True)
+        self.preview_apply_button.clicked.connect(self.apply_toc_preview)
+        self.preview_bar.add_button("取消預覽").clicked.connect(self.cancel_toc_preview)
+        # 目錄是空的、本文卻有很多同一種常用寫法（1 標題、#1…）：提示一鍵加成辨識章節的組合；
+        self.toc_hint = NoticeBar(closable=True)
+        self.toc_hint_label = self.toc_hint.label
+        self.toc_hint_button = self.toc_hint.add_button("加入辨識章節")
         self.toc_hint_button.clicked.connect(self._accept_toc_hint)
-        hint_layout.addWidget(self.toc_hint_button)
-        self.toc_hint.hide()
+        self.toc_hint.dismissed.connect(lambda: self._dismiss_toc_notice(self._toc_hint_notice))
+        # 有章放錯位置（章號跟前後接不上、搬到別處就連續）：一鍵依章號重排。
+        # 後兩種可以按 ✕ 略過，這本書之後不再提示（同樣的內容才不提示，換了別的問題照樣提示）。
+        self.order_hint = NoticeBar(closable=True)
+        self.order_hint.add_button("依章號重排").clicked.connect(self.reorder_misplaced_chapters)
+        self.order_hint.dismissed.connect(lambda: self._dismiss_toc_notice(self._order_hint_notice))
+        self._toc_hint_notice = self._order_hint_notice = None
         self._toc_hint_template = None
         self._toc_hint_format = None
         self._toc_hint_key = self._toc_hint_result = None
@@ -428,7 +432,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._toc_hint_timer.setSingleShot(True)
         self._toc_hint_timer.setInterval(0)
         self._toc_hint_timer.timeout.connect(self._update_toc_hint)
-        tree_body.addWidget(self.toc_hint)
+        for bar in (self.preview_bar, self.toc_hint, self.order_hint):
+            tree_body.addWidget(bar)
         tree_body.addWidget(self.tree)
         # 目錄右下角：到最前面／到最後面，本文的游標一起到開頭／最後一個字
         self.toc_ends = ScrollEndButtons(self.tree)
@@ -740,6 +745,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.content_panel.set_colors(tokens)
         self.find_bar.set_theme(tokens)
         self.side_rail.set_colors(tokens)
+        for bar in (self.preview_bar, self.toc_hint, self.order_hint):
+            bar.set_colors(tokens)
         self._apply_editor_style()
         trailing = QColor(tokens.warn_text)
         trailing.setAlpha(60 if tokens.is_dark else 38)
@@ -1999,20 +2006,74 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._toc_hint_template = None
         self._toc_hint_format = None
         if not any(line.strip() for line in self.raw_lines):
-            self.toc_hint.hide()
+            for bar in (self.preview_bar, self.toc_hint, self.order_hint):
+                bar.hide()
             return
+        self._update_preview_bar()
+        self._update_order_hint()
         # 行數、目錄項數、辨識規則都沒變（打字、改字）：沿用上次的判斷，不用再掃
         key = (self.input_file, len(self.raw_lines), len(self.chapter_raw_map), self.max_title_length,
                tuple(rule.get("pattern") for rule in self.user_chapter_rules))
         if key != self._toc_hint_key:
             self._toc_hint_key, self._toc_hint_result = key, self._find_toc_hint()
         text, self._toc_hint_template, self._toc_hint_format = self._toc_hint_result
-        if text is None:
+        self._toc_hint_notice = f"{self._book_key()}|hint|{self._toc_hint_template or self._toc_hint_format}"
+        if text is None or self._toc_notice_dismissed(self._toc_hint_notice):
             self.toc_hint.hide()
             return
         i18n.set_text(self.toc_hint_label, text)
         i18n.set_text(self.toc_hint_button, "查看可疑章節" if self._toc_hint_format else "加入辨識章節")
         self.toc_hint.show()
+
+    def _update_preview_bar(self):
+        """章節管理的預覽開關開著：目錄上方寫出預覽了什麼，套用到本文、取消預覽都在這裡。"""
+        names = [name for on, name in ((self._merge_titles, "自動合併標題"),
+                                       (self._infer_volumes, "自動補齊卷號與卷名")) if on]
+        if not names:
+            self.preview_bar.hide()
+            return
+        preview = self._toc_preview_lines()
+        text = "預覽中：" + "、".join(names)
+        text += f"（{'、'.join(preview[1])}）" if preview else "（這本書沒有要改的地方）"
+        i18n.set_text(self.preview_bar.label, text)
+        self.preview_apply_button.setVisible(preview is not None)
+        self.preview_bar.show()
+
+    def cancel_toc_preview(self):
+        """預覽列的「取消預覽」：關掉章節管理的兩個預覽開關，目錄回到本文原本的樣子。"""
+        self.chapter_panel.set_merge_titles(False)
+        self.chapter_panel.set_infer_volumes(False)
+        self._merge_titles = self._infer_volumes = False
+        self._rebuild_preview_toc()
+        self._show_status("已取消預覽：自動合併標題、自動補齊卷號與卷名都已關閉")
+
+    def _update_order_hint(self):
+        """有章放錯位置時，目錄上方提示「依章號重排」（跟缺章檢查的「順序錯亂」同一套判斷）。"""
+        numbers = sorted({move["number"] for result in self._find_collection_missing_from_toc()
+                          for move in result["misplaced_moves"]}) if self.chapter_records else []
+        self._order_hint_notice = f"{self._book_key()}|order|{','.join(map(str, numbers))}"
+        if not numbers or self._toc_notice_dismissed(self._order_hint_notice):
+            self.order_hint.hide()
+            return
+        shown = "、".join(map(str, numbers[:5]))
+        text = (f"第 {shown} 章的位置跟章號對不上" if len(numbers) <= 5
+                else f"第 {shown} 章等 {len(numbers)} 章的位置跟章號對不上")
+        i18n.set_text(self.order_hint.label, text)
+        self.order_hint.show()
+
+    def _book_key(self) -> str:
+        """「這本書不再提示」記在哪本書名下：有書名用書名（接續更新後檔名會換），沒有就用檔名。"""
+        return self.metadata_bar.title_input.text().strip() or os.path.basename(self.input_file or "")
+
+    def _toc_notice_dismissed(self, key: str) -> bool:
+        return key in self._ui_state.get("dismissed_toc_notices", [])
+
+    def _dismiss_toc_notice(self, key):
+        if not key:
+            return
+        kept = [item for item in self._ui_state.get("dismissed_toc_notices", []) if item != key]
+        self._ui_state["dismissed_toc_notices"] = (kept + [key])[-200:]
+        self._show_status("這本書不再顯示這個提示")
 
     def _handled_title_rows(self) -> set:
         """目錄裡的標題，加上「自動合併標題」預覽合併掉的那幾行：找「像標題卻不在目錄」的行（可疑章節、
@@ -2105,7 +2166,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         是推算出來的（UI_RULES.md）。"""
         tokens = self.tokens
         tooltip = i18n.T("推算出來的卷：本文沒有這個卷標題。\n"
-                         "確認沒問題後，在「章節管理」按「套用到本文」寫進本文。")
+                         "確認沒問題後，在目錄上方的預覽列按「套用到本文」寫進本文。")
         for item in list(self.virtual_volume_items) + list(self.split_volume_items):
             font = item.font(0)
             font.setItalic(True)
@@ -2113,7 +2174,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             item.setForeground(0, QColor(tokens.marker_text))
             item.setToolTip(0, tooltip)
         merged_tip = i18n.T("接上了下一行的章名（預覽）：本文還沒改。\n"
-                            "確認沒問題後，在「章節管理」按「套用到本文」寫進本文。")
+                            "確認沒問題後，在目錄上方的預覽列按「套用到本文」寫進本文。")
         for item in self.absorbed_title_items:
             font = item.font(0)
             font.setItalic(True)
