@@ -1289,6 +1289,7 @@ class ContextPreview(QTextEdit):
     def stacked_under(self, table) -> QWidget:
         """表格在上、預覽在下，中間的分隔可以拖動調整高度。"""
         splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setObjectName("gripSplitter")      # 畫出一條線：看得出來可以拖
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(10)
         splitter.addWidget(table)

@@ -28,7 +28,7 @@ from .cn_numerals import chinese_to_arabic, arabic_to_chinese
 from .chapter_parse import (
     CN_NUM_FLOAT_PATTERN, INLINE_SPACE_REGEX,
     CN_NUM_PATTERN, RANGE_SEP, chapter_range_end, parse_lv1, parse_lv2, parse_special, parse_mixed_volume_chapter_header,
-    is_weak_numbered_title, is_valid_auto_title, strip_title_body, volume_dash_number,
+    is_weak_numbered_title, parse_weak_numbered_title, is_valid_auto_title, strip_title_body, volume_dash_number,
     preserve_title_separator, original_number_text, resolve_chapter_number, heading_word, heading_words, title_length_limit, too_long_for_title,
     word_key, not_a_heading,
 )
@@ -39,6 +39,21 @@ from .user_rules import match_user_chapter_rule
 
 
 _RANGE_TEXT = re.compile(r"(" + CN_NUM_PATTERN + r")\s*(" + RANGE_SEP + r")\s*(" + CN_NUM_PATTERN + r")")
+_BARE_NUMBER = re.compile(r"^[#＃]?\s*([0-9０-９]{1,6}|[零〇一二兩两三四五六七八九十百千]{1,8})\s*[.．、:：]?$")
+
+
+def _bare_numbered_title(text):
+    """使用者指定成章、卻沒有「第…章」的行：「245.」「245」「245. 標題」（常用的弱格式）。
+    回傳（章號, 章名）；不是這種寫法、或是「2-1 過河」（卷號要看所在的卷）回傳 None。"""
+    text = text.strip()
+    match = _BARE_NUMBER.match(text)
+    if match:
+        number = chinese_to_arabic(match.group(1))
+        return (float(number), "") if number > 0 else None
+    weak = parse_weak_numbered_title(text)
+    if weak is None or weak.get("volume"):
+        return None
+    return float(weak["number"]), weak["body"]
 
 
 def format_custom_title(options: FormatOptions, extra_prefix: str, prefix_tag: str, num_val: float,
@@ -712,7 +727,12 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
         arc, ch_prefix, ch_num, ch_unit, ch_body = m_lv1
         vol = ''
     else:
-        arc, vol, ch_prefix, ch_num, ch_unit, ch_body = ('', '', '', 0.0, '', line_str)
+        # 人工收錄、強制設成章的「245.」「245 標題」：章號照認，排版才會跟其他章一樣寫成「第245章」
+        bare = _bare_numbered_title(line_str)
+        if bare is not None:
+            arc, vol, ch_prefix, ch_num, ch_unit, ch_body = ('', '', '第', bare[0], '章', bare[1])
+        else:
+            arc, vol, ch_prefix, ch_num, ch_unit, ch_body = ('', '', '', 0.0, '', line_str)
     ch_body = strip_title_body(ch_body)
     merged = False
     if not ch_body and _merging(ctx, state, apply_format):

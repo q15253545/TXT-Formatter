@@ -304,6 +304,7 @@ class ToolWindowsMixin:
             return
         self.review_bar.set_active(False)
         self._mark_advance_pending = False
+        self._mark_pending_step = None
         self.editor.setExtraSelections([])
         self._on_marking_changed()
         self._show_status("已結束逐筆檢查")
@@ -373,8 +374,12 @@ class ToolWindowsMixin:
         if not targets:
             self._mark_current = -1
             self._update_mark_position()
-            self._show_status("還在找要檢查的內容，稍等一下再按" if self._mark_scan_running or self._mark_timer.isActive()
-                              else "沒有要檢查的內容（逐筆檢查的篩選、非正文內容視窗勾的偵測類型都會影響）")
+            if self._mark_scan_running or self._mark_timer.isActive():
+                # 刪掉一筆、改了本文之後會重掃（大檔要零點幾秒）：這時按的記下來，掃好就跳，不用再按一次
+                self._mark_pending_step = forward
+                self._show_status("正在重新找要檢查的內容，找好就跳到" + ("下一筆" if forward else "上一筆"))
+            else:
+                self._show_status("沒有要檢查的內容（逐筆檢查的篩選、非正文內容視窗勾的偵測類型都會影響）")
             return
         row = self.editor.textCursor().blockNumber()
         current = targets[self._mark_current] if 0 <= self._mark_current < len(targets) else None
@@ -484,11 +489,14 @@ class ToolWindowsMixin:
             self._warn_timed_out_rules()
         self._refresh_title_formats()
         self._update_mark_position()
-        if self._mark_advance_pending:
-            # 剛用「刪除這筆」刪掉一筆：重掃好了，接著停在下一筆
-            self._mark_advance_pending = False
-            if self._mark_targets():
-                self.goto_mark(True)
+        # 剛用「刪除這筆」刪掉一筆（接著停在下一筆），或重掃時按了上一筆／下一筆：重掃好了，照按的方向跳。
+        # 刪掉之後又按了下一筆也只跳一次：刪掉那筆的下一筆就是使用者要的那一筆。
+        step = self._mark_pending_step if self._mark_pending_step is not None else (
+            True if self._mark_advance_pending else None)
+        self._mark_advance_pending = False
+        self._mark_pending_step = None
+        if step is not None and self._mark_targets():
+            self.goto_mark(step)
 
     def _apply_mark_colors(self, cursor: QTextCursor):
         """把掃描到的廣告／作者感言那幾行換成對應的字色（章節標題不動）。

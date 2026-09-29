@@ -43,7 +43,8 @@ class DuplicateChaptersDialog(QDialog):
         self.table.setHorizontalHeaderLabels(["保留", "組", "標題", "正文字數", "內容比對"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        # 可以選好幾列：右鍵一次勾選／取消勾選（PreviewTable）；預覽看第一列
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         setup_columns(self.table, {0: 96, 1: 84, 2: 280, 3: 90})
         self.header_check = HeaderCheckBox(

@@ -65,6 +65,7 @@ class Tokens:
 #       文字與圖示（checked_border／checked_text 一律等於它）；目錄滑鼠移上去的字色。
 #       一定要跟 control_text 不同，移上去才看得出變化。
 #   選取色 accent：勾選框、開關、分頁底線、連結。
+#   互動色疊在 checked_bg 上（開啟中的按鈕、選中的積木）至少要 4:1 的對比，不然選中的反而比沒選的暗。
 # 一般按鈕（工具列、卡片、對話框）在同一個主題裡只有一種樣式（button_*）：
 # 淺色主題是卡片底色＋細框，深色主題是實心；開啟中的底色 checked_bg 要跟它明顯不同。
 
@@ -115,12 +116,12 @@ LIGHT_BROWN = Tokens(
     bg="#F1E7D2", surface="#FBF4E4", surface_hover="#F6EDDA", surface_active="#EADDC5", border="#E4DCC9",
     text="#4A4130", text_muted="#8C826C", text_faint="#B5AB95",
     accent="#0284C8", accent_text="#FFFFFF",
-    selection_bg="#F0E5CC", shadow="rgba(74, 65, 48, 30)", icon="#837961", icon_hover="#8C6A3F",
+    selection_bg="#F0E5CC", shadow="rgba(74, 65, 48, 30)", icon="#837961", icon_hover="#7A5A32",
     warn_bg="#F6DCCF", warn_text="#A8432A", diff_text="#C8341F", ok_bg="#DDEBD5", ok_text="#3F7A3A",
     find_match_bg="#C9DDF3", find_current_bg="#8EBDF0", jump_bg="#DCEAF7",
     marker_text="#7D6B3A", marker_bg="#ECE3C8",
     button_bg="#FBF4E4", button_hover="#F6EDDA", button_border="#DBCEB7",
-    checked_bg="#E4D6BC", checked_border="#8C6A3F", checked_text="#8C6A3F",
+    checked_bg="#E4D6BC", checked_border="#7A5A32", checked_text="#7A5A32",
     tree_selected_text="#4A4130", title_text="#4A4130",
     toggle_track="#EBE5D4", toggle_knob="#FDFBF6", toggle_text="#4A4130", toggle_text_inactive="#8C826C",
     toggle_shadow="#0000001F",
@@ -135,12 +136,12 @@ DARK = Tokens(
     bg="#1C1714", surface="#261F1B", surface_hover="#302824", surface_active="#3A312C", border="#3A322D",
     text="#EDE4DB", text_muted="#A39890", text_faint="#6F655E",
     accent="#A85A48", accent_text="#FFF4EE",
-    selection_bg="#3F3530", shadow="rgba(0, 0, 0, 140)", icon="#BDB0A6", icon_hover="#A85A48",
+    selection_bg="#3F3530", shadow="rgba(0, 0, 0, 140)", icon="#BDB0A6", icon_hover="#D4806A",
     warn_bg="#4A2622", warn_text="#F2A493", diff_text="#FF8F73", ok_bg="#27331F", ok_text="#A8CF8E",
     find_match_bg="#4E2B25", find_current_bg="#8A3B30", jump_bg="#3E211D",
     marker_text="#8FC7B4", marker_bg="#2B3531",
     button_bg="#3A322E", button_hover="#463C37", button_border="#3A322E",
-    checked_bg="#4A2C26", checked_border="#A85A48", checked_text="#A85A48",
+    checked_bg="#4A2C26", checked_border="#D4806A", checked_text="#D4806A",
     tree_selected_text="#EDE4DB", title_text="#EDE4DB",
     toggle_track="#261F1B", toggle_knob="#4A403A", toggle_text="#FFF4EE", toggle_text_inactive="#A39890",
     toggle_shadow="#00000055",
@@ -334,6 +335,13 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     QSplitter::handle {{
         background: transparent;
         width: 10px;
+    }}
+    /* 工具視窗裡上下兩區中間可以拖的分隔：畫一條細線（滑鼠移上去變互動色），不然看不出來能拖 */
+    QSplitter#gripSplitter::handle:vertical {{
+        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 transparent, stop: 0.4 transparent, stop: 0.41 {t.border}, stop: 0.59 {t.border}, stop: 0.6 transparent, stop: 1 transparent);
+    }}
+    QSplitter#gripSplitter::handle:vertical:hover {{
+        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 transparent, stop: 0.4 transparent, stop: 0.41 {t.icon_hover}, stop: 0.59 {t.icon_hover}, stop: 0.6 transparent, stop: 1 transparent);
     }}
 
     QTreeWidget {{
@@ -580,10 +588,15 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     QLabel#blockExample[empty="true"] {{
         color: {t.text_faint};
     }}
+    /* 沒選的積木用次要文字色：深色主題的一般按鈕是亮字，不壓下來的話沒選的反而比選中的顯眼 */
     QPushButton#blockChip {{
         padding: 3px 6px;
         border-radius: 6px;
         font-size: 13px;
+        color: {t.text_muted};
+    }}
+    QPushButton#blockChip:hover {{
+        color: {t.icon_hover};
     }}
     QPushButton#blockChip:checked {{
         background: {t.checked_bg};

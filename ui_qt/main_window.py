@@ -89,7 +89,7 @@ from . import __version__
 from .window_common import (
     DEFAULT_STRUCTURE_MODE, EDITOR_BASE_FONT_PX, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, MARKER_GUIDE,
     MARK_SCAN_DELAY_MS, MAX_HIGHLIGHT_SPANS, MAX_HISTORY_CHARS, MAX_HISTORY_STEPS, MIN_HISTORY_STEPS,
-    MERGE_WARN_BYTES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, WARM_CHUNK_LINES, WARM_NOW_LINES,
+    MERGE_WARN_BYTES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, AUTO_TOC_REFRESH_SECONDS, WARM_CHUNK_LINES, WARM_NOW_LINES,
     WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals,
     _NUMBER_WITHOUT_UNIT, _ToolDialogWatcher, _chapter_line_mapper, _diff_line_mapper, _format_line_mapper,
     EPUB_ENCODING, WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
@@ -175,6 +175,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._typing_checkpoint_timer = QTimer(self)
         self._typing_checkpoint_timer.setSingleShot(True)
         self._typing_checkpoint_timer.timeout.connect(self._checkpoint_document)
+        self._typing_checkpoint_timer.timeout.connect(self._refresh_toc_after_typing)
+        self._toc_rebuild_seconds = float("inf")      # 上一次重建目錄花了多久（打字停下來時要不要順便更新）
         # 連續轉滑鼠滾輪縮放時，標題格式只在停下來之後重套一次。
         self._format_refresh_timer = QTimer(self)
         self._format_refresh_timer.setSingleShot(True)
@@ -216,6 +218,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._mark_rows_version = None
         self._mark_current = -1
         self._mark_advance_pending = False
+        self._mark_pending_step = None       # 還在重掃時按的上一筆／下一筆（True＝下一筆）：掃好再跳
         self._mark_scan_running = False
         self._mark_scan_pending = False
         self._warm_lines = None
@@ -555,6 +558,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             ("update", "接續更新章節", "跟本文比對，只加入本文沒有的章節"),
         ], central)
         self.drop_overlay.dropped.connect(self._on_overlay_dropped)
+        # 還沒開檔時只有一區：拖進來一樣看得到放置區，知道放下去會做什麼
+        self.empty_drop_overlay = DropOverlay([
+            ("open", "開啟檔案", "放一個檔直接開啟；一次放好幾個檔會合併成一份（每章一個檔時）"),
+        ], central)
+        self.empty_drop_overlay.dropped.connect(self._on_overlay_dropped)
         self.editor.file_drag_entered.connect(self._show_drop_overlay)
         # 工具列縮成只有圖示時，版面本身的最小寬度是 677；設成 680 剛好塞得進
         # 直立螢幕（200% 縮放下只有 720）。開著功能卡片時卡片要更寬，見 _update_minimum_width。
@@ -877,9 +885,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         return not self.editor.document().isEmpty()
 
     def _show_drop_overlay(self):
-        """開著檔案時拖檔案進來：放置區蓋上來，接下來的拖曳都由它處理。"""
-        if self._has_document():
-            self.drop_overlay.cover()
+        """拖檔案進來：放置區蓋上來，接下來的拖曳都由它處理（沒開檔時只有「開啟檔案」一區）。"""
+        (self.drop_overlay if self._has_document() else self.empty_drop_overlay).cover()
 
     @action
     def _on_overlay_dropped(self, zone: str, paths: list):
@@ -1876,10 +1883,19 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @timed
     def _rebuild_toc(self):
+        started = time.perf_counter()
         ctx = self._build_context()
         result = build_document_structure(ctx, apply_format=False, write_text=False)
         self._populate_tree(result)
+        self._toc_rebuild_seconds = time.perf_counter() - started
         self._warn_timed_out_rules()
+
+    def _refresh_toc_after_typing(self):
+        """打字停下來：重建目錄夠快的書順便更新目錄，打了新的標題不用按重新掃描。
+        重建要比較久的大檔照舊等用到目錄時才重建（_ensure_toc_current），打字才不會一停就卡一下。"""
+        if (self._toc_text_version != self._text_version and not self._restoring_history
+                and self._toc_rebuild_seconds <= AUTO_TOC_REFRESH_SECONDS):
+            self._rebuild_toc()
 
     def _warn_timed_out_rules(self):
         """自訂規則的正則在期限內跑不完：這次開啟期間已停用，告訴使用者是哪一條。"""
@@ -2178,16 +2194,28 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             return
         if not self._toc_hint_template:
             return
-        level, blocks = template(self._toc_hint_template)
+        template_id = self._toc_hint_template
+        level, blocks = template(template_id)
         rule = block_rule(blocks, level)
-        if all(existing.get("pattern") != rule["pattern"] for existing in self.user_chapter_rules):
-            self.user_chapter_rules = list(self.user_chapter_rules) + [rule]
+        # 同一個組合已經在清單裡但沒勾（使用者關掉過）：打開它，不然按了什麼都沒變、提示又跳回來
+        rules = [dict(existing, enabled=True) if existing.get("pattern") == rule["pattern"] else existing
+                 for existing in self.user_chapter_rules]
+        if all(existing.get("pattern") != rule["pattern"] for existing in rules):
+            rules.append(rule)
+        if rules != self.user_chapter_rules:
+            self.user_chapter_rules = rules
             _save_json(RULES_FILE, self.user_chapter_rules)
         # 辨識的設定變了：排版時記下的自動標題照新的設定重新辨識（作品名稱照舊）
         self.auto_titles = {row: record for row, record in self.auto_titles.items() if record.get("kind") == "work"}
+        before = len(self.chapter_raw_map)
         self.toc_hint.hide()
         self.rescan_toc()
-        self._show_status(f"已加入辨識章節的組合「{rule['name']}」，目錄收進 {len(self.chapter_raw_map)} 項")
+        if len(self.chapter_raw_map) > before:
+            self._show_status(f"已加入辨識章節的組合「{rule['name']}」，目錄收進 {len(self.chapter_raw_map)} 項")
+            return
+        # 組合加了目錄還是沒變（那幾行被 [::X]、標題結尾或長度限制擋掉）：直接給使用者看是哪幾行
+        self._show_status(f"已加入組合「{rule['name']}」，但目錄沒有變多：在可疑章節看看是哪幾行、為什麼沒收進來")
+        self.open_suspect_chapters(f"preset:{template_id}")
 
     def _style_virtual_volumes(self):
         """推定卷用斜體＋「非原文色」（跟顯示中的章節標記同色）：本文裡沒有這個卷標題，

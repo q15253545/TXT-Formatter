@@ -71,20 +71,29 @@ def detect_line_ending(file_path: str) -> str:
 
 NUL_SCAN_BYTES = 4096
 NUL_MIN_RATIO = 0.005         # 一般文字（UTF-8、Big5、GB18030）不會有 NUL；零星一兩個不算
-ENDIAN_DOMINANCE = 8          # NUL 幾乎都落在同一種奇偶位才判得出位元組順序
+ENDIAN_DOMINANCE = 8          # 沒有換行可看時，NUL 幾乎都落在同一種奇偶位才判得出位元組順序
 
 
 def _utf16_without_bom(raw: bytes):
-    """沒有 BOM 的 UTF-16（PowerShell、部分 Windows 程式存出來的）：英數字、換行的另一個位元組是 0，
-    而且集中在奇數位（LE）或偶數位（BE）。中文本身幾乎不含 0，所以看比例不看密度，
-    再試解一次確認不是亂碼。判不出來回傳 None，交給下面的計分。"""
+    """沒有 BOM 的 UTF-16（PowerShell、部分 Windows 程式存出來的）：英數字、換行的另一個位元組是 0。
+    位元組順序先看換行：用 LE 解，LE 檔的換行是 \\n，BE 檔的換行會變成 U+0A00（反過來也一樣）。
+    不能只看 NUL 落在奇數位還是偶數位：段首的全形空格（U+3000）的 0 落在另一邊，
+    一般中文小說每段都有，兩邊的數量會差不多。一整段沒有換行時才退回看 NUL 的位置。
+    最後再試解一次確認不是亂碼。判不出來回傳 None，交給下面的計分。"""
     head = raw[:NUL_SCAN_BYTES]
+    head = head[:len(head) - len(head) % 2]
     even = head[0::2].count(0)
     odd = head[1::2].count(0)
     if even + odd < max(4, len(head) * NUL_MIN_RATIO):
         return None
-    candidate = ("utf-16-le" if odd > even * ENDIAN_DOMINANCE else
-                 "utf-16-be" if even > odd * ENDIAN_DOMINANCE else None)
+    as_le = head.decode("utf-16-le", errors="replace")
+    le_breaks = as_le.count("\n") + as_le.count("\r")
+    be_breaks = as_le.count("਀") + as_le.count("ഀ")
+    if le_breaks != be_breaks:
+        candidate = "utf-16-le" if le_breaks > be_breaks else "utf-16-be"
+    else:
+        candidate = ("utf-16-le" if odd > even * ENDIAN_DOMINANCE else
+                     "utf-16-be" if even > odd * ENDIAN_DOMINANCE else None)
     if candidate is None:
         return None
     sample = raw[:len(raw) - len(raw) % 2][:128 * 1024]

@@ -270,6 +270,13 @@ def apply_keep_choices(lines, choices) -> list:
                 first_kept = next(row for row, kept in zip(rows, keep) if kept)
                 replace[rows[0]] = result[first_kept]
                 dropped = (dropped - {rows[0]}) | {first_kept}
+            # 使用者在其中一個標題上做的標記（[::] 手動加入目錄）跟著留下來的標題：
+            # 刪掉的剛好是有標記的那個時，目錄不能因此少了這一章
+            markers = [_parse_title(result[row])[1] for row in rows]
+            marker = next((kind for kind in markers if kind in _MARKER_TEXT), "")
+            kept_text = replace.get(rows[0], result[rows[0]])
+            if marker and _parse_title(kept_text)[1] not in _MARKER_TEXT:
+                replace[rows[0]] = kept_text.rstrip() + _MARKER_TEXT[marker]
             delete.update(dropped)
         else:
             for row, end, kept in zip(rows, group["ends"], keep):

@@ -158,6 +158,45 @@ class PreviewTable(QTableWidget):
         super().scrollTo(index, hint)
         self.horizontalScrollBar().setValue(x)
 
+    def _checkable_cells(self, rows) -> list:
+        """這幾列裡可以勾的那一格（勾選框在哪一欄每張表不同；不能勾的列，例如沒有修正方案的，跳過）。"""
+        cells = []
+        for row in rows:
+            for column in range(self.columnCount()):
+                item = self.item(row, column)
+                if item is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    cells.append((row, column))
+                    break
+        return cells
+
+    def contextMenuEvent(self, event):
+        """用 Ctrl／Shift 選好幾列之後按右鍵：一次勾選或取消勾選這幾列。
+        在沒選到的列上按右鍵就只針對那一列（跟檔案總管一樣先選到它）。"""
+        row = self.rowAt(event.pos().y())
+        selected = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        if row >= 0 and row not in selected:
+            self.selectRow(row)
+            selected = [row]
+        cells = self._checkable_cells(selected)
+        if not cells:
+            super().contextMenuEvent(event)
+            return
+        menu = QMenu(self)
+        check = menu.addAction(i18n.T(f"勾選選取的 {len(cells)} 列"))
+        menu.addAction(i18n.T(f"取消勾選選取的 {len(cells)} 列"))
+        chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        self.set_rows_checked(selected, chosen is check)
+
+    def set_rows_checked(self, rows, checked: bool):
+        """勾選／取消勾選這幾列：一格一格改勾選狀態，表格的擁有者照平常的 itemChanged 更新自己的記錄。"""
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for row, column in self._checkable_cells(rows):
+            item = self.item(row, column)
+            if item is not None and item.checkState() != state:
+                item.setCheckState(state)
+
 
 class SortableItem(QTableWidgetItem):
     def __lt__(self, other):

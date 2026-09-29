@@ -634,14 +634,24 @@ def misplaced_chapters(numbers) -> dict:
         ordered = sorted(run)
         values = [numbers[index] for index in ordered]
         present = set(values)
+        by_gap = {}
         for index in indices:
             value = numbers[index]
             if index in run or value in present:
                 continue
             if values[0] < value < values[-1] or value in (values[0] - 1, values[-1] + 1):
                 if value > 0 and float(value).is_integer():
-                    slot = bisect.bisect_left(values, value)
-                    found[index] = ("after", ordered[slot - 1]) if slot else ("before", ordered[0])
+                    by_gap.setdefault(bisect.bisect_left(values, value), []).append(index)
+        # 搬過去要把那個缺口整個補滿才算放錯位置：只補上一部分（13 跟 22 之間缺 14～21，卻只有 19～21 能搬）
+        # 多半是另一套編號交錯在正文裡（網站的貼文編號夾在書本身的章號之間），不是章放錯地方
+        for slot, gap_indices in by_gap.items():
+            supplied = {int(numbers[index]) for index in gap_indices}
+            low = int(values[slot - 1]) + 1 if slot else min(supplied)
+            high = int(values[slot]) - 1 if slot < len(values) else max(supplied)
+            if not set(range(low, high + 1)) <= supplied:
+                continue
+            for index in gap_indices:
+                found[index] = ("after", ordered[slot - 1]) if slot else ("before", ordered[0])
     return found
 
 

@@ -34,7 +34,7 @@ from .sortable_table import PreviewTable, make_item, setup_columns
 from .suspects_page import SuspectsPage
 from .theme import active_tokens
 from .widgets import (
-    ContextPreview, IconTextButton, ToggleSwitch, dialog_frame, flow_container, size_dialog, slider_with_spin,
+    ContextPreview, Divider, IconTextButton, ToggleSwitch, dialog_frame, flow_container, size_dialog, slider_with_spin,
 )
 
 _COLUMN_NAMES = {"frame": "外框", "prefix": "前綴", "number": "數字", "unit": "單位", "sep": "分隔", "title": "章名"}
@@ -73,6 +73,11 @@ def _builtin_blocks(level: int, disabled: set) -> dict:
     return {"frame": list(options("frame", level)), "prefix": ["第"], "number": ["一二三", "123", "全形１２"],
             "unit": [unit for unit in _BUILTIN_UNITS[level] if unit not in disabled],
             "sep": list(options("sep", level)), "title": "可有可無"}
+
+
+def _copy_splitter(source: QSplitter, target: QSplitter):
+    if target.sizes() != source.sizes():
+        target.setSizes(source.sizes())
 
 
 def _scrolling(page: QWidget) -> QScrollArea:
@@ -189,10 +194,8 @@ class _LevelPage(QWidget):
         right.addLayout(name_row)
         # 積木在上、「看本文的行」在下，中間的分隔可以拖：展開看本文的行時積木區自己捲動，
         # 改積木時下面的行數、表格跟著變，兩邊一起看得到。
-        blocks_scroll = QScrollArea()
-        blocks_scroll.setWidgetResizable(True)
-        blocks_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        blocks_scroll.setWidget(self._build_blocks())
+        # 捲動區跟內容都透明（panelScroll）：不然沒有欄底色的那幾欄會露出捲動區預設的底色（深色）
+        blocks_scroll = _scrolling(self._build_blocks())
         blocks_scroll.setMinimumHeight(140)
         top = QWidget()
         top_layout = QVBoxLayout(top)
@@ -236,6 +239,7 @@ class _LevelPage(QWidget):
         self.lines_box.setMinimumHeight(160)
         self.lines_box.hide()
         self.blocks_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.blocks_splitter.setObjectName("gripSplitter")     # 畫出一條線：看得出來可以拖
         self.blocks_splitter.setChildrenCollapsible(False)
         self.blocks_splitter.setHandleWidth(10)
         self.blocks_splitter.addWidget(top)
@@ -765,14 +769,23 @@ class RecognitionDialog(QDialog):
         self.pages = {level: _LevelPage(self, level) for level in (2, 1)}
         self.tabs.addTab(_scrolling(self.pages[2]), "章")
         self.tabs.addTab(_scrolling(self.pages[1]), "卷")
+        # 章、卷兩頁長得一樣：一頁拖過的分隔（組合清單寬度、積木與本文的行的高度），另一頁跟著一樣
+        for source, target in ((self.pages[2], self.pages[1]), (self.pages[1], self.pages[2])):
+            for name in ("splitter", "blocks_splitter"):
+                getattr(source, name).splitterMoved.connect(
+                    lambda _pos, _index, source=source, target=target, name=name:
+                    _copy_splitter(getattr(source, name), getattr(target, name)))
         self.tabs.addTab(_scrolling(self._build_special_page()), "特殊標題")
         self.suspects = SuspectsPage(self._lines, self._known_rows, self._max_title_length,
                                      self._save_suspect_format, self._add_suspect_lines)
         self.suspects.candidateHighlighted.connect(self.candidateHighlighted.emit)
         self.suspects.countChanged.connect(
             lambda count: self.tabs.setTabText(_SUSPECTS_TAB, i18n.T(f"可疑章節（{count}）")))
-        self.tabs.addTab(self.suspects, i18n.T("可疑章節"))        # 掃過之後標題寫出幾行（countChanged）
+        # 跟其他分頁一樣放進捲動區：不然這一頁（表格＋前後文）會把整個視窗的最小高度撐高，矮螢幕放不下
+        self.tabs.addTab(_scrolling(self.suspects), i18n.T("可疑章節"))   # 掃過之後標題寫出幾行（countChanged）
         root.addWidget(self.tabs, 1)
+        # 下面兩列是整個視窗共用的設定（每一頁都看得到），跟分頁內容用一條線分開
+        root.addWidget(Divider())
 
         length_row = QHBoxLayout()
         length_row.setSpacing(10)
@@ -878,11 +891,28 @@ class RecognitionDialog(QDialog):
     # ------------------------------------------------------------------ 特殊標題
 
     def _build_special_page(self) -> QWidget:
+        """兩欄：左邊內建的特殊標題、右邊自己新增的（一長串內建的排在自訂上面，自訂常常要捲到很下面才看得到）。"""
         page = QWidget()
-        grid = QGridLayout(page)
-        grid.setContentsMargins(4, 16, 4, 0)
+        columns = QHBoxLayout(page)
+        columns.setContentsMargins(4, 16, 4, 0)
+        columns.setSpacing(24)
+        builtin = QVBoxLayout()
+        builtin.setSpacing(10)
+        builtin_heading = QLabel("內建")
+        builtin_heading.setObjectName("appTitle")
+        builtin.addWidget(builtin_heading)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(8)
+        builtin.addLayout(grid)
+        builtin.addStretch(1)
+        columns.addLayout(builtin)
+        line = QFrame()
+        line.setObjectName("divider")
+        line.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        line.setFixedWidth(1)
+        columns.addWidget(line)
         self.special_toggles: dict = {}
         self.special_level_chips: dict = {}
         self._special_count_labels: dict = {}
@@ -906,15 +936,22 @@ class RecognitionDialog(QDialog):
             count.setObjectName("fileLabel")
             self._special_count_labels[key] = count
             grid.addWidget(count, row, 4)
-        grid.setColumnStretch(6, 1)
-        self._special_grid = grid
         self._custom_widgets: list = []
 
         # 自己新增的特殊標題（「續章」「附錄」…）：照原文顯示，不改寫成第N章
+        custom = QVBoxLayout()
+        custom.setSpacing(10)
         heading = QLabel("自訂")
         heading.setObjectName("appTitle")
-        self._custom_heading_row = len(_SPECIAL_ROWS)
-        grid.addWidget(heading, self._custom_heading_row, 0, 1, 3)
+        custom.addWidget(heading)
+        self._special_grid = QGridLayout()
+        self._special_grid.setContentsMargins(0, 0, 0, 0)
+        self._special_grid.setHorizontalSpacing(14)
+        self._special_grid.setVerticalSpacing(8)
+        self._special_grid.setColumnStretch(6, 1)
+        custom.addLayout(self._special_grid)
+        custom.addStretch(1)
+        columns.addLayout(custom, 1)
         self.special_input = QLineEdit()
         self.special_input.setPlaceholderText(i18n.T("標題開頭的字，例如：續章"))
         self.special_input.setMaxLength(SPECIAL_WORD_MAX)
@@ -923,6 +960,7 @@ class RecognitionDialog(QDialog):
         self.special_add_button.clicked.connect(self._add_custom_special)
         self.special_message = QLabel("")
         self.special_message.setObjectName("fileLabel")
+        self.special_message.setWordWrap(True)      # 右欄比較窄：說明換行，不要撐出橫向捲軸
         self.special_input_row = QWidget()
         input_layout = QHBoxLayout(self.special_input_row)
         input_layout.setContentsMargins(0, 0, 0, 0)
@@ -930,9 +968,9 @@ class RecognitionDialog(QDialog):
         self.special_input.setFixedWidth(220)
         input_layout.addWidget(self.special_input)
         input_layout.addWidget(self.special_add_button)
-        input_layout.addWidget(self.special_message)
         input_layout.addStretch(1)
         self.special_add_button.setFixedHeight(self.special_input.sizeHint().height())
+        custom.insertWidget(2, self.special_message)       # 輸入框下面（標題、清單＋輸入列之後）
         self._rebuild_custom_specials()
         self._sync_special_levels()
         self._update_special_counts()
@@ -948,7 +986,7 @@ class RecognitionDialog(QDialog):
         self._custom_widgets = []
         self._custom_count_labels = []
         grid.removeWidget(self.special_input_row)
-        first = self._custom_heading_row + 1
+        first = 0
         for offset, rule in enumerate(self.custom_specials):
             row = first + offset
             toggle = ToggleSwitch("", fill=False)
