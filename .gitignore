@@ -1,30 +1,11 @@
-# 只有 core/、ui_qt/、README.md、docs/、.gitignore 進版本庫；其他都是本機用的。
+# 只上傳程式與說明，其他一律不進版本庫
+/*
+!/core/
+!/ui_qt/
+!/docs/
+!/README.md
+!/.gitignore
 
-# Python
 __pycache__/
 *.pyc
-.pytest_cache/
-
-# 建置產物（exe 放在 GitHub Release，不進 git）
-build/
-dist/
-
-# 本機開發：測試、打包與整批檢查腳本、開發指引、待辦與決定紀錄
-tests/
-tools/
-CLAUDE.md
-TODO.md
-TODO_archive.md
-ui_qt/UI_RULES.md
-
-# 本機資料：使用者的小說、整批檢查報告、外部審查報告、截圖（絕不上傳）
-novel/
-txt-demo/
-corpus/
-reviews/
-bug/
-pending/
-txtissue/
-adtemplate/
-*.png
-!docs/**/*.png
+/ui_qt/UI_RULES.md
