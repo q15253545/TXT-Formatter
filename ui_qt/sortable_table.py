@@ -104,7 +104,7 @@ class HeaderCheckBox(QCheckBox):
         space = QFontMetrics(self._table.horizontalHeader().font()).horizontalAdvance(" ") or 4
         indent = self.sizeHint().width() + self.GAP
         item.setText(" " * -(-indent // space) + text if text else "")
-        item.setTextAlignment(int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     def nextCheckState(self):
         pass        # 按下去的結果由 _on_clicked 決定，不照 Qt 的三態順序轉
