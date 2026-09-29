@@ -176,8 +176,8 @@ class WindowStateMixin:
             "title_tail_allowed": self.title_tail_allowed,
             "title_tail_custom": self.title_tail_custom,
             "find_regex": self.find_bar.regex_button.isChecked(),
-            "mark_colors": sorted(self.content_panel.marking()),
-            "mark_confidence": sorted(self.content_panel.mark_confidence()),
+            "review_types": sorted(self.review_bar.review_types()),
+            "mark_confidence": sorted(self.review_bar.mark_confidence()),
             "infer_volumes": self._infer_volumes,
             "auto_apply_preview": self._auto_apply_preview,
             "merge_titles": self._merge_titles,
@@ -263,11 +263,16 @@ class WindowStateMixin:
                 setattr(self, key, state[key])
         levels = state.get("mark_confidence")
         if isinstance(levels, list):
-            self.content_panel.set_mark_confidence(set(levels))
-        marks = state.get("mark_colors")
-        if isinstance(marks, list):
-            # 有檔案之後才會真的掃描、上色
-            self.content_panel.set_marking({kind for kind in marks if kind in ("ad", "note")})
+            self.review_bar.set_mark_confidence(set(levels))
+        # 逐筆檢查要看的類型；舊版在重複段落分頁打開「標在本文上」的，照舊把重複段落算進去。
+        # 本文字色只在逐筆檢查時顯示（開程式時不會自己開始），舊版的 mark_colors 不再用。
+        types = state.get("review_types")
+        if isinstance(types, list):
+            self.review_bar.set_review_types(set(types))
+        elif state.get("repeat_marking"):
+            self.review_bar.set_review_types(self.review_bar.review_types() | {"repeat"})
+        for old_key in ("mark_colors", "repeat_marking"):
+            state.pop(old_key, None)
         # 還原過程中各項會在狀態列留下訊息，最後統一改回來。
         self._show_status("準備就緒")
 

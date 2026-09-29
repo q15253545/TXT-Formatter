@@ -1635,6 +1635,71 @@ class DropOverlay(QWidget):
             self.dropped.emit(key, paths)
 
 
+class StayOpenMenu(QMenu):
+    """勾選式的選單：點一個選項只切換勾選、選單不關，可以一次勾好幾個（點選單外面才關）。"""
+
+    def mouseReleaseEvent(self, event):
+        action = self.activeAction()
+        if action is not None and action.isEnabled() and action.isCheckable():
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class ChoiceMenuButton(QPushButton):
+    """一組多選（偵測類型、檢查項目）收成一顆下拉按鈕：按鈕寫「全部 8 項」「6／8 項」，
+    點開是一排可以連續勾的選項，最上面「全部」一次全選或全不選（取代攤開一整片勾選框，表格多出高度）。
+    items：[(代號, 名稱, 說明)]；說明放在選項的滑鼠提示（選單裡的文字只放名稱）。"""
+
+    changed = Signal()
+
+    def __init__(self, items, checked=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("menuButton")
+        self._menu = StayOpenMenu(self)
+        self._menu.setToolTipsVisible(True)
+        self._all = self._menu.addAction(i18n.T("全部"))
+        self._all.setCheckable(True)
+        self._all.triggered.connect(self._on_all)
+        self._menu.addSeparator()
+        self._actions = {}
+        for key, label, hint in items:
+            action = self._menu.addAction(i18n.T(label))
+            action.setCheckable(True)
+            action.setChecked(checked is None or key in checked)
+            if hint:
+                action.setToolTip(i18n.T(hint))
+            action.triggered.connect(self._on_item)
+            self._actions[key] = action
+        self.setMenu(self._menu)
+        self._refresh()
+
+    def checked(self) -> set:
+        return {key for key, action in self._actions.items() if action.isChecked()}
+
+    def set_checked(self, keys):
+        for key, action in self._actions.items():
+            action.setChecked(key in keys)
+        self._refresh()
+
+    def _on_all(self):
+        everything = len(self.checked()) < len(self._actions)
+        for action in self._actions.values():
+            action.setChecked(everything)
+        self._refresh()
+        self.changed.emit()
+
+    def _on_item(self):
+        self._refresh()
+        self.changed.emit()
+
+    def _refresh(self):
+        count, total = len(self.checked()), len(self._actions)
+        self._all.setChecked(count == total)
+        text = f"全部 {total} 項" if count == total else ("未選" if not count else f"{count}／{total} 項")
+        i18n.set_text(self, text)
+
+
 class NoticeBar(QFrame):
     """目錄上方的提示列（漏掉的章節寫法、章號順序錯亂、預覽中）：一句話＋一排按鈕，
     closable 時右上角有 ✕（「這本書不再提示」，由呼叫端記住）。"""

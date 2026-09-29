@@ -1032,6 +1032,15 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         color: {t.text_muted};
         background: transparent;
     }}
+    /* 本文上方的逐筆檢查列：跟目錄上方的提示同一種淡底，看得出「正在檢查」 */
+    QFrame#reviewBar {{
+        background: {t.selection_bg};
+        border: none;
+        border-bottom: 1px solid {t.border};
+    }}
+    QLabel#reviewTitle {{
+        font-weight: 600;
+    }}
     QFrame#tocHint {{
         background: {t.selection_bg};
         border-radius: 8px;

@@ -79,6 +79,7 @@ from .metadata_bar import ENCODING_CODECS, MetadataBar
 from . import old_files_dialog
 from .old_files_dialog import OldFilesDialog
 from .options_panel import OptionsPanel, describe_options
+from .review_bar import ReviewBar
 from .text_positions import PositionMap
 from .theme import DARK, DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
@@ -314,21 +315,13 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 內容檢查：掃描無關連內容、作者感言與作品資訊、標點校對、繁簡轉換＋字色標示開關
         self.content_panel = ContentPanel()
         self.content_panel.ad_scan_requested.connect(self.open_ad_scan_dialog)
-        self.content_panel.note_scan_requested.connect(self.open_note_scan_dialog)
+        self.content_panel.review_requested.connect(self.start_review)
         self.content_panel.quote_check_requested.connect(self.open_quote_check_dialog)
         self.content_panel.script_convert_requested.connect(self.open_script_convert_dialog)
-        self.content_panel.marking_changed.connect(self._on_marking_changed)
-        self.content_panel.confidence_changed.connect(self._on_mark_confidence_changed)
-        self.content_panel.previous_mark_requested.connect(lambda: self.goto_mark(False))
-        self.content_panel.next_mark_requested.connect(lambda: self.goto_mark(True))
-        self.content_panel.delete_mark_requested.connect(self.delete_current_mark)
         self.content_panel.show_whitespace_toggle.toggled.connect(self._on_whitespace_toggled)
         self.content_panel.show_whitespace_toggle.clicked.connect(
             lambda on: self._show_status("顯示內文空格：半形 ·、全形 □、Tab →，行尾多餘的空白標紅"
                                          if on else "不顯示內文空格"))
-        self.content_panel.mark_toggle.clicked.connect(
-            lambda on: self._show_status("已顯示本文字色：無關連內容、作者感言與作品資訊（顏色定義見說明）"
-                                         if on else "已隱藏本文字色"))
         side_layout.addWidget(self.content_panel)
         self.content_panel.hide()
 
@@ -458,6 +451,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         editor_header_layout.addWidget(self.breadcrumb_label, 1)
         editor_header_layout.addSpacing(6)
         editor_layout.addWidget(editor_header)
+        # 逐筆檢查列：開始逐筆檢查時出現在本文正上方，要看的內容就在旁邊（不用回左邊的卡片）
+        self.review_bar = ReviewBar()
+        self.review_bar.previous_requested.connect(lambda: self.goto_mark(False))
+        self.review_bar.next_requested.connect(lambda: self.goto_mark(True))
+        self.review_bar.delete_requested.connect(self.delete_current_mark)
+        self.review_bar.close_requested.connect(self.stop_review)
+        self.review_bar.types_changed.connect(self._on_review_types_changed)
+        self.review_bar.confidence_changed.connect(self._on_mark_confidence_changed)
+        editor_layout.addWidget(self.review_bar)
         # 章節標記平常藏起來（1px 透明字），但它們是真的寫在檔案裡的：顯示與否在「章節管理」卡片，
         # 匯出時要不要拿掉在匯出設定；說明按鈕在檔名列。
         self.marker_button = self.chapter_panel.show_markers_toggle
@@ -581,6 +583,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+Z"), self, activated=self._redo)
         QShortcut(QKeySequence("Ctrl+Shift+L"), self, activated=self.open_log_folder)
         QShortcut(QKeySequence("Esc"), self, activated=self._on_escape)
+        # 逐筆檢查：F8 下一筆（還沒開始就開始）、Shift+F8 上一筆
+        QShortcut(QKeySequence("F8"), self, activated=lambda: self.goto_mark(True) if self.review_bar.is_active()
+                  else self.start_review())
+        QShortcut(QKeySequence("Shift+F8"), self, activated=lambda: self.goto_mark(False)
+                  if self.review_bar.is_active() else self.start_review())
 
     def _build_header(self) -> QWidget:
         header = QWidget()
@@ -740,6 +747,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.toc_compact_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint, tokens.checked_text)
         self.chapter_panel.set_report_theme(tokens)
         self.content_panel.set_colors(tokens)
+        self.review_bar.set_colors(tokens)
         self.find_bar.set_theme(tokens)
         self.side_rail.set_colors(tokens)
         for bar in (self.preview_bar, self.toc_hint, self.order_hint):
@@ -1259,7 +1267,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if self.find_bar.isVisible():
             # 搜尋結果記的是字元位置，正文一變就全部作廢，不能再拿去取代。
             self.find_bar.invalidate()
-        if self.content_panel.marking():
+        if self.review_bar.marking():
             self._mark_timer.start(MARK_SCAN_DELAY_MS)   # 停一下才在背景重掃，不是每打一個字就掃
         if self._restoring_history:
             return
@@ -1781,6 +1789,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         elif not dialogs.confirm(self, "關閉檔案", "確定要關閉目前的檔案嗎？本文與目錄都會清掉，不能用上一步復原。"):
             return
         self.close_find_bar()
+        self.stop_review()
         self._drop_line_caches()
         self.input_file = ""
         self.raw_lines = [""]
@@ -2806,7 +2815,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             warnings.append("缺章：" + "；".join(problems))
         ads = self._high_confidence_ads()
         if ads:
-            warnings.append(f"高信心廣告：{len(ads)} 處（可先到「內容檢查 → 掃描無關連內容」刪除）")
+            warnings.append(f"高信心廣告：{len(ads)} 處（可先到「內容檢查 → 掃描非正文內容」刪除）")
         if not warnings:
             return True
         return dialogs.confirm(
@@ -2972,9 +2981,12 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_escape(self):
-        """Esc：先取消剪下狀態，沒有的話收起開著的功能卡片（功能卡片沒有自己的收起鈕）。"""
+        """Esc：先取消剪下狀態，再來結束逐筆檢查，都沒有的話收起開著的功能卡片（功能卡片沒有自己的收起鈕）。"""
         if self._cut_state is not None:
             self.cancel_cut()
+            return
+        if self.review_bar.is_active():
+            self.stop_review()
             return
         if self.find_bar.isVisible():
             self.close_find_bar()

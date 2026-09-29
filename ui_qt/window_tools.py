@@ -1,4 +1,4 @@
-"""主視窗：工具視窗（字數、重複章節、掃描無關連內容、作者感言、標點校對、繁簡轉換、
+"""主視窗：工具視窗（字數、重複章節、非正文內容、標點校對、繁簡轉換、
 辨識章節（含可疑章節）、新增章節）與本文字色標示。
 
 工具視窗是非模式的：開著也能改本文，切回視窗時照文字版本決定要不要重算（_open_tool_dialog）。
@@ -229,7 +229,7 @@ class ToolWindowsMixin:
         self._show_status(f"已刪除未保留的章節（共 {removed} 行），可以按 Ctrl+Z 復原")
 
     def _saved_ad_categories(self) -> set:
-        """掃描無關連內容視窗記住的偵測類型（不含重複段落，那在自己的分頁）。
+        """非正文內容視窗「廣告與網頁字元」分頁記住的偵測類型（不含重複段落，那在自己的分頁）。
 
         記住的是「上次勾了哪些」；之後才新增的類型上次根本還沒有，不能當成
         使用者取消了它——那些照預設勾起來。"""
@@ -255,36 +255,28 @@ class ToolWindowsMixin:
 
     @action
     def open_ad_scan_dialog(self):
-        self._open_scan_dialog("ads")
-
-    @action
-    def open_note_scan_dialog(self):
-        self._open_scan_dialog("notes")
-
-    def _open_scan_dialog(self, mode: str):
-        """mode＝"ads"：掃描無關連內容（含重複段落分頁）；"notes"：作者感言與作品資訊。"""
+        """非正文內容視窗：廣告與網頁字元、作者感言與作品資訊、重複段落三個分頁。"""
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
         self._ensure_toc_current()
         spans = self._selected_section_spans()
-        enabled = self._saved_ad_categories() if mode == "ads" else self._saved_note_categories()
 
         def create():
             # Caches still warming (a large file opened moments ago): show the dialog now and scan when they're done
             cold = self._caches_cold()
             dialog = AdScanDialog(self.raw_lines, self, selected_ranges=spans,
                                   selected_count=self._selected_chapter_count(),
-                                  enabled_categories=enabled,
+                                  ad_categories=self._saved_ad_categories(),
+                                  note_categories=self._saved_note_categories(),
                                   title_rows=set(self.chapter_raw_map.values()),
-                                  mode=mode, repeat_settings=self._saved_repeat_settings(), defer_scan=cold,
-                                  repeat_marking=bool(self._ui_state.get("repeat_marking")))
+                                  repeat_settings=self._saved_repeat_settings(), defer_scan=cold)
             if cold:
                 # the dialog may have been closed (and deleted) by the time the caches are warm
                 self._when_warm(lambda: dialog.start_scan() if shiboken6.isValid(dialog) else None)
             dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
             dialog.deletionReady.connect(lambda lines, d=dialog: self._apply_ad_deletion(d, lines))
-            dialog.repeatMarkingChanged.connect(self._on_repeat_marking_changed)
+            dialog.reviewRequested.connect(lambda: (self._focus_editor_from_tool(), self.start_review()))
             return dialog
 
         def reload(dialog):
@@ -292,20 +284,48 @@ class ToolWindowsMixin:
             dialog.reload(self.raw_lines, ranges, count, title_rows=set(self.chapter_raw_map.values()))
 
         def on_closed(dialog, _accepted):
-            if mode == "ads":
-                self._ui_state["ad_categories"] = sorted(dialog.enabled_categories())
-                self._ui_state["ad_categories_known"] = sorted(AD_CATEGORY_LABELS)
-                self._ui_state["repeat_settings"] = list(dialog.repeat_settings())
-            else:
-                self._ui_state["note_categories"] = sorted(dialog.enabled_categories())
-            if self.content_panel.marking():
+            self._ui_state["ad_categories"] = sorted(dialog.enabled_categories())
+            self._ui_state["ad_categories_known"] = sorted(AD_CATEGORY_LABELS)
+            self._ui_state["note_categories"] = sorted(dialog.note_categories())
+            self._ui_state["repeat_settings"] = list(dialog.repeat_settings())
+            if self.review_bar.marking():
                 self._schedule_mark_scan(0)      # 勾選的類型可能變了，照新的重標
 
-        self._open_tool_dialog("ad_scan" if mode == "ads" else "note_scan", create, reload, on_closed)
+        self._open_tool_dialog("ad_scan", create, reload, on_closed)
+
+    @action
+    def start_review(self):
+        """開始逐筆檢查：本文上方出現逐筆檢查列、用字色標出非正文內容，掃好就跳到游標後面的第一筆。
+        已經在檢查時就跳到下一筆。"""
+        if not self.raw_lines or not any(line.strip() for line in self.raw_lines):
+            return
+        if self.review_bar.is_active():
+            self.goto_mark(True)
+            return
+        self.review_bar.set_active(True)
+        self._mark_advance_pending = True
+        self._on_marking_changed()
+        self._show_status("逐筆檢查：F8 下一筆、Shift+F8 上一筆，Esc 結束；要看哪幾類在「篩選」裡勾（顏色定義見說明）")
+
+    def stop_review(self):
+        """結束逐筆檢查：逐筆檢查列收起來，本文的字色一起收掉。"""
+        if not self.review_bar.is_active():
+            return
+        self.review_bar.set_active(False)
+        self._mark_advance_pending = False
+        self.editor.setExtraSelections([])
+        self._on_marking_changed()
+        self._show_status("已結束逐筆檢查")
+
+    def _on_review_types_changed(self):
+        """逐筆檢查的「篩選」換了類型：記下來，照新的類型重掃（信心只要重新篩，見 _on_mark_confidence_changed）。"""
+        self._ui_state["review_types"] = sorted(self.review_bar.review_types())
+        self._mark_current = -1
+        self._on_marking_changed()
 
     def _on_marking_changed(self):
-        """本文字色開關變了：關掉就清掉字色，打開就重掃。"""
-        kinds = self.content_panel.marking()
+        """逐筆檢查開始、結束或換了類型：沒有要標的就清掉字色，否則重掃。"""
+        kinds = self.review_bar.marking()
         if not kinds:
             self._mark_candidates = {"ad": [], "note": []}
             self._mark_rows = {"ad": set(), "note": set()}
@@ -317,32 +337,27 @@ class ToolWindowsMixin:
         if kinds:
             self._schedule_mark_scan(0)
 
-    def _on_repeat_marking_changed(self, on: bool):
-        self._ui_state["repeat_marking"] = on
-        if self.content_panel.marking():
-            self._schedule_mark_scan(0)
-
     def _on_mark_confidence_changed(self):
-        """卡片的信心篩選：掃描結果不變，重新篩出要上色、要跳轉的那幾筆就好。"""
-        self._ui_state["mark_confidence"] = sorted(self.content_panel.mark_confidence())
+        """逐筆檢查的信心篩選：掃描結果不變，重新篩出要上色、要跳轉的那幾筆就好。"""
+        self._ui_state["mark_confidence"] = sorted(self.review_bar.mark_confidence())
         self._mark_current = -1
         self._refresh_mark_rows()
         self._refresh_title_formats()
         self._update_mark_position()
 
     def _mark_targets(self) -> list:
-        """本文字色標出來、卡片可以一筆一筆跳過去的候選（照信心篩選），照位置排好。
+        """本文字色標出來、逐筆檢查可以一筆一筆跳過去的候選（照信心篩選），照位置排好。
         掃描結果不是這一版本文的（剛改過、還在重掃）就沒有。"""
         if self._mark_rows_version != self._text_version:
             return []
-        levels = self.content_panel.mark_confidence()
+        levels = self.review_bar.mark_confidence()
         found = [candidate for kind in ("ad", "note") for candidate in self._mark_candidates[kind]
                  if candidate["confidence"] in levels]
         return sorted(found, key=lambda candidate: (candidate["start"], candidate["end"]))
 
     def _refresh_mark_rows(self):
         """照信心篩選把候選換成要上色的行；同一行兩種都是用廣告的顏色。"""
-        levels = self.content_panel.mark_confidence()
+        levels = self.review_bar.mark_confidence()
         rows = {}
         for kind in ("ad", "note"):
             rows[kind] = {row for candidate in self._mark_candidates[kind] if candidate["confidence"] in levels
@@ -353,17 +368,22 @@ class ToolWindowsMixin:
         targets = self._mark_targets()
         if not 0 <= self._mark_current < len(targets):
             self._mark_current = -1
-        self.content_panel.set_mark_position(self._mark_current, len(targets))
+        info = ""
+        if self._mark_current >= 0:
+            candidate = targets[self._mark_current]
+            labels = "、".join(i18n.T(AD_CATEGORY_LABELS[key]) for key in AD_CATEGORY_LABELS if key in candidate["types"])
+            info = f"{labels} · {i18n.T(candidate['confidence'] + '信心')}"
+        self.review_bar.set_position(self._mark_current, len(targets), info)
 
     @action
     def goto_mark(self, forward: bool):
-        """卡片的上一筆／下一筆：從游標的位置接著找（跟尋找取代一樣），到底了繞回另一頭。"""
+        """逐筆檢查的上一筆／下一筆：從游標的位置接著找（跟尋找取代一樣），到底了繞回另一頭。"""
         targets = self._mark_targets()
         if not targets:
             self._mark_current = -1
             self._update_mark_position()
-            self._show_status("本文字色還在重新標示，稍等一下再按" if self._mark_scan_running or self._mark_timer.isActive()
-                              else "沒有標出來的內容（信心篩選、掃描視窗勾的類型都會影響）")
+            self._show_status("還在找要檢查的內容，稍等一下再按" if self._mark_scan_running or self._mark_timer.isActive()
+                              else "沒有要檢查的內容（逐筆檢查的篩選、非正文內容視窗勾的偵測類型都會影響）")
             return
         row = self.editor.textCursor().blockNumber()
         current = targets[self._mark_current] if 0 <= self._mark_current < len(targets) else None
@@ -382,7 +402,7 @@ class ToolWindowsMixin:
 
     @action
     def delete_current_mark(self):
-        """卡片的「刪除這筆」：跟掃描視窗的刪除一樣處理（夾在正文裡的網址只刪那一段），重掃完自動跳到下一筆。"""
+        """逐筆檢查的「刪除這筆」：跟掃描視窗的刪除一樣處理（夾在正文裡的網址只刪那一段），重掃完自動跳到下一筆。"""
         targets = self._mark_targets()
         if not 0 <= self._mark_current < len(targets):
             self._show_status("先按上一筆／下一筆選一筆")
@@ -409,7 +429,7 @@ class ToolWindowsMixin:
     def _start_mark_scan(self):
         """在背景執行緒掃描（大檔要將近一秒），掃完才回到主執行緒上色。
         掃描期間本文又改了：結果作廢，等這一輪結束再掃一次。"""
-        kinds = self.content_panel.marking()
+        kinds = self.review_bar.marking()
         if not kinds:
             return
         if self._mark_scan_running:
@@ -427,10 +447,11 @@ class ToolWindowsMixin:
                 self._build_context(), raw_lines=lines, user_chapter_rules=list(self.user_chapter_rules),
                 auto_titles=dict(self.auto_titles), force_lv1_chapters=set(self.force_lv1_chapters),
                 force_lv2_chapters=set(self.force_lv2_chapters))
-        # 網頁字元碼只是換字，不是廣告：不標廣告色。重複段落要在掃描視窗的分頁打開才標（多半是作者慣用的句子）
-        repeat = {"repeat"} if self._ui_state.get("repeat_marking") else set()
-        ad_categories = (self._saved_ad_categories() - FIX_CATEGORIES) | repeat if "ad" in kinds else set()
-        note_categories = self._saved_note_categories() if "note" in kinds else set()
+        # 網頁字元碼只是換字，不是廣告：不標廣告色。重複段落要在逐筆檢查的篩選勾了才標（多半是作者慣用的句子）
+        types = self.review_bar.review_types()
+        ad_categories = ((self._saved_ad_categories() - FIX_CATEGORIES if "ad" in types else set())
+                         | ({"repeat"} if "repeat" in types else set()))
+        note_categories = self._saved_note_categories() if "note" in types else set()
         min_length, min_count = self._saved_repeat_settings()
         self._mark_scan_running = True
 
@@ -458,10 +479,10 @@ class ToolWindowsMixin:
         self._mark_scan_running = False
         if self._mark_scan_pending or version != self._text_version:
             self._mark_scan_pending = False
-            if self.content_panel.marking() and version != -1:
+            if self.review_bar.marking() and version != -1:
                 self._schedule_mark_scan()
             return
-        kinds = self.content_panel.marking()
+        kinds = self.review_bar.marking()
         if not kinds:
             return
         self._mark_candidates = {"ad": list(ad_found), "note": list(note_found)}
@@ -481,7 +502,7 @@ class ToolWindowsMixin:
     def _apply_mark_colors(self, cursor: QTextCursor):
         """把掃描到的廣告／作者感言那幾行換成對應的字色（章節標題不動）。
         只在掃描結果對應的就是目前這一版本文時才畫：行號過期會標錯行。"""
-        if not self.content_panel.marking() or self._mark_rows_version != self._text_version:
+        if not self.review_bar.marking() or self._mark_rows_version != self._text_version:
             return
         document = self.editor.document()
         title_rows = set(self.chapter_raw_map.values())

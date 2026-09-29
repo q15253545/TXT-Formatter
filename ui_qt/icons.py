@@ -45,6 +45,8 @@ _ICON_BODIES = {
     "heading": '<path d="M6 12h12"/><path d="M6 20V4"/><path d="M18 20V4"/>',
     "indent-increase": '<path d="M21 5H11"/><path d="M21 12H11"/><path d="M21 19H11"/><path d="m3 8 4 4-4 4"/>',
     "list-checks": '<path d="M13 5h8"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/>',
+    "languages": '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/>',
+    "step-forward": '<path d="M6 4l10 8-10 8z"/><path d="M19 4v16"/>',
     "hash": '<path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="M16 3l-2 18"/>',
     "list-filter": '<path d="M2 5h20"/><path d="M6 12h12"/><path d="M9 19h6"/>',
     "list-plus": '<path d="M16 5H3"/><path d="M11 12H3"/><path d="M16 19H3"/><path d="M18 9v6"/><path d="M21 12h-6"/>',
