@@ -451,11 +451,10 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     QToolButton:pressed {{
         background: {t.surface_active};
     }}
-    /* 開關型的圖示按鈕（目錄的「只顯示章號」、尋找的正則…）開啟中：跟左側圖示列、工具列開啟中的按鈕同一組
-       （底色、外框、圖示都是 checked_*）。平常的外框是透明的 1px，開啟時才不會跳動。 */
+    /* 開關型的圖示按鈕（目錄的「只顯示章號」、尋找的正則、左側圖示列）開啟中：淡的 checked_bg 底＋互動色圖示，
+       不加外框——開著的按鈕常常一直開著，外框太搶眼（使用者 2026-09-30）。 */
     QToolButton:checked {{
         background: {t.checked_bg};
-        border-color: {t.checked_border};
         color: {t.checked_text};
     }}
     QToolButton:disabled {{
@@ -513,7 +512,6 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     }}
     QToolButton#railButton:checked {{
         background: {t.checked_bg};
-        border-color: {t.checked_border};
         color: {t.checked_text};
     }}
     QToolButton#railButton:disabled {{
