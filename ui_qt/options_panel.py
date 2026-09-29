@@ -1,4 +1,4 @@
-"""「排版設定」卡片（工具列「排版設定」）：排版開關、下拉與套用按鈕。
+"""「排版設定」卡片（左側圖示列「排版」）：排版開關、下拉與套用按鈕。
 
 開關狀態存在面板自己身上；呼叫端只在套用格式時用 current_options() 讀一次。
 「合併下行標題」在章節管理（預覽＋套用到本文），不在這裡；只排選取的章在目錄右鍵。
@@ -13,7 +13,7 @@ from core.format_options import FormatOptions
 from core.paragraph_split import SPLIT_CHOICES, SPLIT_OFF
 from core.text_format import QUOTE_KEEP, QUOTE_STYLES
 from . import i18n, icons
-from .widgets import Divider, IconButton, PanelScroll, ToggleSwitch, make_card_header
+from .widgets import Divider, PanelScroll, ToggleSwitch, make_card_header
 
 _CHECKBOX_FIELDS = [
     ("reflow_paragraphs", "整理段落換行"),
@@ -92,7 +92,6 @@ class OptionsPanel(QWidget):
     # 使用者切換了某個開關：（開關名稱, 開或關, 一句說明）→ 主視窗顯示在狀態列
     option_toggled = Signal(str, bool, str)
     save_one_click_requested = Signal()
-    closed = Signal()
 
     def __init__(self, initial: FormatOptions, parent=None):
         super().__init__(parent)
@@ -103,9 +102,6 @@ class OptionsPanel(QWidget):
         root.setSpacing(0)
 
         header, header_layout = make_card_header("排版設定")
-        self.close_button = IconButton("panel-left-close", "收起排版設定", size=16)
-        self.close_button.clicked.connect(self.closed.emit)
-        header_layout.addWidget(self.close_button)
         root.addWidget(header)
 
         # 視窗矮時選項要能捲動；「套用格式」固定在捲動區外面的底部，不會被捲走。
@@ -232,7 +228,6 @@ class OptionsPanel(QWidget):
 
     def set_icon_colors(self, color: str, primary_text: str, accent: str = "", hover: str = "",
                         disabled: str = ""):
-        self.close_button.set_colors(color, hover or color, color)
         self._primary_text, self._disabled_text = primary_text, disabled or primary_text
         self._refresh_apply_icon()
 

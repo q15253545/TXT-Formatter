@@ -1,4 +1,4 @@
-"""左側「章節管理」面板（工具列「章節管理」、目錄卡片標題列的「…」）。
+"""左側「章節管理」面板（左側圖示列「章節」、目錄卡片標題列的「…」）。
 只影響目錄顯示的動作（重掃、展開、摺疊、只顯示章號）在目錄卡片標題列，不在這裡。"""
 
 import html
@@ -23,7 +23,6 @@ _ACTIONS = [
 
 
 class ChapterPanel(QWidget):
-    closed = Signal()
     recognition_requested = Signal()
     rules_requested = Signal()
     merge_duplicates_requested = Signal()
@@ -47,9 +46,6 @@ class ChapterPanel(QWidget):
         outer.setSpacing(0)
 
         header, header_layout = make_card_header("章節管理")
-        self.close_button = IconButton("panel-left-close", "收起章節管理", size=16)
-        self.close_button.clicked.connect(self.closed.emit)
-        header_layout.addWidget(self.close_button)
         outer.addWidget(header)
 
         scroll = PanelScroll()
@@ -294,5 +290,4 @@ class ChapterPanel(QWidget):
         for _icon_name, _text, signal_name in _ACTIONS:
             self._action_buttons[signal_name].set_colors(color, hover or color, disabled or color)
         self.check_missing_button.set_colors(color, hover or color, disabled or color)
-        self.close_button.set_colors(color, hover or color, color)
 

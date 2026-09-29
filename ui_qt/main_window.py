@@ -83,7 +83,7 @@ from .text_positions import PositionMap
 from .theme import DARK, DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
     AppWidgetPolisher, Card, ClickableLabel, DropOverlay, Editor, IconButton, IconTextButton, LanguageToggle,
-    ElidedLabel, ScrollEndButtons, ThemeButton, VDivider, dropped_paths, make_card_header,
+    ElidedLabel, ScrollEndButtons, SideRail, ThemeButton, VDivider, dropped_paths, make_card_header,
 )
 from . import __version__
 from .window_common import (
@@ -297,9 +297,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 是三張不同的卡片。
         splitter.setHandleWidth(10)
 
-        # 左側常駐一張卡片，裡面疊放兩個面板（格式選項／章節管理），一次只
-        # 顯示一個：格式選項由工具列「排版設定」開關，章節管理從目錄標題列的
-        # 「…」開關；預設全部收起，不需要的設定不用一直佔畫面。
+        # 左側常駐一張卡片，裡面疊放幾個功能面板，一次只顯示一個，由最左邊的
+        # 圖示列開關；預設全部收起，不需要的設定不用一直佔畫面。
         self.side_card = Card()
         side_layout = QVBoxLayout(self.side_card)
         side_layout.setContentsMargins(0, 0, 0, 0)
@@ -307,13 +306,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.options_panel.apply_requested.connect(self.apply_formatting)
         self.options_panel.option_toggled.connect(self._on_format_option_toggled)
         self.options_panel.save_one_click_requested.connect(self.save_one_click_options)
-        self.options_panel.closed.connect(lambda: self._set_active_side_panel(None))
         side_layout.addWidget(self.options_panel)
         self.options_panel.hide()
 
         # 內容檢查：掃描無關連內容、作者感言與作品資訊、標點校對、繁簡轉換＋字色標示開關
         self.content_panel = ContentPanel()
-        self.content_panel.closed.connect(lambda: self._set_active_side_panel(None))
         self.content_panel.ad_scan_requested.connect(self.open_ad_scan_dialog)
         self.content_panel.note_scan_requested.connect(self.open_note_scan_dialog)
         self.content_panel.quote_check_requested.connect(self.open_quote_check_dialog)
@@ -335,7 +332,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.content_panel.hide()
 
         self.chapter_panel = ChapterPanel()
-        self.chapter_panel.closed.connect(lambda: self._set_active_side_panel(None))
         self.chapter_panel.recognition_requested.connect(self.open_recognition_dialog)
         self.chapter_panel.rules_requested.connect(self.open_rules_dialog)
         self.chapter_panel.merge_duplicates_requested.connect(self.open_duplicate_chapters_dialog)
@@ -352,7 +348,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         # 尋找／取代也放進同一張卡片：本文不再被壓縮，搜尋結果也有完整高度。
         self.find_bar = FindBar()
-        self.find_bar.closed.connect(self.close_find_bar)
         self.find_bar.bind(
             get_text=lambda: self.editor.toPlainText(),
             on_select=self._find_on_select,
@@ -539,6 +534,16 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         splitter_wrap = QWidget()
         splitter_wrap_layout = QHBoxLayout(splitter_wrap)
         splitter_wrap_layout.setContentsMargins(14, 8, 14, 14)
+        splitter_wrap_layout.setSpacing(10)
+        # 最左邊的圖示列：一格一張功能卡片，貼在卡片旁邊（名稱一直顯示，不靠滑鼠提示）
+        self.side_rail = SideRail([
+            ("options", "sliders-horizontal", "排版"),
+            ("chapter", "list-tree", "章節"),
+            ("content", "file-check", "檢查"),
+            ("find", "text-search", "尋找"),
+        ])
+        self.side_rail.toggled.connect(self._on_side_rail_toggled)
+        splitter_wrap_layout.addWidget(self.side_rail)
         splitter_wrap_layout.addWidget(splitter)
         root.addWidget(splitter_wrap, 1)
 
@@ -600,23 +605,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.merge_files_action.triggered.connect(lambda: self.merge_files())
         self.one_click_button = self._add_text_button(
             layout, "wand-sparkles", "一鍵排版", "", self.one_click_format, None, primary=True)
-        # 左邊是動作（開檔、一鍵排版），右邊是開關側邊卡片：中間用一條直線分開
-        layout.addSpacing(4)
-        layout.addWidget(VDivider())
-        layout.addSpacing(4)
-        # 工具列的按鈕不放滑鼠提示：圖示＋文字已經說明用途
-        self.format_toggle_button = self._add_text_button(
-            layout, "sliders-horizontal", "排版設定", "",
-            lambda: self._toggle_side_panel(self.options_panel), None, checkable=True)
-        self.chapter_toggle_button = self._add_text_button(
-            layout, "list-tree", "章節管理", "",
-            lambda: self._toggle_side_panel(self.chapter_panel), None, checkable=True)
-        self.content_toggle_button = self._add_text_button(
-            layout, "file-check", "內容檢查", "",
-            lambda: self._toggle_side_panel(self.content_panel), None, checkable=True)
-        # 尋找／取代（Ctrl+F）也是左側卡片之一；圖示跟內容檢查分開（放大鏡＋文字行）
-        self.find_toggle_button = self._add_text_button(
-            layout, "text-search", "尋找取代", "", self.toggle_find_bar, None, checkable=True)
+        # 工具列只放動作；開關功能卡片在最左邊的圖示列（貼在卡片旁邊）
         layout.addStretch(1)
 
         # 只有圖示的按鈕放滑鼠提示（名稱＋快捷鍵）；有文字的按鈕不放，文字已經說了（UI_RULES.md）
@@ -685,8 +674,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     def _set_document_actions_enabled(self, enabled: bool):
         for button in (self.one_click_button, self.save_button, self.filename_button, self.clear_button,
-                       self.format_toggle_button, self.chapter_toggle_button, self.content_toggle_button,
-                       self.find_toggle_button):
+                       *self.side_rail.buttons.values()):
             button.setEnabled(enabled)
         self.options_panel.set_apply_enabled(enabled)
         self.content_panel.set_actions_enabled(enabled)
@@ -749,7 +737,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                                            tokens.text_faint)
         self.content_panel.set_colors(tokens)
         self.find_bar.set_theme(tokens)
-        self.find_bar.close_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
+        self.side_rail.set_colors(tokens)
         self._apply_editor_style()
         trailing = QColor(tokens.warn_text)
         trailing.setAlpha(60 if tokens.is_dark else 38)
@@ -769,8 +757,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 準），寬度沿用設計稿的比例（118×52）。
         # 工具列上所有控制項同一個高度（UI_RULES.md）：純圖示按鈕的 sizeHint 比有文字的
         # 按鈕高，「匯出 TXT」夾在圖示按鈕和繁簡切換旁邊就顯得矮一截。
-        header_buttons = ([self.open_button, self.open_menu_button, self.one_click_button, self.format_toggle_button,
-                           self.chapter_toggle_button, self.content_toggle_button, self.find_toggle_button,
+        header_buttons = ([self.open_button, self.open_menu_button, self.one_click_button,
                            self.save_button, self.filename_button,
                            self.undo_button, self.redo_button, self.clear_button, self.theme_button])
         for button in header_buttons:
@@ -2572,10 +2559,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             widget.setVisible(widget is panel)
         if panel is not self.find_bar:
             self.editor.setExtraSelections([])      # 關掉搜尋面板就把反白收掉
-        self.format_toggle_button.setChecked(panel is self.options_panel)
-        self.chapter_toggle_button.setChecked(panel is self.chapter_panel)
-        self.content_toggle_button.setChecked(panel is self.content_panel)
-        self.find_toggle_button.setChecked(panel is self.find_bar)
+        self.side_rail.set_active({self.options_panel: "options", self.chapter_panel: "chapter",
+                                   self.content_panel: "content", self.find_bar: "find"}.get(panel))
         self.side_card.setVisible(panel is not None)
         if was_open != (panel is not None):
             self._resize_cards_for_side_panel(sizes, opening=panel is not None)
@@ -2593,7 +2578,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._update_minimum_width(settle=True)
         side = max(self._side_width, self.side_card.minimumSizeHint().width())
         margins = self.splitter.parentWidget().layout().contentsMargins()
-        available = max(self.splitter.width(), self.minimumWidth() - margins.left() - margins.right())
+        rail = self.side_rail.sizeHint().width() + self.splitter.parentWidget().layout().spacing()
+        available = max(self.splitter.width(), self.minimumWidth() - margins.left() - margins.right() - rail)
         editor = max(self.editor_card.minimumSizeHint().width(), available - side - tree - 2 * handle)
         tree = max(self.tree_card.minimumSizeHint().width(), available - side - editor - 2 * handle)
         self.splitter.setSizes([side, tree, editor])
@@ -2609,7 +2595,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                 _settle(card)
         margins = self.splitter.parentWidget().layout().contentsMargins()
         needed = (sum(max(card.minimumSizeHint().width(), card.minimumWidth()) for card in cards)
-                  + self.splitter.handleWidth() * (len(cards) - 1) + margins.left() + margins.right())
+                  + self.splitter.handleWidth() * (len(cards) - 1) + margins.left() + margins.right()
+                  + self.side_rail.sizeHint().width() + self.splitter.parentWidget().layout().spacing())
         screen = self.screen()
         if screen is not None:
             needed = min(needed, screen.availableGeometry().width())
@@ -2641,6 +2628,13 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     def _toggle_side_panel(self, panel: QWidget):
         self._set_active_side_panel(None if panel.isVisible() else panel)
+
+    def _on_side_rail_toggled(self, key: str):
+        if key == "find":
+            self.toggle_find_bar()
+            return
+        self._toggle_side_panel({"options": self.options_panel, "chapter": self.chapter_panel,
+                                 "content": self.content_panel}[key])
 
     # ------------------------------------------------------------------
     # 格式選項／一鍵排版
@@ -2898,11 +2892,14 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_escape(self):
-        """Esc：先取消剪下狀態，沒有的話才收起尋找面板。"""
+        """Esc：先取消剪下狀態，沒有的話收起開著的功能卡片（功能卡片沒有自己的收起鈕）。"""
         if self._cut_state is not None:
             self.cancel_cut()
             return
-        self.close_find_bar()
+        if self.find_bar.isVisible():
+            self.close_find_bar()
+        elif self.side_card.isVisible():
+            self._set_active_side_panel(None)
 
     def toggle_find_bar(self):
         if not self.raw_lines:

@@ -1,4 +1,4 @@
-"""左側「內容檢查」卡片（工具列「內容檢查」）：掃描無關連內容、作者感言與作品資訊、
+"""左側「內容檢查」卡片（左側圖示列「檢查」）：掃描無關連內容、作者感言與作品資訊、
 標點校對、章節字數、繁簡轉換，以及只影響畫面的開關：本文字色、內文空格。
 
 本文字色一個開關同時標廣告與作者感言、作品資訊；要標哪些類型照兩個掃描視窗裡（記住的）勾選，
@@ -25,7 +25,6 @@ DEFAULT_MARK_CONFIDENCE = {"高", "中"}
 
 
 class ContentPanel(QWidget):
-    closed = Signal()
     ad_scan_requested = Signal()
     note_scan_requested = Signal()
     quote_check_requested = Signal()
@@ -46,9 +45,6 @@ class ContentPanel(QWidget):
         outer.setSpacing(0)
 
         header, header_layout = make_card_header("內容檢查")
-        self.close_button = IconButton("panel-left-close", "收起內容檢查", size=16)
-        self.close_button.clicked.connect(self.closed.emit)
-        header_layout.addWidget(self.close_button)
         outer.addWidget(header)
 
         scroll = PanelScroll()
@@ -126,7 +122,7 @@ class ContentPanel(QWidget):
         return self._buttons[signal_name]
 
     def set_colors(self, tokens):
-        for button in (self.close_button, self.previous_mark_button, self.next_mark_button):
+        for button in (self.previous_mark_button, self.next_mark_button):
             button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
         for button in self._buttons.values():
             button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)

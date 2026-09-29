@@ -15,7 +15,7 @@
 import re
 import time
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
@@ -153,7 +153,6 @@ class FindBar(QWidget):
     """不直接碰文件內容——每次搜尋都在呼叫端提供的純文字上重新比對，
     取代／取代全部才透過回呼請 MainWindow 動手修改編輯器內容。"""
 
-    closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -193,9 +192,6 @@ class FindBar(QWidget):
         self.regex_button.setCheckable(True)
         self.regex_button.toggled.connect(self._on_regex_toggled)
         header_layout.addWidget(self.regex_button)
-        self.close_button = IconButton("panel-left-close", "收起尋找／取代（Esc）", size=16)
-        self.close_button.clicked.connect(self.closed.emit)
-        header_layout.addWidget(self.close_button)
         outer.addWidget(header)
 
         root = QVBoxLayout()
@@ -270,7 +266,7 @@ class FindBar(QWidget):
         self.hint_label.hide()
         root.addWidget(self.hint_label)
 
-        self._icon_buttons = [self.prev_button, self.next_button, self.close_button,
+        self._icon_buttons = [self.prev_button, self.next_button,
                               self.find_snippet_button, self.replace_snippet_button]
         self._tokens = None
         self._get_text = lambda: ""

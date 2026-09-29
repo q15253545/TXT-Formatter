@@ -812,6 +812,88 @@ class HoverIconButton(QPushButton):
         super().changeEvent(event)
 
 
+class RailButton(QToolButton):
+    """左側圖示列的一格：圖示在上、兩個字的名稱在下，名稱一直顯示（不靠滑鼠提示）。
+    開著的那一格用「開啟中」的顏色；不接受焦點，點了焦點留在本文。"""
+
+    def __init__(self, icon_name: str, text: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("railButton")
+        self.setText(text)
+        self.setCheckable(True)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.setIconSize(QSize(20, 20))
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._icon_name = icon_name
+        self._color = self._hover_color = self._active_color = self._disabled_color = "#000000"
+
+    def set_colors(self, color: str, hover_color: str, active_color: str, disabled_color: str):
+        self._color, self._hover_color = color, hover_color
+        self._active_color, self._disabled_color = active_color, disabled_color
+        self._refresh_icon()
+
+    def _refresh_icon(self):
+        if not self.isEnabled():
+            color = self._disabled_color
+        elif self.isChecked():
+            color = self._active_color
+        else:
+            color = self._hover_color if self.underMouse() else self._color
+        self.setIcon(icons.make_icon(self._icon_name, color, 20))
+
+    def setChecked(self, checked: bool):
+        super().setChecked(checked)
+        self._refresh_icon()
+
+    def nextCheckState(self):
+        # 按下去開關哪張卡片由圖示列決定（一次只開一張），按鈕自己不切換
+        pass
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._refresh_icon()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._refresh_icon()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.EnabledChange:
+            self._refresh_icon()
+        super().changeEvent(event)
+
+
+class SideRail(QFrame):
+    """最左邊直立的圖示列：一格一張功能卡片，按一下打開、再按一下收起，一次只開一張。
+    貼在卡片旁邊，不用把滑鼠移到上方的工具列。items：[(代號, 圖示, 名稱)]。"""
+
+    toggled = Signal(str)      # 按了哪一格（代號）
+
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 6, 5, 6)
+        layout.setSpacing(4)
+        self.buttons: dict[str, RailButton] = {}
+        for key, icon_name, text in items:
+            button = RailButton(icon_name, text)
+            button.clicked.connect(lambda _checked=False, key=key: self.toggled.emit(key))
+            self.buttons[key] = button
+            layout.addWidget(button)
+        layout.addStretch(1)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+
+    def set_active(self, key: str | None):
+        for name, button in self.buttons.items():
+            button.setChecked(name == key)
+
+    def set_colors(self, tokens):
+        for button in self.buttons.values():
+            button.set_colors(tokens.icon, tokens.icon_hover, tokens.checked_text, tokens.text_faint)
+
+
 class Editor(QPlainTextEdit):
     """章節結構（force_lv1/2、忽略集合…）跟正文綁在一起，Qt 內建的
     QTextDocument undo 只認得文字、不認得這些——所以 Ctrl+Z／Ctrl+Shift+Z

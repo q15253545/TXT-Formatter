@@ -102,7 +102,7 @@ class WindowStateMixin:
     def _update_toolbar_compact(self):
         """視窗太窄時，工具列上有文字的按鈕改成只顯示圖示。
 
-        整排按鈕不會換行也不會縮，有文字時最小寬度約 1250；只顯示圖示時約 780，
+        整排按鈕不會換行也不會縮，有文字時最小寬度約 820；只顯示圖示時約 490，
         縮放比較大的小螢幕（800 寬）也放得下。"""
         width = self.width()
         compact = self._toolbar_compact
@@ -119,10 +119,8 @@ class WindowStateMixin:
         margin = 8 if compact else 20
         layout.setContentsMargins(margin, 0, margin, 0)
         # 只剩圖示時用滑鼠提示補上原本的文字（有文字時不放，文字已經說了）
-        shortcuts = {self.open_button: "Ctrl+O", self.find_toggle_button: "Ctrl+F", self.save_button: "Ctrl+S"}
-        for button in (self.open_button, self.one_click_button, self.format_toggle_button,
-                       self.chapter_toggle_button, self.content_toggle_button, self.find_toggle_button,
-                       self.save_button):
+        shortcuts = {self.open_button: "Ctrl+O", self.save_button: "Ctrl+S"}
+        for button in (self.open_button, self.one_click_button, self.save_button):
             button.set_compact(compact)
             shortcut = shortcuts.get(button)
             button.setToolTip(button.text() + (f"（{shortcut}）" if shortcut else "") if compact else "")
@@ -147,8 +145,7 @@ class WindowStateMixin:
 
     def _toolbar_icon_buttons(self) -> tuple:
         """工具列上只顯示圖示時是單一圖示的按鈕（不含兩個箭頭、繁簡切換）。"""
-        return (self.open_button, self.one_click_button, self.format_toggle_button, self.chapter_toggle_button,
-                self.content_toggle_button, self.find_toggle_button, self.save_button, self.undo_button,
+        return (self.open_button, self.one_click_button, self.save_button, self.undo_button,
                 self.redo_button, self.clear_button, self.theme_button)
 
     def _collect_ui_state(self) -> dict:

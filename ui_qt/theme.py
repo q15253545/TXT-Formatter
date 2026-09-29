@@ -494,6 +494,29 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         border-color: {t.button_border};
         background: {t.button_bg};
     }}
+    /* 左側圖示列（widgets.SideRail）：圖示在上、名稱在下；開著的那一格用「開啟中」的顏色。 */
+    QToolButton#railButton {{
+        background: transparent;
+        color: {t.control_text};
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 6px 2px 5px 2px;
+        min-width: 44px;
+        font-size: 12px;
+    }}
+    QToolButton#railButton:hover {{
+        background: {t.surface_hover};
+        color: {t.icon_hover};
+    }}
+    QToolButton#railButton:checked {{
+        background: {t.checked_bg};
+        border-color: {t.checked_border};
+        color: {t.checked_text};
+    }}
+    QToolButton#railButton:disabled {{
+        color: {t.text_faint};
+        background: transparent;
+    }}
     /* 檔案資訊列上的「書籍資料」展開鈕：跟工具列不同，不畫框、只用文字＋箭頭。 */
     QPushButton#barToggle {{
         background: transparent;
