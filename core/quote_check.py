@@ -24,6 +24,89 @@ QUOTE_PROBLEM_LABELS = {
     "separator_style": "分隔線不一致",
 }
 
+# 可疑字詞：不是標點，但同樣是逐行找、有正確寫法的直接修（標點校對視窗裡另成一組）
+WORD_PROBLEM_LABELS = {
+    "masked": "星號遮字",
+    "homoglyph": "變體字母",
+    "noise_dot": "干擾句點",
+}
+PROBLEM_LABELS = {**QUOTE_PROBLEM_LABELS, **WORD_PROBLEM_LABELS}
+
+_HAN = "\u3400-\u9fff\uf900-\ufaff"
+# 星號遮字：中文字旁邊一到四個星號（整行都是星號的是分隔線，另外算）
+_MASKED = re.compile(rf"[{_HAN}][*＊]{{1,4}}|[*＊]{{1,4}}[{_HAN}]")
+# 變體字母：同一個英文字裡混著長得像英文字母的西里爾、希臘字母（多半是為了躲過濾的網址、帳號）；
+# 整個字都是西里爾或希臘字母的（俄文、α 星）不算
+_HOMOGLYPHS = str.maketrans({
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T",
+    "Х": "X", "У": "Y", "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "і": "i",
+    "ј": "j", "ѕ": "s", "Ι": "I", "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Κ": "K", "Μ": "M",
+    "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X", "ο": "o", "ν": "v", "ι": "i",
+})
+_HOMOGLYPH_CHARS = "".join(chr(code) for code in _HOMOGLYPHS)
+_MIXED_WORD = re.compile(r"[A-Za-z" + _HOMOGLYPH_CHARS + r"]+")
+# 干擾句點：中文字中間的句點（「大.走一步」）、章號裡的句點（「第.1808章」「第18.08章」）。
+# 「一．山路」這種編號後面的點不算。
+_NOISE_DOT = re.compile(rf"(?<=[{_HAN}])[.．](?=[{_HAN}])")
+_CHAPTER_DOTS = re.compile(r"(?<=第)\s*[.．]\s*(?=[0-9０-９])|(?<=第[0-9０-９])[.．](?=[0-9０-９]{2,}\s*[章回節节])"
+                           r"|(?<=第[0-9０-９]{2})[.．](?=[0-9０-９]{2,}\s*[章回節节])"
+                           r"|(?<=第[0-9０-９]{3})[.．](?=[0-9０-９]{2,}\s*[章回節节])")
+
+
+_LATIN = re.compile("[A-Za-z]")
+_LOOKALIKE = re.compile("[" + _HOMOGLYPH_CHARS + "]")
+
+
+def _is_mixed(word: str) -> bool:
+    return bool(_LATIN.search(word)) and bool(_LOOKALIKE.search(word))
+
+
+def _mixed_homoglyph_words(text: str) -> list:
+    return [match for match in _MIXED_WORD.finditer(text) if _is_mixed(match.group())]
+
+
+def _fix_homoglyphs(text: str) -> str:
+    return _MIXED_WORD.sub(lambda match: match.group().translate(_HOMOGLYPHS) if _is_mixed(match.group())
+                           else match.group(), text)
+
+
+_HAN_CHAR = re.compile(f"[{_HAN}]")
+_LIST_NUMERALS = "一二三四五六七八九十〇零"
+
+
+def _noise_dot_spans(text: str) -> list:
+    """「一．山路」（行首或空白後面的中文編號加點）是清單編號，不算。"""
+    spans = []
+    for match in _NOISE_DOT.finditer(text):
+        start = match.start()
+        if text[start - 1] in _LIST_NUMERALS and (start == 1 or not _HAN_CHAR.match(text[start - 2])):
+            continue
+        spans.append(match.span())
+    spans += [match.span() for match in _CHAPTER_DOTS.finditer(text)]
+    return sorted(spans)
+
+
+def _remove_spans(text: str, spans) -> str:
+    parts, cursor = [], 0
+    for start, end in spans:
+        parts.append(text[cursor:start])
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def word_problems(text: str) -> list:
+    """一行（去掉縮排後）的可疑字詞種類。"""
+    found = []
+    if "*" in text or "＊" in text:
+        if _MASKED.search(text):
+            found.append("masked")
+    if _mixed_homoglyph_words(text):
+        found.append("homoglyph")
+    if ("." in text or "．" in text) and _noise_dot_spans(text):
+        found.append("noise_dot")
+    return found
+
 # 從網頁轉存時沒被轉回來的字元碼：&#29368;、&#x72B8;、&nbsp;、&amp;……
 # 
 _HTML_ENTITY = re.compile(r"&#[0-9]{2,7};|&#[xX][0-9a-fA-F]{2,6};|&(?:nbsp|amp|lt|gt|quot|apos|hellip|mdash|ldquo|rdquo);")
@@ -257,6 +340,7 @@ def _check_line(line: str) -> tuple:
         problems.append("repeated_punct")
     if _DASH_OR_TILDE.search(text) and _normalize_dashes(text) != text:
         problems.append("dash_run")
+    problems.extend(word_problems(text))
     return tuple(problems)
 
 
@@ -400,6 +484,14 @@ def _plan_fix(lines, row: int, kind: str):
         fixed = _normalize_dashes(text)
         return None if fixed == text else {"start": row, "end": row + 1, "after": [indent + fixed]}
 
+    if kind == "homoglyph":
+        fixed = _fix_homoglyphs(text)
+        return None if fixed == text else {"start": row, "end": row + 1, "after": [indent + fixed]}
+
+    if kind == "noise_dot":
+        spans = _noise_dot_spans(text)
+        return None if not spans else {"start": row, "end": row + 1, "after": [indent + _remove_spans(text, spans)]}
+
     if kind == "missing_separator":
         parts, start = [], 0
         for index in _stuck_dialogue_positions(text):
@@ -458,7 +550,7 @@ def _plan_fix(lines, row: int, kind: str):
 
 # Fixes that only rewrite characters inside one line: two of them on the same line are independent, so the
 # second one is re-planned on the line the first one produced instead of being dropped.
-_LINE_LOCAL_KINDS = frozenset({"separator_line", "repeated_punct", "dash_run"})
+_LINE_LOCAL_KINDS = frozenset({"separator_line", "repeated_punct", "dash_run", "homoglyph", "noise_dot"})
 
 
 def apply_fixes(lines, plans) -> tuple:
@@ -620,6 +712,14 @@ def scan_quote_problems(lines, line_ranges=None, title_rows=None, separator_targ
     if hard_wrapped:
         inner = [lines[row].rstrip() for rows in wrapped_paragraphs for row in rows[:-1]]
         problems.hard_wrapped = sum(not text.endswith(_SENTENCE_ENDS) for text in inner) * 2 >= len(inner)
+    # 章節標題不在正文區段裡，但標題裡的干擾句點（「第.1808章」「大.走一步」）也要列、也能修
+    covered = [(0, len(lines))] if line_ranges is None else line_ranges
+    for row in sorted(title_rows):
+        if any(start <= row < end for start, end in covered) and 0 <= row < len(lines):
+            text = _strip_indent(lines[row])[1]
+            if text and ("." in text or "．" in text) and _noise_dot_spans(text):
+                problems.append({"line": row + 1, "kind": "noise_dot", "label": PROBLEM_LABELS["noise_dot"],
+                                 "preview": lines[row].strip(), "fix": plan_fix(lines, row, "noise_dot")})
     for row in sorted(segment_of):
         line = lines[row]
         segment_start, segment_end = segment_of[row]
@@ -646,7 +746,7 @@ def scan_quote_problems(lines, line_ranges=None, title_rows=None, separator_targ
             problems.append({
                 "line": row + 1,
                 "kind": kind,
-                "label": QUOTE_PROBLEM_LABELS[kind],
+                "label": PROBLEM_LABELS[kind],
                 "preview": line.strip(),
                 "fix": fix,
             })

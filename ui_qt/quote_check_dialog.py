@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.quote_check import (
-    QUOTE_PROBLEM_LABELS, SEPARATOR_LENGTH, apply_fixes, scan_quote_problems, separator_styles,
+    QUOTE_PROBLEM_LABELS, SEPARATOR_LENGTH, WORD_PROBLEM_LABELS, apply_fixes, scan_quote_problems, separator_styles,
 )
 from . import dialogs, i18n
 from .sortable_table import PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
@@ -34,6 +34,9 @@ _KIND_TIPS = {
                       "網址、英文裡的點不會動。",
     "dash_run": "段落裡太長的破折號（——————、——-、中文裡的 ----）改成兩格「——」；"
                 "~~~~、～～～～ 改成一個「～」。整行的分隔線、英文與網址裡的不會動。",
+    "masked": "中文字旁邊的一到四個星號（**），多半是被遮掉的字；只列出來。",
+    "homoglyph": "英文字裡混著長得像英文字母的西里爾、希臘字母，改回英文字母。",
+    "noise_dot": "中文字之間、章號裡的句點（大.走一步、第.1808章），拿掉。",
 }
 
 # 「分隔線不一致」不是勾選框：由下拉選單決定要不要統一、統一成哪一種
@@ -215,7 +218,7 @@ class QuoteCheckDialog(QDialog):
         self.result_lines: list | None = None
         self.applied_count = 0
 
-        root, footer = dialog_frame(self, intro="找出引號沒成對、對話斷行、重複標點；有正確寫法的可以勾選後一次修正。")
+        root, footer = dialog_frame(self, intro="找出引號沒成對、對話斷行、重複標點與可疑字詞；有正確寫法的可以勾選後一次修正。")
         root.setSpacing(12)
 
         # 「只檢查選取的章節」是範圍，所有工具視窗都放在最上面（預設關著，見 ScopeToggle）。
@@ -253,6 +256,20 @@ class QuoteCheckDialog(QDialog):
         separator_row.addWidget(self.separator_combo)
         separator_row.addStretch(1)
         root.addLayout(separator_row)
+        # 可疑字詞不是標點，另成一組；一樣逐行找、有正確寫法的可以修
+        self.word_group = GroupCheckBox("可疑字詞")
+        self.word_group.members_changed.connect(self._refresh)
+        root.addWidget(self.word_group)
+        word_box, word_flow = flow_container(uniform=True)
+        for key, label in WORD_PROBLEM_LABELS.items():
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(enabled_kinds is None or key in enabled_kinds)
+            checkbox.setToolTip(_KIND_TIPS.get(key, ""))
+            checkbox.toggled.connect(self._refresh)
+            self._kind_checks[key] = checkbox
+            self.word_group.add_member(checkbox)
+            word_flow.addWidget(checkbox)
+        root.addWidget(word_box)
         root.addWidget(Divider())
 
         select_row = QHBoxLayout()

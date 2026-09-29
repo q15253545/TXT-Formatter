@@ -24,7 +24,7 @@ from core.chapter_update import (
 from core.docx_reader import is_docx
 from core.epub_reader import is_epub
 from core.encoding import smart_detect_encoding, strip_invisible_chars
-from core.quote_check import QUOTE_PROBLEM_LABELS
+from core.quote_check import PROBLEM_LABELS, QUOTE_PROBLEM_LABELS
 from core.script_convert import convert_body_text, opencc_available
 from core.word_count import chapter_word_counts
 from core.structure_builder import build_document_structure
@@ -42,6 +42,9 @@ from .recognition_dialog import RecognitionDialog
 from .rules_dialog import RulesDialog
 from .word_count_dialog import WordCountDialog
 from .window_common import MARK_SCAN_DELAY_MS, OPEN_FILE_FILTER
+
+# 標點校對預設不勾的檢查項目（只能列出、數量常很多）
+QUOTE_DEFAULT_OFF = frozenset({"masked"})
 
 
 class ToolWindowsMixin:
@@ -539,9 +542,13 @@ class ToolWindowsMixin:
         self._sync_raw_lines()
         self._ensure_toc_current()
         spans = self._selected_section_spans()
-        # 記的是「關掉了哪些」：之後新增的檢查項目預設是開的。
+        # 記的是「關掉了哪些」：之後新增的檢查項目照預設（QUOTE_DEFAULT_OFF 以外都開）。
+        # 星號遮字只能列出、書裡常有上百處，預設關著；使用者打開過之後照記住的。
         disabled = self._ui_state.get("quote_disabled_kinds")
-        enabled = set(QUOTE_PROBLEM_LABELS) - set(disabled if isinstance(disabled, list) else [])
+        seen = self._ui_state.get("quote_seen_kinds")
+        seen = set(seen) if isinstance(seen, list) else set(QUOTE_PROBLEM_LABELS)
+        enabled = (set(PROBLEM_LABELS) - set(disabled if isinstance(disabled, list) else [])
+                   - (QUOTE_DEFAULT_OFF - seen))
 
         def create():
             dialog = QuoteCheckDialog(self.raw_lines, self, selected_ranges=spans,
@@ -559,7 +566,8 @@ class ToolWindowsMixin:
         def on_closed(dialog, _accepted):
             # 「分隔線不一致」不是勾選框（由視窗裡的下拉決定），不記
             self._ui_state["quote_disabled_kinds"] = sorted(
-                set(QUOTE_PROBLEM_LABELS) - dialog.enabled_kinds() - {"separator_style"})
+                set(PROBLEM_LABELS) - dialog.enabled_kinds() - {"separator_style"})
+            self._ui_state["quote_seen_kinds"] = sorted(PROBLEM_LABELS)
 
         self._open_tool_dialog("quote_check", create, reload, on_closed)
 
