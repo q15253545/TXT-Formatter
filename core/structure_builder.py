@@ -33,6 +33,7 @@ from .chapter_parse import (
     word_key, not_a_heading,
 )
 from .collection import analyze_collection_structure
+from .paragraph_split import SPLIT_OFF, split_long_paragraphs
 from .reflow import collapse_inline_spaces, reflow_lines
 from .user_rules import match_user_chapter_rule
 
@@ -1143,15 +1144,23 @@ def _finish_virtual_volumes(ctx: BuildContext, state: RenderState, virtual: dict
 
 
 def _build_with_reflow(ctx: BuildContext, write_text: bool) -> StructureResult:
-    """排版選項「整理段落換行」：先認出章節標題，把標題之間正文的硬換行接回去，再照常排版。
+    """排版選項「整理段落換行」「長段落」：先認出章節標題，把標題之間正文的硬換行接回去、
+    太長的段落拆開，再照常排版。
 
     回傳結果的 chapter_raw_map 換算回「整理前」的行號，呼叫端（整份排版、只排選取章節）
     拿來對照舊行號的方式不用改。"""
-    plain = replace(ctx.options, reflow_paragraphs=False)
+    plain = replace(ctx.options, reflow_paragraphs=False, long_paragraph=SPLIT_OFF)
     probe = build_document_structure(replace(ctx, options=plain), apply_format=False, write_text=False)
     protected = (set(probe.chapter_raw_map.values()) | set(ctx.force_lv1_chapters)
                  | set(ctx.force_lv2_chapters) | set(ctx.auto_titles))
-    new_lines, row_map = reflow_lines(ctx.raw_lines, protected)
+    if ctx.options.reflow_paragraphs:
+        new_lines, row_map = reflow_lines(ctx.raw_lines, protected)
+    else:
+        new_lines, row_map = list(ctx.raw_lines), {row: row for row in range(len(ctx.raw_lines))}
+    if ctx.options.long_paragraph != SPLIT_OFF:
+        split_protected = {row_map[row] for row in protected if row in row_map}
+        new_lines, split_map = split_long_paragraphs(new_lines, split_protected, ctx.options.long_paragraph)
+        row_map = {row: split_map[moved_row] for row, moved_row in row_map.items()}
 
     def moved(rows):
         return {row_map[row] for row in rows if row in row_map}
@@ -1183,7 +1192,7 @@ def build_document_structure(ctx: BuildContext, apply_format: bool = False,
     重新以 apply_format=True、write_text=True 呼叫一次，那一輪算出的位置
     才是實際輸出後的正確位置。
     """
-    if apply_format and ctx.options.reflow_paragraphs:
+    if apply_format and (ctx.options.reflow_paragraphs or ctx.options.long_paragraph != SPLIT_OFF):
         return _build_with_reflow(ctx, write_text)
     state = RenderState()
     ctx.tree = SimpleTree()

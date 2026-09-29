@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.format_options import FormatOptions
+from core.paragraph_split import SPLIT_CHOICES, SPLIT_OFF
 from core.text_format import QUOTE_KEEP, QUOTE_STYLES
 from . import i18n, icons
 from .widgets import Divider, IconButton, PanelScroll, ToggleSwitch, make_card_header
@@ -67,6 +68,8 @@ def describe_options(options: FormatOptions) -> list:
                                      ("段首縮排", indent_choice(options), "保留原樣")):
         if choice != unchanged:
             items.append(f"{label}：{choice}")
+    if options.long_paragraph in SPLIT_CHOICES and options.long_paragraph != SPLIT_OFF:
+        items.append(f"長段落：{options.long_paragraph}")
     if options.quote_style != QUOTE_KEEP:
         items.append(f"對話引號：{options.quote_style}")
     if options.num_style != "保留原文":
@@ -142,12 +145,16 @@ class OptionsPanel(QWidget):
         self.title_spacing_combo = self._add_combo(combos, 1, "標題前後", list(TITLE_SPACING_CHOICES),
                                                    title_spacing_choice(initial))
         self.indent_combo = self._add_combo(combos, 2, "段首縮排", list(INDENT_CHOICES), indent_choice(initial))
+        # 長段落：在引號外的句末拆開，分高、中信心（core/paragraph_split.py）
+        self.long_combo = self._add_combo(combos, 3, "長段落", list(SPLIT_CHOICES),
+                                          initial.long_paragraph if initial.long_paragraph in SPLIT_CHOICES
+                                          else SPLIT_OFF)
         # 對話引號：有方向的引號照原本的內外層對應，一行一行轉（core/text_format.convert_quotes）
-        self.quote_combo = self._add_combo(combos, 3, "對話引號", list(QUOTE_STYLES), initial.quote_style)
-        self.num_style_combo = self._add_combo(combos, 4, "章節編號", NUM_STYLE_CHOICES, initial.num_style)
-        self.sep_style_combo = self._add_combo(combos, 5, "編號間隔", SEP_STYLE_CHOICES, initial.sep_style)
-        self.punct_combo = self._add_combo(combos, 6, "標點符號", PUNCT_CHOICES, punct_default)
-        self.digit_combo = self._add_combo(combos, 7, "數字", DIGIT_CHOICES, digit_default)
+        self.quote_combo = self._add_combo(combos, 4, "對話引號", list(QUOTE_STYLES), initial.quote_style)
+        self.num_style_combo = self._add_combo(combos, 5, "章節編號", NUM_STYLE_CHOICES, initial.num_style)
+        self.sep_style_combo = self._add_combo(combos, 6, "編號間隔", SEP_STYLE_CHOICES, initial.sep_style)
+        self.punct_combo = self._add_combo(combos, 7, "標點符號", PUNCT_CHOICES, punct_default)
+        self.digit_combo = self._add_combo(combos, 8, "數字", DIGIT_CHOICES, digit_default)
 
         body.addStretch(1)
 
@@ -216,6 +223,7 @@ class OptionsPanel(QWidget):
             halfwidth_punct=(punct == "轉半形"),
             fullwidth_digits=(digit == "轉全形"),
             halfwidth_digits=(digit == "轉半形"),
+            long_paragraph=i18n.combo_value(self.long_combo),
             quote_style=i18n.combo_value(self.quote_combo),
             num_style=i18n.combo_value(self.num_style_combo),
             sep_style=i18n.combo_value(self.sep_style_combo),
@@ -243,6 +251,7 @@ class OptionsPanel(QWidget):
             "paragraph": i18n.combo_value(self.paragraph_combo),
             "title_spacing": i18n.combo_value(self.title_spacing_combo),
             "indent": i18n.combo_value(self.indent_combo),
+            "long_paragraph": i18n.combo_value(self.long_combo),
             "quote_style": i18n.combo_value(self.quote_combo),
             "num_style": i18n.combo_value(self.num_style_combo),
             "sep_style": i18n.combo_value(self.sep_style_combo),
@@ -259,6 +268,7 @@ class OptionsPanel(QWidget):
         for key, combo, choices in (("paragraph", self.paragraph_combo, list(PARAGRAPH_CHOICES)),
                                     ("title_spacing", self.title_spacing_combo, list(TITLE_SPACING_CHOICES)),
                                     ("indent", self.indent_combo, list(INDENT_CHOICES)),
+                                    ("long_paragraph", self.long_combo, list(SPLIT_CHOICES)),
                                     ("quote_style", self.quote_combo, list(QUOTE_STYLES)),
                                     ("num_style", self.num_style_combo, NUM_STYLE_CHOICES),
                                     ("sep_style", self.sep_style_combo, SEP_STYLE_CHOICES),
@@ -272,7 +282,8 @@ class OptionsPanel(QWidget):
         避免看起來像「這些勾選也是一鍵排版套用的」而造成誤解。"""
         for checkbox in self._checkboxes.values():
             checkbox.setChecked(False)
-        for combo in (self.paragraph_combo, self.title_spacing_combo, self.indent_combo, self.quote_combo,
+        for combo in (self.paragraph_combo, self.title_spacing_combo, self.indent_combo, self.long_combo,
+                      self.quote_combo,
                       self.num_style_combo,
                       self.sep_style_combo, self.punct_combo, self.digit_combo):
             combo.setCurrentIndex(0)
