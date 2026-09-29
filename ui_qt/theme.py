@@ -441,9 +441,9 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
 
     QToolButton {{
         background: transparent;
-        border: none;
+        border: 1px solid transparent;
         border-radius: 10px;
-        padding: 7px;
+        padding: 6px;
     }}
     QToolButton:hover {{
         background: {t.surface_hover};
@@ -451,9 +451,12 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
     QToolButton:pressed {{
         background: {t.surface_active};
     }}
-    /* 開關型的圖示按鈕（例如「顯示空格」）開啟中：淡藍底，不只靠圖示變色。 */
+    /* 開關型的圖示按鈕（目錄的「只顯示章號」、尋找的正則…）開啟中：跟左側圖示列、工具列開啟中的按鈕同一組
+       （底色、外框、圖示都是 checked_*）。平常的外框是透明的 1px，開啟時才不會跳動。 */
     QToolButton:checked {{
         background: {t.checked_bg};
+        border-color: {t.checked_border};
+        color: {t.checked_text};
     }}
     QToolButton:disabled {{
         opacity: 0.4;
