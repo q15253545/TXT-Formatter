@@ -740,6 +740,17 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         text-decoration: underline;
     }}
 
+    /* 多行的輸入框（繁簡轉換的詞表）：跟一般輸入框同一種框（本文編輯器的 QPlainTextEdit 沒有框） */
+    QPlainTextEdit#wordList {{
+        background: {t.surface};
+        border: 1px solid {t.border};
+        border-radius: 9px;
+        padding: 6px 8px;
+    }}
+    QPlainTextEdit#wordList:hover, QPlainTextEdit#wordList:focus {{
+        border: 1px solid {t.icon_hover};
+    }}
+
     /* 工具視窗表格下面的前後文預覽：跟表格同一種框 */
     QTextEdit#contextPreview {{
         background: {t.surface};

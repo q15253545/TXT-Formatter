@@ -25,7 +25,9 @@ from core.docx_reader import is_docx
 from core.epub_reader import is_epub
 from core.encoding import smart_detect_encoding, strip_invisible_chars
 from core.quote_check import PROBLEM_LABELS, QUOTE_PROBLEM_LABELS
-from core.script_convert import convert_body_text, opencc_available
+from core.script_convert import (
+    DEFAULT_VOCABULARY, convert_with_word_lists, opencc_available, parse_keep_words, parse_vocabulary,
+)
 from core.word_count import chapter_word_counts
 from core.structure_builder import build_document_structure
 from core.insert_suggestions import get_insert_suggestions
@@ -596,14 +598,25 @@ class ToolWindowsMixin:
         self._sync_raw_lines()
         self._ensure_toc_current()
         spans = self._selected_section_spans()
+        keep_text = self._ui_state.get("script_keep_words")
+        vocabulary_text = self._ui_state.get("script_vocabulary")
         dialog = ScriptConvertDialog(self, selected_count=self._selected_chapter_count() if spans else 0,
-                                     mode=self._ui_state.get("script_mode"))
+                                     mode=self._ui_state.get("script_mode"),
+                                     keep_words=keep_text if isinstance(keep_text, str) else "",
+                                     vocabulary=vocabulary_text if isinstance(vocabulary_text, str)
+                                     else DEFAULT_VOCABULARY)
         try:
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            # 詞表按取消也記住（改到一半關掉不會不見）
+            self._ui_state["script_keep_words"] = dialog.keep_words_text()
+            self._ui_state["script_vocabulary"] = dialog.vocabulary_text()
+            if not accepted:
                 return
             mode = dialog.mode()
             selected_only = dialog.selected_only()
             self._ui_state["script_mode"] = mode
+            keep_words = parse_keep_words(dialog.keep_words_text())
+            vocabulary = parse_vocabulary(dialog.vocabulary_text())
         finally:
             dialog.deleteLater()
 
@@ -614,13 +627,13 @@ class ToolWindowsMixin:
         else:
             rows = range(len(lines))
             scope_text = "全文"
-        generated = "\n".join(self._convert_lines_with_progress(lines, rows, mode))
+        generated = "\n".join(self._convert_lines_with_progress(lines, rows, mode, keep_words, vocabulary))
 
         # 自動辨識的作品／標題快取記著舊文字，重建目錄時會把舊名稱寫回去
         # ：轉換範圍內的一起轉，建新的 dict，不改到復原快照共用的。
         converted_rows = set(rows)
         self.auto_titles = {
-            row: ({**record, "title": convert_body_text(record.get("title", ""), mode)}
+            row: ({**record, "title": convert_with_word_lists(record.get("title", ""), mode, keep_words, vocabulary)}
                   if row in converted_rows else dict(record))
             for row, record in self.auto_titles.items()
         }
@@ -635,7 +648,8 @@ class ToolWindowsMixin:
         self._checkpoint_document()
         self._show_status(f"已將{scope_text}做「{mode}」轉換，可以按 Ctrl+Z 復原")
 
-    def _convert_lines_with_progress(self, lines: list, rows, mode: str) -> list:
+    def _convert_lines_with_progress(self, lines: list, rows, mode: str, keep_words=(),
+                                     vocabulary=()) -> list:
         """逐塊做繁簡轉換，中間更新狀態列。
 
         OpenCC 是逐字轉換，2.6 MB 實測要 6 秒、5.8 MB 的檔案十幾秒；
@@ -653,7 +667,8 @@ class ToolWindowsMixin:
         try:
             for index in range(0, total, chunk_size):
                 block = rows[index:index + chunk_size]
-                converted = convert_body_text("\n".join(lines[row] for row in block), mode)
+                converted = convert_with_word_lists("\n".join(lines[row] for row in block), mode,
+                                                    keep_words, vocabulary)
                 for row, text in zip(block, converted.split("\n")):
                     lines[row] = text
                 if total > chunk_size:
