@@ -383,24 +383,27 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         i18n.skip(self.tree)   # 目錄是書的內容，不跟著介面切換繁簡
 
         tree_header, tree_header_layout = make_card_header("目錄")
-        for icon_name, tooltip, slot in (
-            ("refresh-cw", "重新掃描目錄（F5）", self.rescan_toc),
-            ("unfold-vertical", "全部展開", self.tree.expandAll),
-            ("fold-vertical", "全部摺疊", self.tree.collapseAll),
-        ):
-            button = IconButton(icon_name, tooltip, size=16)
-            button.clicked.connect(slot)
-            self._icon_buttons.append(button)
-            tree_header_layout.addWidget(button)
+        button = IconButton("refresh-cw", "重新掃描目錄（F5）", size=16)
+        button.clicked.connect(self.rescan_toc)
+        self._icon_buttons.append(button)
+        tree_header_layout.addWidget(button)
+        # 全部展開、全部摺疊是互斥的兩件事，一顆按鈕照目前的狀態做另一件（圖示、提示跟著換）
+        self.toc_fold_button = IconButton("unfold-vertical", "全部展開", size=16)
+        self.toc_fold_button.clicked.connect(self._toggle_toc_folding)
+        self._icon_buttons.append(self.toc_fold_button)
+        tree_header_layout.addWidget(self.toc_fold_button)
+        # 重建目錄時每個卷展開都會送一次訊號：併成一次再重算按鈕
+        self._toc_fold_timer = QTimer(self)
+        self._toc_fold_timer.setSingleShot(True)
+        self._toc_fold_timer.setInterval(0)
+        self._toc_fold_timer.timeout.connect(self._update_toc_fold_button)
+        self.tree.itemExpanded.connect(lambda _item: self._toc_fold_timer.start())
+        self.tree.itemCollapsed.connect(lambda _item: self._toc_fold_timer.start())
         # 目錄只顯示章號：開關型圖示，開著時用互動色
-        self.toc_compact_button = IconButton("list-filter", "只顯示章號", size=16)
+        self.toc_compact_button = IconButton("hash", "只顯示章號", size=16)
         self.toc_compact_button.setCheckable(True)
         self.toc_compact_button.clicked.connect(self._on_toc_compact_clicked)
         tree_header_layout.addWidget(self.toc_compact_button)
-        button = IconButton("ellipsis", "章節管理", size=16)
-        button.clicked.connect(lambda: self._toggle_side_panel(self.chapter_panel))
-        self._icon_buttons.append(button)
-        tree_header_layout.addWidget(button)
         tree_layout.addWidget(tree_header)
 
         tree_body = QVBoxLayout()
@@ -1920,6 +1923,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @timed
     def _populate_tree(self, result):
+        self._toc_fold_timer.start()
         view = self._capture_tree_view() if self.toc_full_labels else None
         self.tree.clear()
         node_map = {}
@@ -2627,6 +2631,29 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         for panel in panels:
             panel.setMinimumWidth(width)
         self._update_minimum_width(settle=True)
+
+    def _toc_fully_expanded(self) -> bool:
+        """有子項目的節點（卷）都展開著：沒有卷的目錄算展開（按了也沒東西可摺）。"""
+        stack = [self.tree.topLevelItem(index) for index in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            if item.childCount():
+                if not item.isExpanded():
+                    return False
+                stack.extend(item.child(index) for index in range(item.childCount()))
+        return True
+
+    def _toggle_toc_folding(self):
+        if self._toc_fully_expanded():
+            self.tree.collapseAll()
+        else:
+            self.tree.expandAll()
+        self._update_toc_fold_button()
+
+    def _update_toc_fold_button(self):
+        expanded = self._toc_fully_expanded()
+        self.toc_fold_button.set_icon_name("fold-vertical" if expanded else "unfold-vertical")
+        self.toc_fold_button.setToolTip("全部摺疊" if expanded else "全部展開")
 
     def _toggle_side_panel(self, panel: QWidget):
         self._set_active_side_panel(None if panel.isVisible() else panel)
