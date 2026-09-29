@@ -186,6 +186,9 @@ def weak_candidate_to_user_rule(candidate):
 
 # 章號裡把 0 打成英文字母 o（「第2oo章」、「第1O5章」）：至少有一個真的數字才換，
 # 單獨的「第o章」不算。
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+# 「第.1808章」：章號前面插了句點（防轉載），辨識時先拿掉
+_LEADING_DOT = re.compile(r"(?<=第)(\s*)[.．]\s*(?=[0-9０-９])")
 _OCR_ZERO = re.compile(r"(?<=第)(\s*)([0-9][0-9oO]*[oO][0-9oO]*)(?=\s*[章回節节])")
 
 
@@ -212,6 +215,8 @@ def chapter_range_end(text):
 def parse_lv2(line):
     # 自動辨識只收正規格式（第N章／回／節…、番外）；英文 Chapter N 是「自訂章節規則」的常用格式。
     # COMBO_LV2_NUM_REGEX 給連續編號、保留標題間隔這些「已經確定是標題」之後的處理使用。
+    if "." in line or "．" in line:
+        line = _LEADING_DOT.sub(lambda match: match.group(1), line)
     if "o" in line or "O" in line:
         line = _OCR_ZERO.sub(lambda match: match.group(1) + match.group(2).replace("o", "0").replace("O", "0"), line)
     for regex, prefix in ((COMBO_LV2_REGEX, "第"), (COMBO_LV2_EXTRA_REGEX, "番外")):
@@ -637,8 +642,18 @@ def ten_as_zero_reading(number_text):
     return int(chinese_to_arabic(text[:-2])) * 10 + int(chinese_to_arabic(text[-1]))
 
 
+_NOISE_DOTS = re.compile(r"[.．]")
+
+
 def resolve_chapter_number(number, number_text, previous):
-    """號碼有兩種讀法時，選跟前一章（previous）接得比較上的那個。"""
+    """號碼有兩種讀法時，選跟前一章（previous）接得比較上的那個。
+
+    網站防轉載會在章號裡插句點（「第1.817章」）：拿掉句點剛好接上前一章（第 1816 章）才當成干擾，
+    其他的小數章（「第1.5章」）照舊。"""
+    if previous and number_text and not float(number).is_integer():
+        digits = _NOISE_DOTS.sub("", number_text.strip()).translate(_FULLWIDTH_DIGITS)
+        if digits.isdigit() and int(digits) == previous + 1:
+            return float(int(digits))
     alternative = ten_as_zero_reading(number_text)
     if alternative is None or not previous:
         return number
