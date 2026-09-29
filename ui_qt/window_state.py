@@ -216,14 +216,11 @@ class WindowStateMixin:
             self.metadata_bar.toggle_button.setChecked(True)
         self.toc_compact_mode = bool(state.get("toc_compact_mode"))
         self.toc_compact_button.setChecked(self.toc_compact_mode)
-        # 排版設定卡片就是一鍵排版的設定。舊版的兩組設定（卡片上暫時的 format_options、按「保存到一鍵排版」
-        # 存的 one_click_options）不再用：有存過一鍵排版組合的照那組擺好卡片，否則用內建的常用組合。
+        # 排版設定卡片就是一鍵排版的設定：沒存過就用內建的常用組合
         if isinstance(state.get("one_click_format"), dict):
             self.options_panel.restore_options_state(state["one_click_format"])
         else:
-            self.options_panel.set_options(self._default_one_click_options(state.get("one_click_options")))
-        for old_key in ("format_options", "one_click_options"):
-            state.pop(old_key, None)
+            self.options_panel.set_options(self._default_one_click_options())
         mode = state.get("missing_mode")
         if isinstance(mode, str) and self.chapter_panel.missing_mode_combo.findText(mode) >= 0:
             i18n.set_combo_value(self.chapter_panel.missing_mode_combo, mode)
@@ -264,15 +261,10 @@ class WindowStateMixin:
         levels = state.get("mark_confidence")
         if isinstance(levels, list):
             self.review_bar.set_mark_confidence(set(levels))
-        # 逐筆檢查要看的類型；舊版在重複段落分頁打開「標在本文上」的，照舊把重複段落算進去。
-        # 本文字色只在逐筆檢查時顯示（開程式時不會自己開始），舊版的 mark_colors 不再用。
+        # 逐筆檢查要看的類型（本文字色只在逐筆檢查時顯示，開程式時不會自己開始）
         types = state.get("review_types")
         if isinstance(types, list):
             self.review_bar.set_review_types(set(types))
-        elif state.get("repeat_marking"):
-            self.review_bar.set_review_types(self.review_bar.review_types() | {"repeat"})
-        for old_key in ("mark_colors", "repeat_marking"):
-            state.pop(old_key, None)
         # 還原過程中各項會在狀態列留下訊息，最後統一改回來。
         self._show_status("準備就緒")
 

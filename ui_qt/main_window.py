@@ -14,7 +14,6 @@ _restore_document_step），輸入文字時用計時器合併成一步，不是�
 """
 
 import bisect
-import dataclasses
 import os
 import sys
 import time
@@ -81,7 +80,7 @@ from .old_files_dialog import OldFilesDialog
 from .options_panel import OptionsPanel, describe_options
 from .review_bar import ReviewBar
 from .text_positions import PositionMap
-from .theme import DARK, DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
+from .theme import DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
     AppWidgetPolisher, Card, ClickableLabel, DropOverlay, Editor, IconButton, IconTextButton, LanguageToggle,
     ElidedLabel, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, VDivider, dropped_paths, make_card_header,
@@ -105,10 +104,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
     def tokens(self):
         """目前主題的配色。"""
         return theme_tokens(self.theme_name)
-
-    @property
-    def dark_mode(self) -> bool:
-        return self.tokens.is_dark
 
     def __init__(self):
         super().__init__()
@@ -188,9 +183,6 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         # 主題：選過的記在 ui_state.json；第一次開啟用簡約藍，不跟系統設定走。
         self.theme_name = DEFAULT_THEME
-        # 快速切換（toggle_theme）在「最近用過的淺色系」與「深色系」之間來回。
-        self._last_light_theme = DEFAULT_THEME
-        self._last_dark_theme = DARK.name
         self._icon_buttons: list[IconButton] = []
         self._panel_toggle_buttons: list[IconTextButton] = []
         self._primary_buttons: list[IconTextButton] = []
@@ -712,16 +704,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if name not in THEMES:
             return
         self.theme_name = name
-        if self.tokens.is_dark:
-            self._last_dark_theme = name
-        else:
-            self._last_light_theme = name
         self._apply_theme()
-
-    @action
-    def toggle_theme(self):
-        """在最近用過的淺色系與深色系主題之間切換。"""
-        self.set_theme(self._last_light_theme if self.tokens.is_dark else self._last_dark_theme)
 
     def _apply_theme(self):
         tokens = self.tokens
@@ -2781,17 +2764,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                 self._restore_state(before)
             self._show_status("已取消一鍵排版")
 
-    def _default_one_click_options(self, saved=None) -> FormatOptions:
-        """還沒有自己的一鍵排版設定時用的組合：舊版按「保存到一鍵排版」存下來的（saved），否則是內建的
-        段落之間不空行、標題前兩行後一行、段首兩個全形空格、編號間隔用半形空格。"""
-        if isinstance(saved, dict):
-            # 合併下行標題不在一鍵排版做（在章節管理預覽再套用）：存下來的組合裡有 merge_title 也不用
-            known = {field.name for field in dataclasses.fields(FormatOptions)} - {"structure", "merge_title"}
-            values = {key: value for key, value in saved.items() if key in known}
-            try:
-                return FormatOptions(**values, structure=self.structure_mode)
-            except TypeError:
-                pass
+    def _default_one_click_options(self) -> FormatOptions:
+        """還沒有自己的一鍵排版設定時用的常用組合：段落之間不空行、標題前兩行後一行、段首兩個全形空格、
+        編號間隔用半形空格。"""
         return FormatOptions(
             remove_extra_empty=True,
             add_empty=True,

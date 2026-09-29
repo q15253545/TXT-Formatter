@@ -356,9 +356,6 @@ class _LevelPage(QWidget):
         entries = self.entries()
         return entries[row] if 0 <= row < len(entries) else None
 
-    def is_builtin(self) -> bool:
-        return self.combo_list.currentRow() <= 0
-
     def blocks(self, rule=None) -> dict:
         if rule is None:
             return _builtin_blocks(self.level, self._dialog.disabled)
@@ -779,7 +776,7 @@ class RecognitionDialog(QDialog):
 
         length_row = QHBoxLayout()
         length_row.setSpacing(10)
-        self.title_length_slider, self.title_length_spin = slider_with_spin(
+        _length_slider, self.title_length_spin = slider_with_spin(
             length_row, "標題最長", (10, 200), self._max_title_length, " 字")
         self.title_length_spin.valueChanged.connect(self._on_check_changed)
         root.addLayout(length_row)

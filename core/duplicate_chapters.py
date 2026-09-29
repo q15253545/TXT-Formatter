@@ -251,36 +251,11 @@ def find_similar_groups(lines, title_rows, adjacent_groups=()) -> list:
     return groups
 
 
-def merge_duplicate_groups(lines, groups) -> list:
-    """把每一組合併成一章：第一個標題改成 keep_title，其餘標題行刪掉。
-    刪掉的標題前後都是空行時，順便拿掉一個空行，不留下連續兩個空行。"""
-    result = list(lines)
-    replace = {}
-    delete = set()
-    for group in groups:
-        first = group["rows"][0]
-        original = result[first]
-        # a marker on any of the merged headings ([::] on the second copy) stays on the kept one: it is the
-        # user's "this is a heading", which must not disappear with the deleted line
-        markers = [_parse_title(result[row])[1] for row in group["rows"]]
-        marker = next((kind for kind in markers if kind in _MARKER_TEXT), "")
-        indent = original[:len(original) - len(original.lstrip())]
-        replace[first] = indent + group["keep_title"] + _MARKER_TEXT.get(marker, "")
-        delete.update(group["rows"][1:])
-    for row, text in replace.items():
-        result[row] = text
-    for row in sorted(delete, reverse=True):
-        del result[row]
-        if 0 < row < len(result) and not result[row].strip() and not result[row - 1].strip():
-            del result[row]
-    return result
-
-
 def apply_keep_choices(lines, choices) -> list:
     """choices：[(group, keep)]，keep 是跟 group["rows"] 對齊的 bool。一組全部保留或全部不保留：不動。
 
-    組裡有重貼標題：沒保留的只刪標題行，正文全部併在一起（跟 merge_duplicate_groups 一樣，
-    標題在第一個標題的位置、文字用留下的那個）。沒有重貼標題（每章都有正文）：
+    組裡有重貼標題：沒保留的只刪標題行，正文全部併在一起
+    （標題在第一個標題的位置、文字用留下的那個）。沒有重貼標題（每章都有正文）：
     沒保留的章標題連正文整章刪除。"""
     result = list(lines)
     replace = {}

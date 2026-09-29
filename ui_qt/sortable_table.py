@@ -7,7 +7,7 @@
 回得去。
 
 排序後「第幾列」就不再等於「第幾筆資料」，所以每一列的每一格都存著它在
-原始清單裡的索引（INDEX_ROLE）；呼叫端一律用 data_index()／row_of_index()
+原始清單裡的索引（INDEX_ROLE）；呼叫端一律用 data_index()
 換算，不能再直接拿 row 去索引資料。
 
 不用 QTableWidget.setSortingEnabled(True)：開著它的時候，程式每填一格表格
@@ -352,10 +352,3 @@ def resort(table: QTableWidget):
 def data_index(table: QTableWidget, row: int) -> int:
     item = table.item(row, 0)
     return int(item.data(INDEX_ROLE)) if item is not None and item.data(INDEX_ROLE) is not None else row
-
-
-def row_of_index(table: QTableWidget, index: int) -> int:
-    for row in range(table.rowCount()):
-        if data_index(table, row) == index:
-            return row
-    return -1

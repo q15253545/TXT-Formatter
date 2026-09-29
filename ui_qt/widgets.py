@@ -1637,11 +1637,6 @@ class ChoiceMenuButton(QPushButton):
     def checked(self) -> set:
         return {key for key, action in self._actions.items() if action.isChecked()}
 
-    def set_checked(self, keys):
-        for key, action in self._actions.items():
-            action.setChecked(key in keys)
-        self._refresh()
-
     def _on_all(self):
         everything = len(self.checked()) < len(self._actions)
         for action in self._actions.values():

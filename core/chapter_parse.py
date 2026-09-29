@@ -314,14 +314,6 @@ def build_title_tail_regex(allowed_chars=DEFAULT_TITLE_TAIL_ALLOWED, extra_chars
     return re.compile(f"(?:{'|'.join(parts)})\\s*$")
 
 
-def title_tail_group(text: str, extra_chars: str = ""):
-    """標題最後一個字屬於哪一組（回傳顯示用的符號）；不是清單上的標點就回傳 None。"""
-    text = text.rstrip()
-    if not text:
-        return None
-    return next((symbol for symbol, chars, _name in title_tail_groups(extra_chars) if text[-1] in chars), None)
-
-
 class TitleCheck:
     """標題的基本限制：最長幾個字、結尾不能是哪些標點。可以直接當成「標題結尾」的正則傳下去
     （有 search），各處判斷長度時用 title_length_limit() 取上限。"""

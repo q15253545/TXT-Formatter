@@ -23,7 +23,6 @@ class Tokens:
     text_muted: str      # 次要文字／說明文字
     text_faint: str      # 佔位文字、停用狀態
     accent: str          # 強調色（主要按鈕、勾選框、開關、焦點框）
-    accent_hover: str
     accent_text: str     # 強調色按鈕上的文字顏色
     selection_bg: str     # 目錄樹、表格、清單的選取列
     shadow: str           # 卡片陰影顏色（含透明度）
@@ -75,7 +74,7 @@ SIMPLE_BLUE = Tokens(
     name="simple_blue", label="簡約藍", is_dark=False,
     bg="#F5F7FA", surface="#FFFFFF", surface_hover="#F6F9FF", surface_active="#F1F5FF", border="#E2E7EE",
     text="#243044", text_muted="#647084", text_faint="#A9B1BE",
-    accent="#3869D8", accent_hover="#315CBE", accent_text="#FFFFFF",
+    accent="#3869D8", accent_text="#FFFFFF",
     selection_bg="#EDF3FF", shadow="rgba(36, 48, 68, 40)", icon="#243044", icon_hover="#3869D8",
     warn_bg="#FBE7E7", warn_text="#B4383C", diff_text="#D92D20", ok_bg="#E4F4EA", ok_text="#1F7A4C",
     find_match_bg="#DCE8FC", find_current_bg="#B6CEF5", jump_bg="#EAF1FD",
@@ -95,7 +94,7 @@ SIMPLE_WHITE = Tokens(
     name="simple_white", label="簡約白", is_dark=False,
     bg="#F9F9F9", surface="#FFFFFF", surface_hover="#F3F3F3", surface_active="#ECECEC", border="#E5E5E5",
     text="#0D0D0D", text_muted="#5D5D5D", text_faint="#A3A3A3",
-    accent="#0D0D0D", accent_hover="#333333", accent_text="#FFFFFF",
+    accent="#0D0D0D", accent_text="#FFFFFF",
     selection_bg="#ECECEC", shadow="rgba(0, 0, 0, 28)", icon="#5D5D5D", icon_hover="#0D0D0D",
     warn_bg="#FDECEC", warn_text="#C0362C", diff_text="#D92D20", ok_bg="#E7F5EC", ok_text="#1F7A4C",
     find_match_bg="#E1EBF7", find_current_bg="#C3D8F2", jump_bg="#EEF3FA",
@@ -115,7 +114,7 @@ LIGHT_BROWN = Tokens(
     name="light_brown", label="淺棕色", is_dark=False,
     bg="#F1E7D2", surface="#FBF4E4", surface_hover="#F6EDDA", surface_active="#EADDC5", border="#E4DCC9",
     text="#4A4130", text_muted="#8C826C", text_faint="#B5AB95",
-    accent="#0284C8", accent_hover="#0373AE", accent_text="#FFFFFF",
+    accent="#0284C8", accent_text="#FFFFFF",
     selection_bg="#F0E5CC", shadow="rgba(74, 65, 48, 30)", icon="#837961", icon_hover="#8C6A3F",
     warn_bg="#F6DCCF", warn_text="#A8432A", diff_text="#C8341F", ok_bg="#DDEBD5", ok_text="#3F7A3A",
     find_match_bg="#C9DDF3", find_current_bg="#8EBDF0", jump_bg="#DCEAF7",
@@ -135,7 +134,7 @@ DARK = Tokens(
     name="dark", label="深色", is_dark=True,
     bg="#1C1714", surface="#261F1B", surface_hover="#302824", surface_active="#3A312C", border="#3A322D",
     text="#EDE4DB", text_muted="#A39890", text_faint="#6F655E",
-    accent="#A85A48", accent_hover="#BA6A56", accent_text="#FFF4EE",
+    accent="#A85A48", accent_text="#FFF4EE",
     selection_bg="#3F3530", shadow="rgba(0, 0, 0, 140)", icon="#BDB0A6", icon_hover="#A85A48",
     warn_bg="#4A2622", warn_text="#F2A493", diff_text="#FF8F73", ok_bg="#27331F", ok_text="#A8CF8E",
     find_match_bg="#4E2B25", find_current_bg="#8A3B30", jump_bg="#3E211D",
@@ -155,7 +154,7 @@ BLACK = Tokens(
     name="black", label="純黑", is_dark=True,
     bg="#0A0A0A", surface="#151515", surface_hover="#2E2E2E", surface_active="#333333", border="#262626",
     text="#C8C8C8", text_muted="#7A7A7A", text_faint="#555555",
-    accent="#7A7A7A", accent_hover="#8A8A8A", accent_text="#FFFFFF",
+    accent="#7A7A7A", accent_text="#FFFFFF",
     selection_bg="#303030", shadow="rgba(0, 0, 0, 200)", icon="#A8A8A8", icon_hover="#F0F0F0",
     warn_bg="#3A1A1C", warn_text="#FF8A8F", diff_text="#FF6B72", ok_bg="#16241A", ok_text="#8CCB9A",
     find_match_bg="#2A2A2A", find_current_bg="#3E3E3E", jump_bg="#222222",

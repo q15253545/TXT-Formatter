@@ -42,11 +42,6 @@ def warm_other_caches(lines):
 WARM_PHASES = (warm_ad_caches, warm_other_caches)
 
 
-def warm_line_caches(lines):
-    for phase in WARM_PHASES:
-        phase(lines)
-
-
 def freeze_line_caches():
     """整本算完後把現有的物件移出垃圾回收的掃描範圍。快取裡是十幾萬個字串、tuple，
     每次完整回收都要全部掃一遍（大檔約 0.1 秒），剛好碰上開視窗、打字就多卡一下；

@@ -250,7 +250,6 @@ class AdScanDialog(QDialog):
         self._raw_lines = list(raw_lines)
         self._title_rows = set(title_rows) if title_rows is not None else None
         self._selected_ranges = list(selected_ranges or [])
-        self._selected_count = selected_count
         self.result_lines: list | None = None
         self.result_summary = (0, 0)          # （刪掉幾行, 換回網頁字元碼的行數）
 
@@ -337,10 +336,10 @@ class AdScanDialog(QDialog):
         # 兩個設定同一種樣子：標籤、拉桿、可以直接輸入也有上下箭頭的數字框（單位寫在框裡）。
         controls = QHBoxLayout()
         controls.setSpacing(10)
-        self.repeat_length_slider, self.repeat_length_input = slider_with_spin(
+        self.repeat_length_slider, _length_input = slider_with_spin(
             controls, "最短長度", REPEAT_LENGTH_RANGE, min_length, " 字")
         controls.addSpacing(16)
-        self.repeat_count_slider, self.repeat_count_spin = slider_with_spin(
+        self.repeat_count_slider, _count_input = slider_with_spin(
             controls, "至少重複", REPEAT_COUNT_RANGE, min_count, " 次")
         layout.addLayout(controls)
 

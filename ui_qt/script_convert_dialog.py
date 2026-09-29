@@ -24,7 +24,6 @@ class ScriptConvertDialog(QDialog):
         self.setWindowTitle("繁簡轉換")
         self.setMinimumWidth(480)
         keep_on_screen(self)
-        self._selected_count = selected_count
 
         # 詞表的文字框自己吃掉 Enter（換行），其他地方按 Enter 照舊是「開始轉換」
         outer, footer = dialog_frame(self, enter_submits=True, intro="本文轉成繁體或簡體，可以只轉選取的章節。")
@@ -44,10 +43,9 @@ class ScriptConvertDialog(QDialog):
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(BODY_SCRIPT_CHOICES)
-        # 讀寫都用原始選項值（簡體介面顯示的是翻譯過的文字）；存成翻譯後文字的舊設定也認得。
-        saved = next((choice for choice in BODY_SCRIPT_CHOICES if mode in (choice, i18n.T(choice))), None)
-        if saved is not None:
-            i18n.set_combo_value(self.mode_combo, saved)
+        # 讀寫都用原始選項值（簡體介面顯示的是翻譯過的文字）
+        if mode in BODY_SCRIPT_CHOICES:
+            i18n.set_combo_value(self.mode_combo, mode)
         self.mode_combo.currentIndexChanged.connect(lambda _index: self._update_sample())
         root.addWidget(self.mode_combo)
 

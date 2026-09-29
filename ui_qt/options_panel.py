@@ -258,7 +258,7 @@ class OptionsPanel(QWidget):
                 i18n.set_combo_value(combo, state[key])
 
     def set_options(self, options: FormatOptions):
-        """照一組排版設定擺好開關與下拉（還原、改用舊版存下來的一鍵排版組合）。"""
+        """照一組排版設定擺好開關與下拉（沒存過設定時的常用組合）。"""
         for field, checkbox in self._checkboxes.items():
             checkbox.setChecked(bool(getattr(options, field)))
         punct = "轉全形" if options.normalize_punct else "轉半形" if options.halfwidth_punct else "不轉換"

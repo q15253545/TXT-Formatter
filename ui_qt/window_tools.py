@@ -24,7 +24,7 @@ from core.chapter_update import (
 from core.docx_reader import is_docx
 from core.epub_reader import is_epub
 from core.encoding import smart_detect_encoding, strip_invisible_chars
-from core.quote_check import PROBLEM_LABELS, QUOTE_PROBLEM_LABELS
+from core.quote_check import PROBLEM_LABELS
 from core.script_convert import (
     DEFAULT_VOCABULARY, convert_with_word_lists, opencc_available, parse_keep_words, parse_vocabulary,
 )
@@ -229,18 +229,10 @@ class ToolWindowsMixin:
         self._show_status(f"已刪除未保留的章節（共 {removed} 行），可以按 Ctrl+Z 復原")
 
     def _saved_ad_categories(self) -> set:
-        """非正文內容視窗「廣告與網頁字元」分頁記住的偵測類型（不含重複段落，那在自己的分頁）。
-
-        記住的是「上次勾了哪些」；之後才新增的類型上次根本還沒有，不能當成
-        使用者取消了它——那些照預設勾起來。"""
+        """非正文內容視窗「廣告與網頁字元」分頁記住的偵測類型（不含重複段落，那在自己的分頁）；沒記過就全部。"""
         own = {key for key in AD_ONLY_CATEGORIES if key != "repeat"}
         saved = self._ui_state.get("ad_categories")
-        if not isinstance(saved, list):
-            return own
-        known = self._ui_state.get("ad_categories_known")
-        if not isinstance(known, list):
-            known = list(AD_CATEGORY_LABELS)
-        return (set(saved) | (set(AD_CATEGORY_LABELS) - set(known))) & own
+        return set(saved) & own if isinstance(saved, list) else own
 
     def _saved_note_categories(self) -> set:
         saved = self._ui_state.get("note_categories")
@@ -285,7 +277,6 @@ class ToolWindowsMixin:
 
         def on_closed(dialog, _accepted):
             self._ui_state["ad_categories"] = sorted(dialog.enabled_categories())
-            self._ui_state["ad_categories_known"] = sorted(AD_CATEGORY_LABELS)
             self._ui_state["note_categories"] = sorted(dialog.note_categories())
             self._ui_state["repeat_settings"] = list(dialog.repeat_settings())
             if self.review_bar.marking():
@@ -564,13 +555,11 @@ class ToolWindowsMixin:
         self._sync_raw_lines()
         self._ensure_toc_current()
         spans = self._selected_section_spans()
-        # 記的是「關掉了哪些」：之後新增的檢查項目照預設（QUOTE_DEFAULT_OFF 以外都開）。
-        # 星號遮字只能列出、書裡常有上百處，預設關著；使用者打開過之後照記住的。
-        disabled = self._ui_state.get("quote_disabled_kinds")
-        seen = self._ui_state.get("quote_seen_kinds")
-        seen = set(seen) if isinstance(seen, list) else set(QUOTE_PROBLEM_LABELS)
-        enabled = (set(PROBLEM_LABELS) - set(disabled if isinstance(disabled, list) else [])
-                   - (QUOTE_DEFAULT_OFF - seen))
+        # 記住勾了哪些；沒記過時星號遮字關著（只能列出、書裡常有上百處），其餘都開。
+        # 「分隔線不一致」不是勾選框（由視窗裡的下拉決定），一律開著。
+        saved = self._ui_state.get("quote_kinds")
+        enabled = ((set(saved) & set(PROBLEM_LABELS) if isinstance(saved, list)
+                    else set(PROBLEM_LABELS) - QUOTE_DEFAULT_OFF) | {"separator_style"})
 
         def create():
             dialog = QuoteCheckDialog(self.raw_lines, self, selected_ranges=spans,
@@ -586,10 +575,7 @@ class ToolWindowsMixin:
             dialog.reload(self.raw_lines, ranges, count, title_rows=set(self.chapter_raw_map.values()))
 
         def on_closed(dialog, _accepted):
-            # 「分隔線不一致」不是勾選框（由視窗裡的下拉決定），不記
-            self._ui_state["quote_disabled_kinds"] = sorted(
-                set(PROBLEM_LABELS) - dialog.enabled_kinds() - {"separator_style"})
-            self._ui_state["quote_seen_kinds"] = sorted(PROBLEM_LABELS)
+            self._ui_state["quote_kinds"] = sorted(dialog.enabled_kinds())
 
         self._open_tool_dialog("quote_check", create, reload, on_closed)
 
