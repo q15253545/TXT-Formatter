@@ -823,7 +823,7 @@ class Editor(QPlainTextEdit):
     # Ctrl＋滾輪調整預覽字級：+1 放大、-1 縮小；Ctrl+0 送 0 代表回到 100%。
     zoom_requested = Signal(int)
     # 把 TXT 檔拖進本文：交給主視窗開檔，而不是把檔案路徑當文字插進本文。
-    file_dropped = Signal(str)
+    file_dropped = Signal(list)         # 拖進來的檔案（一次拖好幾個檔時是合併）
     file_drag_entered = Signal()        # 拖著檔案進到本文：開著檔案時主視窗會蓋上放置區
 
     def __init__(self, parent=None):
@@ -868,7 +868,7 @@ class Editor(QPlainTextEdit):
         files = self._dropped_files(event)
         if files:
             event.acceptProposedAction()
-            self.file_dropped.emit(files[0])
+            self.file_dropped.emit(files)
             return
         super().dropEvent(event)
 
@@ -1479,7 +1479,7 @@ class DropOverlay(QWidget):
     """拖檔案進視窗時蓋在上面的放置區：每一區一個動作，放在哪一區就做哪一件，不用再跳一個詢問視窗。
     拖出視窗（或按 Esc 取消拖曳）就收起來。zones：[(代號, 標題, 說明)]，由左到右排。"""
 
-    dropped = Signal(str, str)        # 放在哪一區（代號）、檔案路徑
+    dropped = Signal(str, list)       # 放在哪一區（代號）、檔案路徑（一次拖好幾個檔時不只一個）
 
     def __init__(self, zones, parent=None):
         super().__init__(parent)
@@ -1550,7 +1550,7 @@ class DropOverlay(QWidget):
         self.hide()
         if paths and key:
             event.acceptProposedAction()
-            self.dropped.emit(key, paths[0])
+            self.dropped.emit(key, paths)
 
 
 class ScrollEndButtons(QFrame):

@@ -46,6 +46,7 @@ from core.collection import (
 from core.docx_reader import DocxError, is_docx, read_docx_text
 from core.epub_reader import EpubError, is_epub, read_epub
 from core.epub_writer import EpubSection, build_epub
+from core.file_merge import merge_texts, natural_key
 from core.chapter_update import dominant_script
 from core.encoding import detect_line_ending, looks_misdecoded, smart_detect_encoding, strip_invisible_chars
 from core.file_io import read_text, read_text_lossy, write_text_atomic
@@ -70,6 +71,7 @@ from .help_dialog import HelpDialog
 from .content_panel import ContentPanel
 from .chapter_panel import ChapterPanel
 from .chapter_order_dialog import ChapterOrderDialog
+from .merge_files_dialog import MergeFilesDialog
 from .find_bar import FindBar
 from .filename_dialog import FilenameDialog
 from .metadata_bar import ENCODING_CODECS, MetadataBar
@@ -583,7 +585,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             open_group, "folder-open", "選擇檔案", "", self.open_file, "Ctrl+O", primary=True)
         self.open_button.setProperty("split", "left")
         self.open_menu_button = self._add_text_button(
-            open_group, "chevron-down", "", "開啟檔案、接續更新章節", self._show_open_menu, None, primary=True)
+            open_group, "chevron-down", "", "開啟檔案、接續更新章節、合併多個檔案", self._show_open_menu, None,
+            primary=True)
         self.open_menu_button.setProperty("split", "right")
         layout.addLayout(open_group)
         self.open_menu = QMenu(self)
@@ -591,6 +594,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.open_file_action.triggered.connect(lambda: self.open_file())
         self.update_chapters_action = self.open_menu.addAction("接續更新章節…")
         self.update_chapters_action.triggered.connect(lambda: self.import_chapter_update())
+        self.merge_files_action = self.open_menu.addAction("合併多個檔案…")
+        self.merge_files_action.triggered.connect(lambda: self.merge_files())
         self.one_click_button = self._add_text_button(
             layout, "wand-sparkles", "一鍵排版", "", self.one_click_format, None, primary=True)
         # 左邊是動作（開檔、一鍵排版），右邊是開關側邊卡片：中間用一條直線分開
@@ -797,7 +802,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             return True
         box = QMessageBox(QMessageBox.Icon.Warning, i18n.T("尚未匯出"),
                           i18n.T("目前的修改還沒有匯出，繼續下去會遺失。要先匯出嗎？"), parent=self)
-        save_button = box.addButton(i18n.T("匯出 TXT"), QMessageBox.ButtonRole.AcceptRole)
+        save_button = box.addButton(i18n.T(f"匯出 {self.export_format}"), QMessageBox.ButtonRole.AcceptRole)
         discard_button = box.addButton(i18n.T("不匯出，直接繼續"), QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(i18n.T("取消"), QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(save_button)
@@ -870,13 +875,17 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         return folder if isinstance(folder, str) and folder and os.path.isdir(folder) else ""
 
     @action
-    def _open_dropped_file(self, path: str):
-        """拖曳到本文卡片（還沒開檔、放置區沒有出現時）：跟拖到視窗其他地方一樣。"""
-        if not openable(path):
-            dialogs.error(self, "無法載入", "請拖曳 TXT 或 Word（.docx）檔案。")
+    def _open_dropped_file(self, paths: list):
+        """拖曳到本文卡片（還沒開檔、放置區沒有出現時）：跟拖到視窗其他地方一樣。一次好幾個檔就是合併。"""
+        usable = [path for path in paths if openable(path)]
+        if not usable:
+            dialogs.error(self, "無法載入", "請拖曳 TXT、Word（.docx）或 EPUB 檔案。")
+            return
+        if len(usable) > 1:
+            self.merge_files(usable)
             return
         if self._confirm_discard_changes():
-            self.load_file_path(path)
+            self.load_file_path(usable[0])
 
     def _has_document(self) -> bool:
         return not self.editor.document().isEmpty()
@@ -887,13 +896,59 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             self.drop_overlay.cover()
 
     @action
-    def _on_overlay_dropped(self, zone: str, path: str):
-        if not openable(path):
-            dialogs.error(self, "無法載入", "請拖曳 TXT 或 Word（.docx）檔案。")
+    def _on_overlay_dropped(self, zone: str, paths: list):
+        usable = [path for path in paths if openable(path)]
+        if not usable:
+            dialogs.error(self, "無法載入", "請拖曳 TXT、Word（.docx）或 EPUB 檔案。")
         elif zone == "update":
-            self.import_chapter_update(path)
+            if len(usable) > 1:
+                dialogs.info(self, "一次一個檔案", "接續更新章節一次比對一個檔案；好幾個章節檔請先合併成一份再比對。")
+                return
+            self.import_chapter_update(usable[0])
+        elif len(usable) > 1:
+            self.merge_files(usable)
         elif self._confirm_discard_changes():
-            self.load_file_path(path)
+            self.load_file_path(usable[0])
+
+    @action
+    def merge_files(self, paths: list | None = None):
+        """合併多個檔案（每章一個檔）成一份新的本文：照檔名裡的數字排序，可以在視窗裡調整（core/file_merge.py）。"""
+        if paths is None:
+            with native_dialog():
+                paths, _ = QFileDialog.getOpenFileNames(
+                    self, i18n.T("合併多個檔案"), self._remembered_dir("last_open_dir"), i18n.T(OPEN_FILE_FILTER))
+            if not paths:
+                return
+            self._ui_state["last_open_dir"] = os.path.dirname(paths[0])
+        paths = sorted((path for path in paths if openable(path)), key=natural_key)
+        if len(paths) < 2:
+            if paths and self._confirm_discard_changes():
+                self.load_file_path(paths[0])
+            return
+        parts = []
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for path in paths:
+                encoding = None if is_docx(path) or is_epub(path) else smart_detect_encoding(path)
+                try:
+                    content, _damaged, _encoding = self._read_document(path, encoding)
+                except OSError as error:
+                    dialogs.error(self, "讀取失敗", f"無法開啟檔案：\n{path}\n\n{error}")
+                    return
+                if content is None:
+                    return
+                content, _boms, _zero_width = strip_invisible_chars(content)
+                parts.append((path, content))
+        finally:
+            QApplication.restoreOverrideCursor()
+        dialog = MergeFilesDialog(parts, bool(self._ui_state.get("merge_title_from_name", True)), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not self._confirm_discard_changes():
+            return
+        self._ui_state["merge_title_from_name"] = dialog.result_title_from_name
+        text = merge_texts(dialog.result_parts, dialog.result_title_from_name)
+        folder = os.path.basename(os.path.dirname(os.path.abspath(dialog.result_parts[0][0])))
+        title = extract_filename_metadata(folder)[0] if folder else ""
+        self.load_file_path("", merged=(text, i18n.T(f"合併 {len(parts)} 個檔案"), title))
 
     def _show_open_menu(self):
         self.update_chapters_action.setEnabled(self._has_document())
@@ -908,23 +963,29 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         paths = dropped_paths(event)
         if paths:
             event.acceptProposedAction()
-            self._open_dropped_file(paths[0])
+            self._open_dropped_file(paths)
 
     @action
-    def load_file_path(self, path: str, encoding: str | None = None):
+    def load_file_path(self, path: str, encoding: str | None = None, merged: tuple | None = None):
+        """merged＝（合併好的文字, 顯示的名稱, 書名）：合併多個檔案（merge_files），path 傳空字串。"""
         word = is_docx(path)
         epub = is_epub(path)
         packaged = word or epub       # 沒有文字編碼可選（讀出來就是 Unicode）
-        encoding = (WORD_ENCODING if word else EPUB_ENCODING if epub else
-                    encoding or smart_detect_encoding(path))
-        try:
-            content, damaged, encoding = self._read_document(path, encoding)
-        except OSError as error:
-            dialogs.error(self, "讀取失敗", f"無法開啟檔案：\n{path}\n\n{error}")
-            return
-        if content is None:
-            return
-        content, removed_boms, removed_zero_width = strip_invisible_chars(content)
+        if merged is not None:
+            # 每個檔讀的時候已經各自解碼、移除過 BOM 與零寬字元
+            content, damaged, encoding = merged[0], 0, "utf-8"
+            removed_boms = removed_zero_width = 0
+        else:
+            encoding = (WORD_ENCODING if word else EPUB_ENCODING if epub else
+                        encoding or smart_detect_encoding(path))
+            try:
+                content, damaged, encoding = self._read_document(path, encoding)
+            except OSError as error:
+                dialogs.error(self, "讀取失敗", f"無法開啟檔案：\n{path}\n\n{error}")
+                return
+            if content is None:
+                return
+            content, removed_boms, removed_zero_width = strip_invisible_chars(content)
 
         self.close_find_bar()
         self._drop_line_caches()
@@ -958,19 +1019,23 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
         self._mark_synced(content)
         self._rebuild_toc()
-        self._autofill_book_metadata()
+        if merged is not None:
+            self.metadata_bar.set_title_if_empty(merged[2])
+        else:
+            self._autofill_book_metadata()
         if epub:
             self._fill_epub_metadata()
         try:
             size_mb = os.path.getsize(path) / (1024 * 1024)
-        except OSError:      # 讀完之後檔案被移走或改名
+        except OSError:      # 讀完之後檔案被移走或改名（合併的沒有檔案）
             size_mb = len(content.encode("utf-8" if packaged else encoding, "replace")) / (1024 * 1024)
-        self.metadata_bar.set_filename(os.path.basename(path), f"{size_mb:.2f} MB")
+        display_name = merged[1] if merged is not None else os.path.basename(path)
+        self.metadata_bar.set_filename(display_name, f"{size_mb:.2f} MB")
         self.metadata_bar.set_encoding_badge(self.detected_encoding.upper())
         self._set_footer_encoding(
             self.detected_encoding.upper() if packaged else
-            f"{self.detected_encoding.upper()} · {detect_line_ending(path)}")
-        status = i18n.T("已載入：") + os.path.basename(path)
+            f"{self.detected_encoding.upper()} · {'LF' if merged is not None else detect_line_ending(path)}")
+        status = i18n.T("已載入：") + display_name
         if damaged:
             status += i18n.T(f"；有 {damaged} 個字元無法以 {encoding.upper()} 解碼（顯示為 �），存檔會永久遺失")
         if removed_boms:
@@ -981,14 +1046,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             status += i18n.T("；文字看起來像亂碼：編碼可能不對，在書籍資料的「讀取編碼」換一種")
         self._show_status(status, translated=True)
         log.info("載入 %s：%.2f MB、編碼 %s、%d 行、目錄 %d 項（推定卷 %d）、移除 BOM %d 個、零寬字元 %d 個",
-                 os.path.basename(path), size_mb, encoding, len(self.raw_lines), len(self.chapter_raw_map),
+                 display_name, size_mb, encoding, len(self.raw_lines), len(self.chapter_raw_map),
                  len(self.virtual_volume_items), removed_boms, removed_zero_width)
         self._set_document_actions_enabled(True)
         if self._pending_side_panel:
             self._open_pending_side_panel()
         self._checkpoint_document()   # 建立復原歷史的第一步（載入後的初始狀態）
-        self._document_dirty = False
-        self._saved_text_hash = hash(content)
+        # 合併出來的本文還沒有檔案：關閉前要提醒匯出
+        self._document_dirty = merged is not None
+        self._saved_text_hash = hash(content) if merged is None else None
         self._warm_scan_caches()
 
     def _warm_scan_caches(self):
