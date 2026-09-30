@@ -3,6 +3,11 @@
 把網路下載的純文字小說整理乾淨：自動辨識卷與章建立目錄、一鍵排版、找出廣告與作者的話、校對標點，
 再照書籍資料組出檔名匯出。Windows 版免安裝，介面可以切換繁體或簡體中文。
 
+> **English:** TXT Formatter is a Windows desktop tool for cleaning up Chinese web novels (TXT, Word .docx, EPUB):
+> it detects volumes and chapters to build a table of contents, formats the text in one click, finds ads and
+> author's notes, checks punctuation, converts between Traditional and Simplified Chinese (OpenCC), and exports TXT or
+> EPUB. No installation needed — download the zip from [Releases](../../releases). The interface is in Chinese.
+
 ![主畫面：一鍵排版後的本文與目錄，廣告那一行用字色標出](docs/screenshots/01-main.png)
 
 > 截圖中的小說《青雲劍錄》是示範用的自編內容。
