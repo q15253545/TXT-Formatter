@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import i18n
-from .widgets import Divider, IconButton, IconTextButton, VDivider
+from .widgets import Divider, IconButton, IconTextButton, MiddleElidedLabel, VDivider
 
 STRUCTURE_CHOICES = ["自動判斷", "單本小說", "多作品合集"]
 STATUS_CHOICES = ["未指定", "未完結", "已完結"]
@@ -40,7 +40,8 @@ class MetadataBar(QWidget):
 
         # 檔名要能反白複製（常常要拿去搜尋或改名）；大小另外放一個標籤，
         # 複製到的才會是乾淨的檔名。
-        self.filename_label = QLabel("尚未開啟檔案")
+        # 很長的檔名在中間省略（MiddleElidedLabel），不把右邊的大小、編碼、關閉檔案擠掉
+        self.filename_label = MiddleElidedLabel("尚未開啟檔案")
         # 檔名是內容，不跟著介面切換繁簡；沒開檔時的提示字另外處理。
         i18n.skip(self.filename_label)
         self._filename_placeholder = True
@@ -208,7 +209,8 @@ class MetadataBar(QWidget):
 
     def _show_filename_menu(self, pos):
         menu = QMenu(self)
-        selected = self.filename_label.selectedText()
+        # 省略過的檔名反白到的是畫面上的字（含「…」）：那時一律複製完整檔名
+        selected = "" if self.filename_label.is_elided() else self.filename_label.selectedText()
         copy_action = menu.addAction("複製" if selected else "複製檔名")
         copy_action.triggered.connect(
             lambda: QApplication.clipboard().setText(selected or self.filename_label.text()))

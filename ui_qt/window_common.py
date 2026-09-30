@@ -18,6 +18,7 @@ MIN_HISTORY_STEPS = 3
 # 輸入時多久沒有新的按鍵才視為一次「停頓」、存成一個復原步驟；
 # 不是每個按鍵都存一份，那樣復原歷史會被打字過程灌爆。
 TYPING_CHECKPOINT_DELAY_MS = 450
+SIDE_RAIL_GAP = 10                 # 左側圖示列跟卡片之間的距離（功能卡片開著時是 0：合成一組）
 AUTO_TOC_REFRESH_SECONDS = 0.15   # 重建目錄在這之內的書，打字停下來就自動更新目錄
 
 DEFAULT_STRUCTURE_MODE = "自動判斷"

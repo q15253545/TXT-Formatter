@@ -271,6 +271,16 @@ def build_stylesheet(t: Tokens, chevron_closed_path: str = "", chevron_open_path
         border: 1px solid {t.border};
         border-radius: 14px;
     }}
+    /* 功能卡片開著時，左側圖示列跟它合成一組：共用外圈的圓角，中間只剩卡片的左框線（main_window._join_side_card） */
+    #card[joinedRight="true"] {{
+        border-right: none;
+        border-top-right-radius: 0;
+        border-bottom-right-radius: 0;
+    }}
+    #card[joinedLeft="true"] {{
+        border-top-left-radius: 0;
+        border-bottom-left-radius: 0;
+    }}
     /* 每張卡片上緣的標題列：標題＋該卡片自己的動作圖示，用一條底線跟
        內容區分開，讓三張卡片看起來是同一套結構。 */
     #cardHeader {{

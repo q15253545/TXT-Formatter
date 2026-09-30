@@ -249,6 +249,7 @@ class WindowStateMixin:
         self.chapter_panel.set_auto_apply(self._auto_apply_preview)
         self._merge_titles = bool(state.get("merge_titles"))
         self.chapter_panel.set_merge_titles(self._merge_titles)
+        self._sync_auto_apply_available()
         if isinstance(state.get("disabled_words"), list):
             self.disabled_words = frozenset(str(word) for word in state["disabled_words"])
         if isinstance(state.get("special_levels"), dict):

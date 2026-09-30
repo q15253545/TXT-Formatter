@@ -23,6 +23,7 @@ _DOCUMENT_TYPES = {"application/xhtml+xml", "text/html", "application/x-dtbook+x
 _BLOCKS = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "tr", "section",
            "article", "header", "footer", "dt", "dd", "figcaption", "caption", "hr", "table", "ul", "ol"}
 _SKIPPED = {"script", "style", "head", "title", "svg", "math", "rt", "rp"}
+_HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 _SPACES = re.compile(r"[ \t\r\n\f\v]+")
 
 
@@ -31,13 +32,16 @@ class EpubError(Exception):
 
 
 class _TextExtractor(HTMLParser):
-    """區塊元素各自一行，br 換行；行內的空白、換行照 HTML 的規則縮成一個空格。"""
+    """區塊元素各自一行，br 換行；行內的空白、換行照 HTML 的規則縮成一個空格。
+    標題（h1～h6）裡的 br 當成空格：「<h2>第一章<br/>一人一刀</h2>」是一個標題，拆成兩行的話章名會變成正文、
+    目錄只剩章號（要開自動合併標題才接得回來）。"""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.lines: list[str] = []
         self._current: list[str] = []
         self._skip_depth = 0
+        self._heading_depth = 0
 
     def _flush(self):
         text = _SPACES.sub(" ", "".join(self._current)).strip()
@@ -50,12 +54,23 @@ class _TextExtractor(HTMLParser):
         if tag in _SKIPPED:
             self._skip_depth += 1
         elif tag == "br":
-            self._flush()
+            self._line_break()
         elif tag in _BLOCKS:
+            self._flush()
+            if tag in _HEADINGS:
+                self._heading_depth += 1
+
+    def _line_break(self):
+        if self._heading_depth:
+            self._current.append(" ")
+        else:
             self._flush()
 
     def handle_startendtag(self, tag, attrs):
-        if tag.lower() in ("br", "hr"):
+        tag = tag.lower()
+        if tag == "br":
+            self._line_break()
+        elif tag == "hr":
             self._flush()
 
     def handle_endtag(self, tag):
@@ -64,6 +79,8 @@ class _TextExtractor(HTMLParser):
             self._skip_depth = max(0, self._skip_depth - 1)
         elif tag in _BLOCKS:
             self._flush()
+            if tag in _HEADINGS:
+                self._heading_depth = max(0, self._heading_depth - 1)
 
     def handle_data(self, data):
         if not self._skip_depth:

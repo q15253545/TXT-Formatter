@@ -12,7 +12,8 @@ from core.filename_meta import (
 )
 from core.script_convert import SCRIPT_CHOICES, convert_script
 from . import i18n
-from .widgets import Divider, ToggleSwitch, dialog_frame, flow_container, keep_on_screen
+from .theme import active_tokens
+from .widgets import ConditionNote, Divider, ToggleSwitch, dialog_frame, flow_container, keep_on_screen
 
 
 class _TemplateInput(QLineEdit):
@@ -94,6 +95,10 @@ class FilenameDialog(QDialog):
         self.format_combo.currentIndexChanged.connect(self._update_mode_enabled)
         format_row.addStretch(1)
         root.addLayout(format_row)
+        # EPUB 固定整本一個檔（章節是書裡的目錄）：匯出方式變灰時寫出原因
+        self.mode_note = ConditionNote("EPUB 一律整本一個檔，章節會做成書裡的目錄")
+        self.mode_note.set_colors(active_tokens())
+        root.addWidget(self.mode_note)
         root.addSpacing(4)
         self.strip_markers_toggle = ToggleSwitch("匯出時移除章節標記", fill=False)
         self.strip_markers_toggle.setChecked(strip_markers)
@@ -187,6 +192,7 @@ class FilenameDialog(QDialog):
         if epub:
             self.mode_combo.setCurrentIndex(0)
         self.mode_combo.setEnabled(not epub)
+        self.mode_note.setVisible(epub)
 
     def _preview(self, template: str, default: str) -> str:
         name = build_smart_filename(self._fields, template.strip() or default)

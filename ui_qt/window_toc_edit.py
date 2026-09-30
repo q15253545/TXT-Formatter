@@ -24,6 +24,7 @@ class TocEditMixin:
     def _on_merge_titles_toggled(self, on: bool):
         self._merge_titles = on
         self._suspended_previews = None      # 自己切了開關：以切過的為準，換書不再恢復取消預覽前的設定
+        self._sync_auto_apply_available()
         self._rebuild_preview_toc()
         self._show_status("已開啟自動合併標題：「第1章」接上下一行的章名；同一章的標題連續出現兩次只留第一個；"
                           "只有章號、底下緊接著另一章標題的只留有章名的" + _PREVIEW_NOTE if on else "已關閉自動合併標題")
@@ -36,9 +37,14 @@ class TocEditMixin:
     def _on_infer_volumes_toggled(self, on: bool):
         self._infer_volumes = on
         self._suspended_previews = None      # 自己切了開關：以切過的為準，換書不再恢復取消預覽前的設定
+        self._sync_auto_apply_available()
         self._rebuild_preview_toc()
         self._show_status("已開啟自動補齊卷號與卷名：從卷結尾行、章號重新起算、每章前面的卷號推出缺少的卷，"
                           "找得到卷名一起補上" + _PREVIEW_NOTE if on else "已關閉自動補齊卷號與卷名")
+
+    def _sync_auto_apply_available(self):
+        """「自動套用到一鍵排版」只在有預覽可以套時有作用：兩個預覽開關都關著時變灰、寫出原因。"""
+        self.chapter_panel.set_auto_apply_available(self._merge_titles or self._infer_volumes)
 
     def _on_auto_apply_preview_toggled(self, on: bool):
         self._auto_apply_preview = on

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import i18n
-from .widgets import Divider, HoverIconButton, IconButton, PanelScroll, ToggleSwitch, make_card_header
+from .widgets import ConditionNote, Divider, HoverIconButton, IconButton, PanelScroll, ToggleSwitch, make_card_header
 
 MISSING_CHECK_MODES = ["僅檢查中間缺口", "每卷從第1章起算", "同作品跨卷接續"]
 
@@ -74,6 +74,9 @@ class ChapterPanel(QWidget):
         self.auto_apply_toggle = ToggleSwitch("自動套用到一鍵排版")
         self.auto_apply_toggle.clicked.connect(lambda checked: self.auto_apply_preview_toggled.emit(checked))
         root.addWidget(self.auto_apply_toggle)
+        # 兩個預覽開關都關著時沒有東西可以套用：開關變灰，寫出原因
+        self.auto_apply_note = ConditionNote("要先打開「自動合併標題」或「自動補齊卷號與卷名」才有作用")
+        root.addWidget(self.auto_apply_note)
         # 開關只是預覽；「套用到本文」「取消預覽」在目錄上方的預覽列，跟預覽的目錄在一起
 
         root.addWidget(Divider())
@@ -117,6 +120,10 @@ class ChapterPanel(QWidget):
         self.infer_volumes_toggle.blockSignals(True)
         self.infer_volumes_toggle.setChecked(on)
         self.infer_volumes_toggle.blockSignals(False)
+
+    def set_auto_apply_available(self, available: bool):
+        self.auto_apply_toggle.setEnabled(available)
+        self.auto_apply_note.setVisible(not available)
 
     def set_auto_apply(self, on: bool):
         self.auto_apply_toggle.setChecked(on)
@@ -185,6 +192,7 @@ class ChapterPanel(QWidget):
     def set_report_theme(self, tokens):
         self._tokens = tokens
         self.report_close_button.set_colors(tokens.icon, tokens.icon_hover, tokens.text_faint)
+        self.auto_apply_note.set_colors(tokens)
         if self._report is not None:
             self._render_report()
 

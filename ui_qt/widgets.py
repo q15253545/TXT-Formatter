@@ -550,10 +550,37 @@ class ElidedLabel(QLabel):
     def minimumSizeHint(self):
         return QSize(0, super().minimumSizeHint().height())
 
+    _ELIDE = Qt.TextElideMode.ElideRight
+
     def _apply_elide(self):
         metrics = self.fontMetrics()
-        super().setText(metrics.elidedText(self._full_text, Qt.TextElideMode.ElideRight,
-                                           max(0, self.contentsRect().width())))
+        super().setText(metrics.elidedText(self._full_text, self._ELIDE, max(0, self.contentsRect().width())))
+
+    def is_elided(self) -> bool:
+        return QLabel.text(self) != self._full_text
+
+
+class MiddleElidedLabel(ElidedLabel):
+    """檔名：頭尾都重要（書名在前、作者跟副檔名在後）。夠寬時照全文；不夠時中間用「…」省略，
+    最小寬度固定（MIN_WIDTH），很長的檔名不會把右邊的大小、編碼、關閉檔案擠掉，也不會把視窗最小寬度撐到螢幕外。
+    text() 照樣是完整的檔名，滑鼠移上去也看得到完整的。"""
+
+    MIN_WIDTH = 160
+    _ELIDE = Qt.TextElideMode.ElideMiddle
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+
+    def sizeHint(self):
+        return QSize(self.fontMetrics().horizontalAdvance(self._full_text) + 4, super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return QSize(min(self.MIN_WIDTH, self.sizeHint().width()), super().minimumSizeHint().height())
+
+    def setText(self, text: str):
+        super().setText(text)
+        self.updateGeometry()
 
 
 class VDivider(QFrame):
@@ -673,6 +700,29 @@ class _GripHandle(QSplitterHandle):
     def leaveEvent(self, event):
         self.update()
         super().leaveEvent(event)
+
+
+class ConditionNote(QWidget):
+    """設定「現在沒作用」時寫在它底下的原因：圓圈驚嘆號＋一句話（UI_RULES：只在沒作用時出現，
+    一般開關的說明照舊寫在狀態列，不每個都掛一行）。"""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.icon = QLabel()
+        layout.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignTop)
+        self.label = QLabel(text)
+        self.label.setObjectName("fileLabel")
+        self.label.setWordWrap(True)
+        layout.addWidget(self.label, 1)
+        self.hide()
+
+    def set_colors(self, tokens):
+        size = self.label.fontMetrics().height() - 2
+        self.icon.setPixmap(icons.make_icon("circle-alert", tokens.warn_text, size).pixmap(size, size))
+        self.icon.setFixedSize(size, self.label.fontMetrics().height())
 
 
 class Divider(QFrame):

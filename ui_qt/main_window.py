@@ -89,7 +89,7 @@ from . import __version__
 from .window_common import (
     DEFAULT_STRUCTURE_MODE, EDITOR_BASE_FONT_PX, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, MARKER_GUIDE,
     MARK_SCAN_DELAY_MS, MAX_HIGHLIGHT_SPANS, MAX_HISTORY_CHARS, MAX_HISTORY_STEPS, MIN_HISTORY_STEPS,
-    MERGE_WARN_BYTES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, AUTO_TOC_REFRESH_SECONDS, WARM_CHUNK_LINES, WARM_NOW_LINES,
+    MERGE_WARN_BYTES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, AUTO_TOC_REFRESH_SECONDS, SIDE_RAIL_GAP, WARM_CHUNK_LINES, WARM_NOW_LINES,
     WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals,
     _NUMBER_WITHOUT_UNIT, _ToolDialogWatcher, _chapter_line_mapper, _diff_line_mapper, _format_line_mapper,
     EPUB_ENCODING, WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
@@ -541,7 +541,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         splitter_wrap = QWidget()
         splitter_wrap_layout = QHBoxLayout(splitter_wrap)
         splitter_wrap_layout.setContentsMargins(14, 8, 14, 14)
-        splitter_wrap_layout.setSpacing(10)
+        splitter_wrap_layout.setSpacing(SIDE_RAIL_GAP)
         # 最左邊的圖示列：一格一張功能卡片，貼在卡片旁邊（名稱一直顯示，不靠滑鼠提示）
         self.side_rail = SideRail([
             ("options", "sliders-horizontal", "排版"),
@@ -2100,6 +2100,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.chapter_panel.set_merge_titles(False)
         self.chapter_panel.set_infer_volumes(False)
         self._merge_titles = self._infer_volumes = False
+        self._sync_auto_apply_available()
         self._rebuild_preview_toc()
         self._show_status("已取消這本書的預覽；開下一本書時照原本的開關預覽")
 
@@ -2111,6 +2112,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._suspended_previews = None
         self.chapter_panel.set_merge_titles(self._merge_titles)
         self.chapter_panel.set_infer_volumes(self._infer_volumes)
+        self._sync_auto_apply_available()
 
     def _update_order_hint(self):
         """有章放錯位置時，目錄上方提示「依章號重排」（跟缺章檢查的「順序錯亂」同一套判斷）。"""
@@ -2712,10 +2714,21 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.side_rail.set_active({self.options_panel: "options", self.chapter_panel: "chapter",
                                    self.content_panel: "content", self.find_bar: "find"}.get(panel))
         self.side_card.setVisible(panel is not None)
+        self._join_side_card(panel is not None)
         if panel is self.chapter_panel:
             self._refresh_missing_report()
         if was_open != (panel is not None):
             self._resize_cards_for_side_panel(sizes, opening=panel is not None)
+
+    def _join_side_card(self, joined: bool):
+        """功能卡片開著時，左側圖示列跟它合成一組：中間不留空隙、共用外圈的圓角（圖示列右側、卡片左側直角，
+        中間只剩卡片的左框線當分隔），一眼看得出卡片是哪一排按鈕開的。收起時圖示列照舊是獨立的圓角小卡。"""
+        self.side_rail.parentWidget().layout().setSpacing(0 if joined else SIDE_RAIL_GAP)
+        for widget, name in ((self.side_rail, "joinedRight"), (self.side_card, "joinedLeft")):
+            if widget.property(name) != joined:
+                widget.setProperty(name, joined)
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
 
     def _resize_cards_for_side_panel(self, sizes, opening: bool):
         """開、關功能卡片時目錄卡片維持原本的寬度，只由本文卡片讓出或拿回：
