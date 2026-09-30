@@ -9,7 +9,8 @@
 
 ## 下載
 
-到 [Releases](../../releases) 下載 `TXT-Formatter.exe`，雙擊就能執行，不需要安裝 Python。
+到 [Releases](../../releases) 下載 `TXT-Formatter-v版本-win64.zip`，解壓縮後執行資料夾裡的 `TXT Formatter.exe`，
+不需要安裝 Python。整個資料夾要放在一起（`_internal` 是程式需要的函式庫），可以放在任何位置。
 沒有數位簽章，第一次開啟時 Windows 可能顯示「Windows 已保護您的電腦」，按「其他資訊」→「仍要執行」。
 
 ## 快速上手
@@ -227,6 +228,13 @@ python -m ui_qt
 
 `regex` 讓自己寫的章節規則、尋找的正則有逾時保護（寫壞的正則不會讓程式卡住）。
 選用套件：`opencc-python-reimplemented`（簡體介面、檔名與正文的繁簡轉換）。
+
+## 授權
+
+TXT Formatter 著作權所有、保留所有權利（見 [LICENSE](LICENSE)）：可以免費下載 Releases 的程式使用；
+原始碼公開供閱讀參考，但不是開源授權，未經同意不得複製、修改或散佈。
+程式包含的第三方元件（Python、PySide6／Qt、regex、OpenCC）依各自的授權提供，見
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 與 [licenses/](licenses/)。
 
 ## 專案結構
 

@@ -229,7 +229,7 @@ def _dots_in_chinese(text: str, start: int, end: int) -> bool:
 
 
 def _dot_runs(text: str):
-    """「 *\.{3,} *」每一段的範圍（前後的半形空格一起算），跟 re.finditer 的結果一樣。
+    r"""「 *\.{3,} *」每一段的範圍（前後的半形空格一起算），跟 re.finditer 的結果一樣。
     先找點再往兩邊吃空格：直接用那條正則，一行有幾萬個空格時會一格一格重試、變成平方時間。"""
     last = 0
     for match in _DOT_RUN.finditer(text):

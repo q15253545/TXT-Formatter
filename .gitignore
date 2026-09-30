@@ -4,6 +4,9 @@
 !/ui_qt/
 !/docs/
 !/README.md
+!/LICENSE
+!/THIRD_PARTY_NOTICES.md
+!/licenses/
 !/.gitignore
 
 __pycache__/

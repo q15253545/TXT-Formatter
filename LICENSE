@@ -1,0 +1,48 @@
+TXT Formatter
+Copyright (c) 2025-2026 q15253545 (https://github.com/q15253545). All rights reserved.
+著作權所有 (c) 2025-2026 q15253545。保留所有權利。
+
+【中文】
+
+1. 使用程式
+   你可以免費下載本專案 Releases 頁面發佈的程式（TXT Formatter），在自己的電腦上個人或工作使用。
+
+2. 原始碼
+   本儲存庫的原始碼公開供閱讀與參考，但並未以任何開源授權釋出。未經著作權人書面同意，
+   不得複製、修改、合併、散佈、再授權或販售本專案的原始碼或其衍生作品，也不得把程式重新包裝後散佈。
+   依 GitHub 服務條款，你可以在 GitHub 上檢視及 fork 本儲存庫，但這不代表取得上述任何權利。
+
+3. 第三方元件
+   發佈的程式包含第三方元件（Python、PySide6／Qt、regex、OpenCC 等），它們各自依原本的授權條款提供，
+   不受本授權限制。詳見 THIRD_PARTY_NOTICES.md 與 licenses/ 資料夾。
+
+4. 免責
+   本程式依「現狀」提供，不附任何明示或默示的保證。使用本程式所造成的任何損失（包括資料遺失），
+   著作權人不負任何責任。處理重要檔案前請先備份。
+
+如需其他使用方式，請透過 GitHub 聯繫著作權人。
+
+[English]
+
+1. Use of the program
+   You may download the program (TXT Formatter) published on this project's Releases page free of charge and
+   use it on your own computers for personal or work purposes.
+
+2. Source code
+   The source code in this repository is made available for viewing and reference only. It is NOT released under
+   any open-source license. Without prior written permission from the copyright holder, you may not copy, modify,
+   merge, distribute, sublicense or sell the source code or any derivative works, nor repackage and redistribute
+   the program. Viewing and forking this repository on GitHub, as permitted by the GitHub Terms of Service, does
+   not grant any of these rights.
+
+3. Third-party components
+   The distributed program contains third-party components (Python, PySide6/Qt, regex, OpenCC, and others), which
+   are provided under their own license terms and are not covered by this license. See THIRD_PARTY_NOTICES.md and
+   the licenses/ folder.
+
+4. Disclaimer
+   THE PROGRAM IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE
+   COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY (INCLUDING LOSS OF DATA) ARISING FROM THE
+   USE OF THE PROGRAM. Back up important files before processing them.
+
+For any other use, please contact the copyright holder through GitHub.
