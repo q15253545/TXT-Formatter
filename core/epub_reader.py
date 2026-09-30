@@ -33,7 +33,7 @@ class EpubError(Exception):
 
 class _TextExtractor(HTMLParser):
     """區塊元素各自一行，br 換行；行內的空白、換行照 HTML 的規則縮成一個空格。
-    標題（h1～h6）裡的 br 當成空格：「<h2>第一章<br/>一人一刀</h2>」是一個標題，拆成兩行的話章名會變成正文、
+    標題（h1～h6）裡的 br 當成空格：「<h2>第一章<br/>山路</h2>」是一個標題，拆成兩行的話章名會變成正文、
     目錄只剩章號（要開自動合併標題才接得回來）。"""
 
     def __init__(self):

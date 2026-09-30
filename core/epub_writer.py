@@ -1,6 +1,6 @@
 """匯出 EPUB 3（附 EPUB 2 的 NCX 目錄，舊閱讀器也看得到目錄）。
 
-目錄照 txt-tool 的目錄：每個目錄項目（卷、章、特殊標題）一個 XHTML 檔，卷底下的章在導覽目錄裡
+目錄照本程式的目錄：每個目錄項目（卷、章、特殊標題）一個 XHTML 檔，卷底下的章在導覽目錄裡
 縮一層。正文一行一段（<p>），段首縮排交給 CSS（text-indent: 2em），原本行首的空白拿掉；
 空行不另外輸出（段落之間的距離也交給 CSS）。第一個目錄項目之前的文字（書名、簡介）放在
 目錄之前的一頁，不列在目錄裡。封面圖由呼叫端提供（PNG 位元組），沒有就不放。
@@ -163,7 +163,7 @@ def build_epub(path: str, title: str, author: str, sections, front_lines=(), cov
 
     # 寫暫存檔、成功才取代目標檔：中途失敗時原本的檔案不會壞掉
     handle, temporary = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)) or ".",
-                                         prefix=".txt-tool-", suffix=".tmp")
+                                         prefix=".txt-formatter-", suffix=".tmp")
     os.close(handle)
     try:
         with zipfile.ZipFile(temporary, "w") as archive:

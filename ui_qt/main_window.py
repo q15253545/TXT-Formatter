@@ -1646,7 +1646,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         return bytes(buffer.data())
 
     def _export_epub(self) -> bool:
-        """匯出 EPUB：目錄照 txt-tool 的目錄，書名、作者照書籍資料，封面是文字封面（core/epub_writer.py）。
+        """匯出 EPUB：目錄照本程式的目錄，書名、作者照書籍資料，封面是文字封面（core/epub_writer.py）。
         不算「已存檔」：本文還是 TXT 的形式，關閉前照常提醒。"""
         self._sync_raw_lines()
         self._ensure_toc_current()

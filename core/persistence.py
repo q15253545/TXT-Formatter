@@ -5,10 +5,10 @@ import re
 import json
 from pathlib import Path
 
-# 設定檔放在使用者的應用程式資料夾。TXT_TOOL_DATA_DIR 可以把它改到別處——
+# 設定檔放在使用者的應用程式資料夾。TXT_FORMATTER_DATA_DIR 可以把它改到別處——
 # 測試都用這個指到暫存資料夾，才不會蓋掉使用者真正的規則與介面設定。
 _CONFIG_ROOT = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
-APP_DATA_DIR = (Path(os.environ["TXT_TOOL_DATA_DIR"]) if os.environ.get("TXT_TOOL_DATA_DIR")
+APP_DATA_DIR = (Path(os.environ["TXT_FORMATTER_DATA_DIR"]) if os.environ.get("TXT_FORMATTER_DATA_DIR")
                 else _CONFIG_ROOT / "TXTFormatter")
 RULES_FILE = APP_DATA_DIR / "chapter_rules.json"
 WINDOW_FILE = APP_DATA_DIR / "window.json"

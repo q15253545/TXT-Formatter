@@ -14,7 +14,7 @@ import tempfile
 def write_text_atomic(path: str, text: str, encoding: str = "utf-8"):
     """寫入暫存檔後原子替換；失敗時拋出例外，且目標檔維持原狀。"""
     directory = os.path.dirname(os.path.abspath(path)) or "."
-    handle, temporary = tempfile.mkstemp(dir=directory, prefix=".txt-tool-", suffix=".tmp")
+    handle, temporary = tempfile.mkstemp(dir=directory, prefix=".txt-formatter-", suffix=".tmp")
     try:
         # 文字模式（newline 用預設值）：Windows 上換行仍然輸出成 CRLF，
         # 跟一般用 open(path, "w") 寫出來的檔案一樣。
