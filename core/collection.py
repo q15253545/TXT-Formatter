@@ -582,14 +582,17 @@ def number_anomalies(numbers) -> dict:
     return found
 
 
-def _restart_segments(numbers) -> list:
+def _restart_segments(numbers, ends=None) -> list:
     """同一卷裡章號又從 1（或 2）重新數起、後面也連號：當成新的一段各自算缺口
-    （卷尾接了續寫、番外，卻沒有卷標題）。回傳每一段的號碼。"""
+    （卷尾接了續寫、番外，卻沒有卷標題）。回傳每一段的號碼。
+    ends：跟 numbers 對齊的多章合併標題的最後一章（「第1-5章」是 5，不是範圍就是 None）：
+    「第1-5章」後面接「第6-10章」也算連號。"""
     segments, start = [], 0
     for index in range(1, len(numbers)):
         value = numbers[index]
-        if value <= 2 and numbers[index - 1] >= value + 3 and \
-                (index + 1 >= len(numbers) or numbers[index + 1] == value + 1):
+        last = (ends[index] if ends and ends[index] else None) or value
+        if value <= 2 and numbers[index - 1] >= last + 3 and \
+                (index + 1 >= len(numbers) or numbers[index + 1] == last + 1):
             segments.append(numbers[start:index])
             start = index
     segments.append(numbers[start:])
@@ -708,7 +711,8 @@ def chapter_gap_report(numbers, label, mode="僅檢查中間缺口", previous_la
     numbers = [number for _index, number in kept] or original
     ordered = sorted(set(numbers))
     ranges, duplicates, position = [], set(), 0
-    for segment_index, segment in enumerate(_restart_segments(numbers)):
+    ends = [chapter_range_end(title) for title in titles] if titles else None
+    for segment_index, segment in enumerate(_restart_segments(numbers, ends)):
         segment_titles = titles[position:position + len(segment)] if titles else None
         position += len(segment)
         covered = set(segment)
