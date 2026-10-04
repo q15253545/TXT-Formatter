@@ -186,9 +186,10 @@ class QuoteCheckDialog(QDialog):
     fixesReady = Signal(list, int)
 
     def __init__(self, raw_lines: list, parent=None, selected_ranges=None, selected_count: int = 0,
-                 enabled_kinds=None, title_rows=None, defer_scan: bool = False):
+                 enabled_kinds=None, title_rows=None, defer_scan: bool = False, hold: bool = False):
         """defer_scan：大檔剛開、逐行判斷的快取還沒暖好時，先把視窗開出來，自己分批算好再檢查
-        （同步掃要卡將近一秒，C-26）；等待中改範圍、改本文都只記下來，算好時用當時的設定檢查。"""
+        （同步掃要卡將近一秒，C-26）；hold：先不檢查，等 release()（主視窗在背景重建目錄，C-25）。
+        等待中改範圍、改本文都只記下來，兩樣都好了才用當時的設定檢查。"""
         super().__init__(parent)
         self.setWindowTitle("標點校對")
         size_dialog(self, 960, 640)
@@ -203,6 +204,7 @@ class QuoteCheckDialog(QDialog):
         self.result_lines: list | None = None
         self.applied_count = 0
         self._warm_from = 0 if defer_scan else None    # 等待中：下一批從哪一行開始算；None＝不用等
+        self._held = hold
         self._warm_timer = QTimer(self)
         self._warm_timer.setSingleShot(True)
         self._warm_timer.timeout.connect(self._warm_step)
@@ -282,12 +284,19 @@ class QuoteCheckDialog(QDialog):
         self._fill_separator_styles()
         if self.waiting():
             self._update_status()
-            self._warm_timer.start(0)
+            if self._warm_from is not None:
+                self._warm_timer.start(0)
         else:
             self._run_scan()
 
     def waiting(self) -> bool:
-        return self._warm_from is not None
+        return self._warm_from is not None or self._held
+
+    def release(self):
+        """hold 的等待結束（目錄已經跟上本文，reload 過了）：快取也好了就檢查。"""
+        if self._held and self.isVisible():        # 關掉了就不用檢查
+            self._held = False
+            self._run_scan()
 
     def _warm_step(self):
         if not self.waiting() or not self.isVisible():

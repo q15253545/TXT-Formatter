@@ -4,6 +4,7 @@
 import bisect
 import difflib
 import re
+import sys
 
 from PySide6.QtCore import QEvent, QObject, QRegularExpression, QTimer, Signal
 from PySide6.QtWidgets import QWidget
@@ -207,6 +208,35 @@ class _ToolDialogWatcher(QObject):
 
 # 字色標示：本文停止變動這麼久之後才重掃
 MARK_SCAN_DELAY_MS = 800
+
+
+# 背景執行緒（字色標示）在跑時，畫面要建、要畫視窗的那一段把 GIL 的切換間隔縮到這麼短，這麼久之後還原。
+FOREGROUND_SWITCH_INTERVAL = 0.0005
+FOREGROUND_PRIORITY_MS = 500
+_saved_switch_interval = None
+
+
+def prefer_foreground():
+    """建、畫視窗時 Qt 會反覆呼叫 Python（事件過濾器等），每次都要跟背景執行緒搶 GIL；預設 5 ms 的切換間隔
+    在 Windows 上被計時器進位成一個 tick（約 15 ms），大檔邊標字色邊開「非正文內容」要等 3 秒（C-24）。
+    低於 1 ms 才不會進位。只縮一小段（視窗畫好為止）：一直縮著的話，主執行緒一忙背景掃描就慢好幾倍。"""
+    global _saved_switch_interval
+    if _saved_switch_interval is None:
+        _saved_switch_interval = sys.getswitchinterval()
+        sys.setswitchinterval(FOREGROUND_SWITCH_INTERVAL)
+    QTimer.singleShot(FOREGROUND_PRIORITY_MS, _restore_switch_interval)
+
+
+def _restore_switch_interval():
+    global _saved_switch_interval
+    if _saved_switch_interval is not None:
+        sys.setswitchinterval(_saved_switch_interval)
+        _saved_switch_interval = None
+
+
+class _TocBuildSignals(QObject):
+    """背景辨識章節（_when_toc_current）完成：本文版本、辨識結果（失敗是 None）。"""
+    finished = Signal(int, object)
 
 
 class _MarkScanSignals(QObject):

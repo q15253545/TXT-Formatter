@@ -90,7 +90,7 @@ from .window_common import (
     DEFAULT_STRUCTURE_MODE, EDITOR_BASE_FONT_PX, EDITOR_ZOOM_MAX, EDITOR_ZOOM_MIN, MARKER_GUIDE,
     MARK_SCAN_DELAY_MS, MAX_HIGHLIGHT_SPANS, MAX_HISTORY_CHARS, MAX_HISTORY_STEPS, MIN_HISTORY_STEPS,
     MERGE_WARN_BYTES, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, OPEN_FILE_FILTER, PENDING_LINE_MAP_LIMIT, TYPING_CHECKPOINT_DELAY_MS, AUTO_TOC_REFRESH_SECONDS, SIDE_RAIL_GAP, WARM_CHUNK_LINES, WARM_NOW_LINES,
-    WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals,
+    WARM_START_DELAY_MS, WARM_WAITING_SLICE, _LayoutWatcher, _MARKER_REGEX, _MarkScanSignals, _TocBuildSignals,
     _NUMBER_WITHOUT_UNIT, _ToolDialogWatcher, _chapter_line_mapper, _diff_line_mapper, _format_line_mapper,
     EPUB_ENCODING, WORD_ENCODING, _line_opcodes, _settle, _tree_depth, openable, short_toc_label,
 )
@@ -241,6 +241,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._mark_timer.timeout.connect(self._start_mark_scan)
         self._mark_signals = _MarkScanSignals()
         self._mark_signals.finished.connect(self._on_mark_scan_finished)
+        self._toc_signals = _TocBuildSignals()
+        self._toc_signals.finished.connect(self._on_toc_build_finished)
+        self._toc_build_running = False
+        self._toc_waiters: list = []       # 等目錄跟上本文的工具視窗（_when_toc_current）
         self._toc_text_version = -1
         self._synced_text_version = -1
         self._synced_text = ""

@@ -42,7 +42,7 @@ from .quote_check_dialog import QuoteCheckDialog
 from .script_convert_dialog import ScriptConvertDialog
 from .recognition_dialog import RecognitionDialog
 from .word_count_dialog import WordCountDialog
-from .window_common import MARK_SCAN_DELAY_MS, OPEN_FILE_FILTER
+from .window_common import AUTO_TOC_REFRESH_SECONDS, MARK_SCAN_DELAY_MS, OPEN_FILE_FILTER, prefer_foreground
 
 # 標點校對預設不勾的檢查項目（只能列出、數量常很多）
 QUOTE_DEFAULT_OFF = frozenset({"masked"})
@@ -110,6 +110,8 @@ class ToolWindowsMixin:
             return None
         # 一次只開一個工具視窗：開新的之前先把其他開著的關掉（照常記住它們的設定）。
         self._close_tool_dialogs()
+        # 背景執行緒（字色標示、辨識章節）可能正在跑或馬上要開始：建視窗、畫視窗這一段畫面優先
+        prefer_foreground()
         dialog = create()
         dialog._tool_version = self._text_version
         dialog._tool_reload = reload
@@ -251,21 +253,35 @@ class ToolWindowsMixin:
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
-        self._ensure_toc_current()
+        toc_behind = self._toc_behind()
         spans = self._selected_section_spans()
 
         def create():
-            # Caches still warming (a large file opened moments ago): show the dialog now and scan when they're done
-            cold = self._caches_cold()
+            # Caches still warming (a large file opened moments ago), or the outline is behind the text (a large
+            # file just edited): show the dialog now and scan when both are ready
+            waits = {"warm": self._caches_cold(), "toc": toc_behind}
             dialog = AdScanDialog(self.raw_lines, self, selected_ranges=spans,
                                   selected_count=self._selected_chapter_count(),
                                   ad_categories=self._saved_ad_categories(),
                                   note_categories=self._saved_note_categories(),
                                   title_rows=set(self.chapter_raw_map.values()),
-                                  repeat_settings=self._saved_repeat_settings(), defer_scan=cold)
-            if cold:
-                # the dialog may have been closed (and deleted) by the time the caches are warm
-                self._when_warm(lambda: dialog.start_scan() if shiboken6.isValid(dialog) else None)
+                                  repeat_settings=self._saved_repeat_settings(), defer_scan=any(waits.values()))
+
+            def ready(what):
+                waits[what] = False
+                # the dialog may have been closed (and deleted) by the time it's ready
+                if not shiboken6.isValid(dialog):
+                    return
+                if what == "toc":
+                    reload(dialog)          # current headings and chapter scope
+                    dialog._tool_version = self._text_version
+                if not any(waits.values()):
+                    dialog.start_scan()
+
+            if waits["warm"]:
+                self._when_warm(lambda: ready("warm"))
+            if waits["toc"]:
+                self._when_toc_current(lambda: ready("toc"))
             dialog.candidateHighlighted.connect(self._highlight_ad_candidate)
             dialog.deletionReady.connect(lambda lines, d=dialog: self._apply_ad_deletion(d, lines))
             dialog.reviewRequested.connect(self._review_from_scan)
@@ -461,10 +477,7 @@ class ToolWindowsMixin:
         toc_ctx = None
         title_rows = set(self.chapter_raw_map.values())
         if self._toc_text_version != version:
-            toc_ctx = dataclasses.replace(
-                self._build_context(), raw_lines=lines, user_chapter_rules=list(self.user_chapter_rules),
-                auto_titles=dict(self.auto_titles), force_lv1_chapters=set(self.force_lv1_chapters),
-                force_lv2_chapters=set(self.force_lv2_chapters))
+            toc_ctx = self._context_snapshot(lines)
         # 網頁字元碼只是換字，不是廣告：不標廣告色。重複段落要在逐筆檢查的篩選勾了才標（多半是作者慣用的句子）
         types = self.review_bar.review_types()
         ad_categories = ((self._saved_ad_categories() - FIX_CATEGORIES if "ad" in types else set())
@@ -492,6 +505,63 @@ class ToolWindowsMixin:
                 self._mark_signals.finished.emit(*result)
 
         threading.Thread(target=work, name="mark-scan", daemon=True).start()
+
+    def _context_snapshot(self, lines):
+        """給背景執行緒辨識章節用的設定副本：畫面這邊之後再改規則，也不會改到正在用的那一份。"""
+        return dataclasses.replace(
+            self._build_context(), raw_lines=lines, user_chapter_rules=list(self.user_chapter_rules),
+            auto_titles=dict(self.auto_titles), force_lv1_chapters=set(self.force_lv1_chapters),
+            force_lv2_chapters=set(self.force_lv2_chapters))
+
+    def _toc_behind(self) -> bool:
+        """開工具視窗前：目錄落後本文時，重建很快的書（同打字後自動更新目錄的門檻）當場重建、回傳 False；
+        大檔回傳 True，交給 _when_toc_current 在背景辨識。"""
+        if self._toc_text_version == self._text_version:
+            return False
+        if self._toc_rebuild_seconds <= AUTO_TOC_REFRESH_SECONDS:
+            self._rebuild_toc()
+            return False
+        return True
+
+    def _when_toc_current(self, callback):
+        """目錄跟上目前的本文之後呼叫 callback。目錄過期（剛改過本文）時在背景執行緒辨識章節
+        （大檔要將近一秒），畫面這邊只填目錄，工具視窗可以先開出來（C-25）；辨識期間本文又改了就再辨識一次。"""
+        self._toc_waiters.append(callback)
+        if not self._toc_build_running:
+            self._start_toc_build()
+
+    def _start_toc_build(self):
+        self._sync_raw_lines()
+        if self._toc_text_version == self._text_version:
+            waiters, self._toc_waiters = self._toc_waiters, []
+            for callback in waiters:
+                callback()
+            return
+        version = self._text_version
+        ctx = self._context_snapshot(list(self.raw_lines))
+        self._toc_build_running = True
+
+        def work():
+            try:
+                structure = build_document_structure(ctx, apply_format=False, write_text=False)
+            except Exception:          # 背景執行緒的例外不會出現在畫面上：記下來，回到畫面再同步重建一次
+                log.exception("背景辨識章節失敗")
+                structure = None
+            if shiboken6.isValid(self._toc_signals):
+                self._toc_signals.finished.emit(version, structure)
+
+        threading.Thread(target=work, name="toc-build", daemon=True).start()
+
+    def _on_toc_build_finished(self, version: int, structure):
+        self._toc_build_running = False
+        if version == self._text_version and self._toc_text_version != version:
+            if structure is None:
+                self._rebuild_toc()
+            else:
+                self._populate_tree(structure)
+                self._warn_timed_out_rules()
+        if self._toc_waiters:
+            self._start_toc_build()     # 目錄已經跟上就直接呼叫等待中的；本文又改了就再辨識一次
 
     def _on_mark_scan_finished(self, version: int, ad_found, note_found, structure=None):
         self._mark_scan_running = False
@@ -585,7 +655,7 @@ class ToolWindowsMixin:
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
-        self._ensure_toc_current()
+        toc_stale = self._toc_behind()
         spans = self._selected_section_spans()
         # 記住勾了哪些；沒記過時星號遮字關著（只能列出、書裡常有上百處），其餘都開。
         # 「分隔線不一致」不是勾選框（由視窗裡的下拉決定），一律開著。
@@ -594,12 +664,20 @@ class ToolWindowsMixin:
                     else set(PROBLEM_LABELS) - QUOTE_DEFAULT_OFF) | {"separator_style"})
 
         def create():
-            # 逐行判斷還沒暖好（大檔剛開）：視窗先出來，它自己分批算好再檢查
+            # 逐行判斷還沒暖好（大檔剛開）：視窗先出來，它自己分批算好再檢查；
+            # 目錄還沒跟上本文（大檔剛改過）：背景辨識好、換成新的標題與範圍才檢查
             dialog = QuoteCheckDialog(self.raw_lines, self, selected_ranges=spans,
                                       selected_count=self._selected_chapter_count(),
                                       enabled_kinds=enabled,
                                       title_rows=set(self.chapter_raw_map.values()),
-                                      defer_scan=self._caches_cold(1))
+                                      defer_scan=self._caches_cold(1), hold=toc_stale)
+            if toc_stale:
+                def ready():
+                    if shiboken6.isValid(dialog):
+                        reload(dialog)
+                        dialog._tool_version = self._text_version
+                        dialog.release()
+                self._when_toc_current(ready)
             dialog.problemSelected.connect(self._jump_to_line)
             dialog.fixesReady.connect(lambda lines, count, d=dialog: self._apply_quote_fixes(d, lines, count))
             return dialog
