@@ -46,8 +46,12 @@ _BUILTIN_NAMES = {2: "第N章", 1: "第N卷"}
 _NUMBER_SAMPLES = {"一二三": "十二", "123": "12", "全形１２": "１２", "壹貳參": "拾貳"}
 _SEP_SHOWN = {"無": "", "空格": " ", ".": ". ", "-": " - "}
 _NAMED_VOLUME = "named_volume"
+_PART_VOLUME = "part_volume"
+# 特殊標題清單裡用開關控制的內建格式（存成 preset 規則，不是關掉的字）
+_TOGGLE_PRESETS = (_NAMED_VOLUME, _PART_VOLUME)
 _SPECIAL_ROWS = ([(key, label) for key, label, _variants in SPECIAL_WORDS]
-                 + [("番外", "番外"), ("外傳", "外傳"), ("終章", "終章"), (_NAMED_VOLUME, "名稱＋篇（青雲篇、上卷）")])
+                 + [("番外", "番外"), ("外傳", "外傳"), ("終章", "終章"), (_NAMED_VOLUME, "名稱＋篇（青雲篇、上卷）"),
+                    (_PART_VOLUME, "上中下部／卷／集（上部、書名（下部））")])
 _LINES_SHOWN = 300
 LEFT_MIN_WIDTH = 200       # combo list: the "+ 新增組合" button and a combo name still fit
 LEFT_DEFAULT_WIDTH = 250
@@ -67,7 +71,7 @@ _SNIPPETS = (
 
 def managed_rule(rule: dict) -> bool:
     """積木組合、名稱＋篇、自訂特殊標題（其餘是自己寫的正則規則）。"""
-    return bool(rule.get("blocks")) or rule.get("preset") == _NAMED_VOLUME or bool(rule.get("special"))
+    return bool(rule.get("blocks")) or rule.get("preset") in _TOGGLE_PRESETS or bool(rule.get("special"))
 
 
 def _builtin_blocks(level: int, disabled: set) -> dict:
@@ -751,12 +755,12 @@ class RecognitionDialog(QDialog):
         self.setWindowTitle("辨識章節")
         self._plain = [dict(rule) for rule in rules if not managed_rule(rule)]
         self.combos = {2: [], 1: []}
-        self._named_volume = None
+        self._toggle_presets = dict.fromkeys(_TOGGLE_PRESETS)
         for rule in rules:
             if rule.get("blocks"):
                 self.combos[1 if rule.get("level") == 1 else 2].append(dict(rule, blocks=dict(rule["blocks"])))
-            elif rule.get("preset") == _NAMED_VOLUME:
-                self._named_volume = dict(rule)
+            elif rule.get("preset") in _TOGGLE_PRESETS:
+                self._toggle_presets[rule["preset"]] = dict(rule)
         self.custom_specials = [dict(rule) for rule in rules if rule.get("special")]
         self.disabled = set(disabled_words or ())
         self.special_levels = dict(special_levels or {})
@@ -1080,31 +1084,33 @@ class RecognitionDialog(QDialog):
         self._rebuild_custom_specials()
 
     def _special_enabled(self, key: str) -> bool:
-        if key == _NAMED_VOLUME:
-            return self._named_volume is not None and self._named_volume.get("enabled", True)
+        if key in _TOGGLE_PRESETS:
+            rule = self._toggle_presets[key]
+            return rule is not None and rule.get("enabled", True)
         return key not in self.disabled
 
     def special_level(self, key: str) -> int:
-        if key == _NAMED_VOLUME:
-            return self._named_volume["level"] if self._named_volume else 1
+        if key in _TOGGLE_PRESETS:
+            rule = self._toggle_presets[key]
+            return rule["level"] if rule else 1
         return self.special_levels.get(key, SPECIAL_LEVELS[key])
 
     def _on_special_toggled(self, key: str, checked: bool):
-        if key == _NAMED_VOLUME:
-            if checked and self._named_volume is None:
-                self._named_volume = preset_rule(_NAMED_VOLUME)
-            elif self._named_volume is not None:
-                self._named_volume["enabled"] = checked
+        if key in _TOGGLE_PRESETS:
+            if checked and self._toggle_presets[key] is None:
+                self._toggle_presets[key] = preset_rule(key)
+            elif self._toggle_presets[key] is not None:
+                self._toggle_presets[key]["enabled"] = checked
         elif checked:
             self.disabled.discard(key)
         else:
             self.disabled.add(key)
 
     def _on_special_level(self, key: str, level: int):
-        if key == _NAMED_VOLUME:
-            if self._named_volume is None:
-                self._named_volume = dict(preset_rule(_NAMED_VOLUME), enabled=False)
-            self._named_volume["level"] = level
+        if key in _TOGGLE_PRESETS:
+            if self._toggle_presets[key] is None:
+                self._toggle_presets[key] = dict(preset_rule(key), enabled=False)
+            self._toggle_presets[key]["level"] = level
         elif level == SPECIAL_LEVELS[key]:
             self.special_levels.pop(key, None)
         else:
@@ -1205,8 +1211,7 @@ class RecognitionDialog(QDialog):
 
     def managed_rules(self) -> list:
         rules = [dict(rule) for level in (2, 1) for rule in self.combos[level]]
-        if self._named_volume is not None:
-            rules.append(dict(self._named_volume))
+        rules += [dict(rule) for rule in self._toggle_presets.values() if rule is not None]
         # 自訂特殊標題放最前面：「書名 續章3」這種行不要先被別的組合收走
         return [special_word_rule(rule["special"], rule["level"], rule.get("enabled", True))
                 for rule in self.custom_specials] + rules
@@ -1221,12 +1226,13 @@ class RecognitionDialog(QDialog):
         其他寫法加成自己寫的規則。按「保存並重掃」才生效。回傳寫在狀態列的一句話。"""
         if fmt.startswith("preset:"):
             preset_id = fmt.split(":", 1)[1]
-            if preset_id == _NAMED_VOLUME:
-                if self._named_volume is None:
-                    self._named_volume = preset_rule(_NAMED_VOLUME)
-                self._named_volume["enabled"] = True
-                self.special_toggles[_NAMED_VOLUME].setChecked(True)
-                return "已打開特殊標題的「名稱＋篇」，按「保存並重掃」後生效"
+            if preset_id in _TOGGLE_PRESETS:
+                if self._toggle_presets[preset_id] is None:
+                    self._toggle_presets[preset_id] = preset_rule(preset_id)
+                self._toggle_presets[preset_id]["enabled"] = True
+                self.special_toggles[preset_id].setChecked(True)
+                name = dict(_SPECIAL_ROWS)[preset_id].split("（")[0]
+                return f"已打開特殊標題的「{name}」，按「保存並重掃」後生效"
             level, blocks = template(preset_id)
             rule = block_rule(blocks, level)
             existing = next((item for item in self.combos[level] if item.get("pattern") == rule["pattern"]), None)

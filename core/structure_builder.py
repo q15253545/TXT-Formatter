@@ -330,6 +330,27 @@ def _next_named_chapter(ctx: BuildContext, state):
     return None
 
 
+def _range_first_chapter(ctx: BuildContext, state, start_number):
+    """「第7～9章 渡口」底下緊接著它涵蓋的第一章「第七章 …」：回傳那一行，否則 None。
+    中間可以夾一兩行網站附註（跟重複標題一樣，不到 DUPLICATE_CONTENT_LIMIT 字）。"""
+    from .word_count import char_count
+    content = 0
+    for row in range(state.idx + 1, min(state.total, state.idx + 40)):
+        text, marker = strip_persistent_title_marker(ctx.raw_lines[row].strip())
+        if not text:
+            continue
+        heading = marker != 'exclude' and is_valid_auto_title(text, state.invalid_tail_regex)
+        parsed = parse_lv2(text) if heading and not is_weak_numbered_title(text) else None
+        if (marker and marker != 'exclude') or ctx._protected_title(row)                 or (heading and (parse_lv1(text) or parse_special(text))):
+            return None
+        if parsed:
+            return row if parsed[2] == '第' and parsed[3] == start_number and chapter_range_end(text) is None else None
+        content += char_count(text)
+        if content >= DUPLICATE_CONTENT_LIMIT:
+            return None
+    return None
+
+
 _PERIOD_TAIL = re.compile(r"[。.．]\s*$")
 _SENTENCE_MARK = re.compile(r"[。！？!?；;]")
 _FIRST_HEAD = re.compile(r"^\s*第\s*[1１一]\s*[章回節节][ 　:：\-—·、]")
@@ -783,6 +804,16 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
         named = _next_named_chapter(ctx, state)
         if named is not None:
             state.absorbed_titles[title_raw_idx] = named
+            state.idx += 1
+            return
+    # 一次貼好幾章的貼文標題（「第7～9章 渡口」底下緊接著「第七章 …」）：不是一章，只留底下真正的章
+    # （使用者 2026-10-04）；跟上面一樣是「自動合併標題」的一部分，記在 absorbed_titles。
+    if (ctx.skip_duplicate_titles and not apply_format and m_lv2 and not custom_title and ch_num
+            and not merged and not manual_marked and not forced_level and not ctx._protected_title(title_raw_idx)
+            and chapter_range_end(line_str)):
+        first = _range_first_chapter(ctx, state, ch_num)
+        if first is not None:
+            state.absorbed_titles[title_raw_idx] = first
             state.idx += 1
             return
     dup_cands, peek = ([(line_str, ch_body, title_raw_idx)], state.idx + 1)
