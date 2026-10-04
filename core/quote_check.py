@@ -128,9 +128,11 @@ _CJK_CHAR = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\U00020000-\U0003134f"
 _PERIOD_RUN = re.compile(r"。{3,}")            # 。。。 → ……
 _ELLIPSIS_RUN = re.compile(r"…{3,}")           # ………… → ……
 _DOT_RUN = re.compile(r"\.{3,}")                # ... 或 ......... → ……（前後的半形空格見 _dot_runs）
-# 中間夾空白的刪節號（「… …」「…… ……」「... ...」「. . .」）是同一個刪節號：先把空白拿掉再整理
-_SPACED_ELLIPSIS = re.compile(r"…+(?:[ 　]+…+)+")
-_SPACED_DOT_RUNS = re.compile(r"\.{3,}(?:[ 　]+\.{3,})+|(?<![.A-Za-z0-9])\.(?:[ 　]\.){2,}(?![.A-Za-z0-9])")
+# 中間夾空白的刪節號（「… …」「…… ……」「... ...」「. . .」）是同一個刪節號：先把空白拿掉再整理。
+# 開頭的 (?<!…)／(?<!\.)：只從一串的第一個字試，否則一長串後面沒接空白＋刪節號時，
+# 每個起點都要再退回整串，變成平方時間（C-15）。
+_SPACED_ELLIPSIS = re.compile(r"(?<!…)…+(?:[ 　]+…+)+")
+_SPACED_DOT_RUNS = re.compile(r"(?<!\.)\.{3,}(?:[ 　]+\.{3,})+|(?<![.A-Za-z0-9])\.(?:[ 　]\.){2,}(?![.A-Za-z0-9])")
 ELLIPSIS = "……"
 
 
@@ -303,6 +305,12 @@ def _strip_indent(line: str):
 def check_line(line: str) -> list:
     """單獨檢查一行，回傳這一行的問題種類（可能不只一個）。"""
     return list(_check_line(line))
+
+
+def warm_line_checks(lines):
+    """先把這幾行的逐行判斷算進快取（標點校對視窗在大檔冷快取時分批呼叫，見 QuoteCheckDialog）。"""
+    for line in lines:
+        _check_line(line)
 
 
 @lru_cache(maxsize=1 << 19)

@@ -594,10 +594,12 @@ class ToolWindowsMixin:
                     else set(PROBLEM_LABELS) - QUOTE_DEFAULT_OFF) | {"separator_style"})
 
         def create():
+            # 逐行判斷還沒暖好（大檔剛開）：視窗先出來，它自己分批算好再檢查
             dialog = QuoteCheckDialog(self.raw_lines, self, selected_ranges=spans,
                                       selected_count=self._selected_chapter_count(),
                                       enabled_kinds=enabled,
-                                      title_rows=set(self.chapter_raw_map.values()))
+                                      title_rows=set(self.chapter_raw_map.values()),
+                                      defer_scan=self._caches_cold(1))
             dialog.problemSelected.connect(self._jump_to_line)
             dialog.fixesReady.connect(lambda lines, count, d=dialog: self._apply_quote_fixes(d, lines, count))
             return dialog

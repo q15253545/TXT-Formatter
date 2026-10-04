@@ -5,10 +5,10 @@
 正確寫法的只列出來、點一下跳到那一行，由使用者自己在本文裡改。
 """
 
-import difflib
 import re
+import time
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
@@ -17,11 +17,12 @@ from PySide6.QtWidgets import (
 
 from core.quote_check import (
     QUOTE_PROBLEM_LABELS, SEPARATOR_LENGTH, WORD_PROBLEM_LABELS, apply_fixes, scan_quote_problems, separator_styles,
+    warm_line_checks,
 )
 from . import dialogs, i18n
 from .sortable_table import HeaderCheckBox, PreviewTable, carry_over, data_index, enable_sorting, limit_rows, make_item, resort, setup_columns
 from .theme import active_tokens
-from .widgets import ChoiceMenuButton, ContextPreview, ScopeToggle, dialog_frame, size_dialog
+from .widgets import ChoiceMenuButton, ContextPreview, ScopeToggle, char_opcodes, dialog_frame, size_dialog
 
 # 每種問題該怎麼看待，寫在勾選框的提示裡。
 _KIND_TIPS = {
@@ -56,38 +57,20 @@ _CHANGED_ROLE = Qt.ItemDataRole.UserRole + 20   # 要標紅的字元位置
 _FOCUS_ROLE = Qt.ItemDataRole.UserRole + 21     # 第一個改動的位置（太長時從這附近開始顯示）
 
 
-_DIFF_LIMIT = 400        # 前後相同的部分去掉後，中間超過這麼多字就不細比
+_WAITING_TEXT = "準備中：第一次打開要先整理本文，整理好就會自動檢查"
+_WARM_CHUNK_LINES = 600
+_WARM_SLICE = 0.04      # 每批最多算這麼久就把執行權還給畫面
 
 
 def _diff_marks(before: str, after: str):
     """比對修正前後，回傳（after 裡要標紅的字元位置, before 的第一個改動位置,
     after 的第一個改動位置）。純刪除（例如兩行接回一行）沒有新字，標在接起來
     的那個字上，才看得出是在哪裡接的。"""
-    # 先去掉前後相同的部分（線性），只對中間改動的那一小段做 difflib。
-    # 整段 diff 在上萬個重複字的段落要好幾秒；中間那段
-    # 還是太長就整段標紅，不再細比。
-    prefix = 0
-    limit = min(len(before), len(after))
-    while prefix < limit and before[prefix] == after[prefix]:
-        prefix += 1
-    suffix = 0
-    while (suffix < limit - prefix
-           and before[len(before) - 1 - suffix] == after[len(after) - 1 - suffix]):
-        suffix += 1
-    middle_before = before[prefix:len(before) - suffix]
-    middle_after = after[prefix:len(after) - suffix]
-    if not middle_before and not middle_after:
-        return set(), None, None
     changed = set()
     first_before = first_after = None
-    if len(middle_before) > _DIFF_LIMIT or len(middle_after) > _DIFF_LIMIT:
-        opcodes = [("replace", 0, len(middle_before), 0, len(middle_after))]
-    else:
-        opcodes = difflib.SequenceMatcher(None, middle_before, middle_after, autojunk=False).get_opcodes()
-    for tag, i1, _i2, j1, j2 in opcodes:
+    for tag, i1, _i2, j1, j2 in char_opcodes(before, after):
         if tag == "equal":
             continue
-        i1, j1, j2 = i1 + prefix, j1 + prefix, j2 + prefix
         if first_before is None:
             first_before, first_after = i1, j1
         if j2 > j1:
@@ -203,7 +186,9 @@ class QuoteCheckDialog(QDialog):
     fixesReady = Signal(list, int)
 
     def __init__(self, raw_lines: list, parent=None, selected_ranges=None, selected_count: int = 0,
-                 enabled_kinds=None, title_rows=None):
+                 enabled_kinds=None, title_rows=None, defer_scan: bool = False):
+        """defer_scan：大檔剛開、逐行判斷的快取還沒暖好時，先把視窗開出來，自己分批算好再檢查
+        （同步掃要卡將近一秒，C-26）；等待中改範圍、改本文都只記下來，算好時用當時的設定檢查。"""
         super().__init__(parent)
         self.setWindowTitle("標點校對")
         size_dialog(self, 960, 640)
@@ -217,6 +202,10 @@ class QuoteCheckDialog(QDialog):
         self._checked: set[int] = set()
         self.result_lines: list | None = None
         self.applied_count = 0
+        self._warm_from = 0 if defer_scan else None    # 等待中：下一批從哪一行開始算；None＝不用等
+        self._warm_timer = QTimer(self)
+        self._warm_timer.setSingleShot(True)
+        self._warm_timer.timeout.connect(self._warm_step)
 
         root, footer = dialog_frame(self, intro="找出引號、斷行、標點與可疑字詞的問題，有正確寫法的可以勾選後一次修正。")
         root.setSpacing(12)
@@ -291,6 +280,28 @@ class QuoteCheckDialog(QDialog):
         footer.addWidget(buttons)
 
         self._fill_separator_styles()
+        if self.waiting():
+            self._update_status()
+            self._warm_timer.start(0)
+        else:
+            self._run_scan()
+
+    def waiting(self) -> bool:
+        return self._warm_from is not None
+
+    def _warm_step(self):
+        if not self.waiting() or not self.isVisible():
+            return                  # 關掉了：不用再算（重新打開會建新的視窗）
+        lines = self._raw_lines     # 等待中 reload 換了本文也沒關係：照新的繼續算，沒算到的檢查時再算
+        deadline = time.perf_counter() + _WARM_SLICE
+        while self._warm_from < len(lines) and time.perf_counter() < deadline:
+            end = self._warm_from + _WARM_CHUNK_LINES
+            warm_line_checks(lines[self._warm_from:end])
+            self._warm_from = end
+        if self._warm_from < len(lines):
+            self._warm_timer.start(0)
+            return
+        self._warm_from = None
         self._run_scan()
 
     # ------------------------------------------------------------------
@@ -358,6 +369,8 @@ class QuoteCheckDialog(QDialog):
                     break
 
     def _run_scan(self, *_args):
+        if self.waiting():
+            return                  # _warm_step 算完會用當時的設定檢查
         ranges = self._selected_ranges if self.scope_check.isChecked() else None
         self._all_problems = scan_quote_problems(self._raw_lines, ranges, self._title_rows,
                                                  separator_target=self.separator_target())
@@ -406,6 +419,11 @@ class QuoteCheckDialog(QDialog):
         self._update_preview()
 
     def _update_status(self):
+        if self.waiting():
+            i18n.set_text(self.status_label, _WAITING_TEXT)
+            self.fix_button.setEnabled(False)
+            self.header_check.refresh()
+            return
         wrapped = getattr(self._all_problems, "wrapped", 0)
         if not self._all_problems:
             text = "沒有找到標點問題"

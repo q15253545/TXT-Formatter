@@ -1383,6 +1383,33 @@ class LanguageToggle(QWidget):
         painter.end()
 
 
+DIFF_LIMIT = 400        # 前後相同的部分去掉後，中間超過這麼多字就不細比
+
+
+def char_opcodes(old: str, new: str, limit: int = DIFF_LIMIT) -> list:
+    """逐字比對的 difflib opcodes，但先去掉頭尾相同的部分（線性），只細比中間；
+    中間還是超過 limit 字就整段當成 replace。整段交給 SequenceMatcher 在上萬個
+    重複字的段落要好幾秒（C-16）；粗一點的標示只會涵蓋真的有改的中間那段。"""
+    shorter = min(len(old), len(new))
+    prefix = 0
+    while prefix < shorter and old[prefix] == new[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < shorter - prefix and old[len(old) - 1 - suffix] == new[len(new) - 1 - suffix]:
+        suffix += 1
+    end_old, end_new = len(old) - suffix, len(new) - suffix
+    opcodes = [("equal", 0, prefix, 0, prefix)] if prefix else []
+    if end_old - prefix > limit or end_new - prefix > limit:
+        opcodes.append(("replace", prefix, end_old, prefix, end_new))
+    elif end_old > prefix or end_new > prefix:
+        middle = difflib.SequenceMatcher(None, old[prefix:end_old], new[prefix:end_new], autojunk=False)
+        opcodes += [(tag, a + prefix, b + prefix, c + prefix, d + prefix)
+                    for tag, a, b, c, d in middle.get_opcodes()]
+    if suffix:
+        opcodes.append(("equal", end_old, len(old), end_new, len(new)))
+    return opcodes
+
+
 class ContextPreview(QTextEdit):
     """工具視窗表格下面的「前後文」：選到的那幾行加上前後幾行。選到的那段加淡底色，
     找到的部分照本文的字色標出來；可以修正的（標點校對）直接在同一行標出改動。沒有選取時藏起來。
@@ -1541,8 +1568,7 @@ class ContextPreview(QTextEdit):
                 if part:
                     self._cursor.insertText(part, char_format)
 
-        matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        for tag, i1, i2, j1, j2 in char_opcodes(old, new):
             if tag == "equal":
                 put(new[j1:j2], plain)
                 continue

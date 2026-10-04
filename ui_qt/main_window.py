@@ -1109,16 +1109,19 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._warm_waiters.clear()
         clear_line_caches()
 
-    def _caches_cold(self) -> bool:
-        """Are the scan windows' caches (phase 0) still far from warm? A little left (a small file, or warming
-        almost done) is just finished now — well under half a second — so only a large file makes a scan wait."""
-        if self._warm_lines is None or self._warm_phase > 0:
+    def _caches_cold(self, phase: int = 0) -> bool:
+        """Are the scan windows' caches (WARM_PHASES up to `phase`: 0 for the ad / note scans, 1 for the punctuation
+        check) still far from warm? A little left (a small file, or warming almost done) is just finished now — well
+        under half a second — so only a large file makes a scan wait."""
+        lines = self._warm_lines
+        if lines is None or self._warm_phase > phase:
             return False
-        if len(self._warm_lines) - self._warm_position > WARM_NOW_LINES:
+        if (phase - self._warm_phase + 1) * len(lines) - self._warm_position > WARM_NOW_LINES:
             return True
-        WARM_PHASES[0](self._warm_lines[self._warm_position:])
-        self._warm_position = len(self._warm_lines)
-        self._warm_step()           # moves on to the next phase and runs anything waiting
+        while self._warm_lines is not None and self._warm_phase <= phase:
+            WARM_PHASES[self._warm_phase](lines[self._warm_position:])
+            self._warm_position = len(lines)
+            self._warm_step()       # moves on to the next phase and runs anything waiting
         return False
 
     def _when_warm(self, callback):
