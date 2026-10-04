@@ -783,6 +783,20 @@ _HTML_TAG = re.compile(r"</?(?:p|br|div|span|font|b|i|u|em|strong|a|img|hr|cente
                        r"(?:\s[^<>]{0,300})?\s*/?>", re.IGNORECASE)
 
 
+# 換行的標籤（<br>、段落、表格列）：夾在兩段字中間時代表換行，拿掉要拆成兩行，不然兩段會黏在一起
+_HTML_BREAK = re.compile(r"<\s*(?:br|hr)\b[^<>]{0,300}>|</?\s*(?:p|div|tr|table)\b(?:\s[^<>]{0,300})?\s*/?>",
+                         re.IGNORECASE)
+
+
+def strip_html_tags(line: str) -> str:
+    """拿掉網頁標籤：行內的（<b>、<span>…）直接拿掉；換行的標籤夾在兩段字中間時換成換行字元，
+    apply_candidates 套用時拆成好幾行。拆出來的空段不留（行首、行尾的 <br>）。"""
+    text = _HTML_TAG.sub("", _HTML_BREAK.sub("\n", line))
+    if "\n" not in text:
+        return text
+    return "\n".join(part for part in text.split("\n") if part.strip())
+
+
 def entity_candidates(lines) -> list:
     """網頁字元碼：每一行一個候選，帶著換回原字之後的樣子（fix）。章節標題裡的也算
     （「第七卷 我家住在&#32418;土高坡」），只換字、不動其他內容。"""
@@ -792,7 +806,7 @@ def entity_candidates(lines) -> list:
         has_entity = "&" in line and _HTML_ENTITY.search(line)
         has_tag = "<" in line and _HTML_TAG.search(line)
         if has_entity or has_tag:
-            fixed = _decode_entities(_HTML_TAG.sub("", line))
+            fixed = _decode_entities(strip_html_tags(line))
             if fixed != line:
                 candidates.append({"start": row, "end": row, "types": {"entity"}, "confidence": "高",
                                    "score": 5, "preview": line, "line": row + 1, "fix": fixed})
@@ -846,7 +860,7 @@ def scan_ad_candidates(lines, enabled_categories=None, line_ranges=None, title_r
             if candidate.get("fix") is not None and candidate["start"] in entities:
                 entities.pop(candidate["start"])
                 candidate["types"] = candidate["types"] | {"entity"}
-                candidate["fix"] = _decode_entities(_HTML_TAG.sub("", candidate["fix"]))
+                candidate["fix"] = _decode_entities(strip_html_tags(candidate["fix"]))
         candidates = sorted(candidates + list(entities.values()), key=lambda item: (item["start"], item["end"]))
     if "lost" in enabled:
         # 同一行已經有換字的候選（網頁字元碼、文中廣告片段）：併成一個，問號在它的結果上拿掉
@@ -871,7 +885,8 @@ def scan_ad_candidates(lines, enabled_categories=None, line_ranges=None, title_r
 
 def apply_candidates(lines, candidates):
     """把候選處理掉，回傳（新的整份行, 刪了幾行, 換了幾行）：有 fix 的（網頁字元碼、夾在正文裡的網址片段）
-    那一行換成 fix，其餘刪掉 start～end 整段（重疊、相鄰的併成一段）。那一行跟掃描時不一樣（本文改過）的
+    那一行換成 fix（fix 裡的「
+」拆成好幾行），其餘刪掉 start～end 整段（重疊、相鄰的併成一段）。那一行跟掃描時不一樣（本文改過）的
     fix 不套用。掃描視窗的「處理已勾選項目」與內容檢查卡片的「刪除這筆」共用。"""
     result = list(lines)
     replaced = 0
@@ -887,7 +902,11 @@ def apply_candidates(lines, candidates):
             merged.append((start, end))
     for start, end in reversed(merged):
         del result[start:end + 1]
-    return result, len(lines) - len(result), replaced
+    removed = len(lines) - len(result)
+    if any("\n" in line for line in result):
+        # 換行標籤拆成的好幾行（strip_html_tags）：最後才拆，上面的行號都還是原本的
+        result = [part for line in result for part in line.split("\n")]
+    return result, removed, replaced
 
 
 def _drop_front_matter(candidates, lines, title_rows):

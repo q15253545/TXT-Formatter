@@ -42,33 +42,41 @@ def _split_points(text: str):
 
     只看引號、括號、句末標點這幾種字（_MARKS 找出來），一般的字直接跳過：長段落逐字走會太慢。"""
     strong, weak = [], []
-    depth = 0
+    # 照開的順序記著該用哪個符號關：「…）這種種類不對的也當成關掉（不然後面整段都算在引號裡、一個拆點都沒有），
+    # 只是不算成對
+    expected = []
     balanced = True
     total = len(text)
     skip_to = 0
+
+    def close(char):
+        nonlocal balanced
+        if not expected:
+            balanced = False
+            return
+        if expected.pop() != char:
+            balanced = False
+
     for match in _MARKS.finditer(text):
         index = match.start()
         if index < skip_to:
             continue
         kind = match.lastgroup
         if kind == "open":
-            depth += 1
+            expected.append(QUOTE_PAIRS[match.group()])
         elif kind == "close":
-            if depth:
-                depth -= 1
-            else:
-                balanced = False
+            close(match.group())
         else:
             end = match.end()
             # 句末後面緊跟的右引號、右括號算在這一句裡
-            while end < total and depth and text[end] in _CLOSERS:
-                depth -= 1
+            while end < total and expected and text[end] in _CLOSERS:
+                close(text[end])
                 end += 1
-            if depth == 0 and end < total:
+            if not expected and end < total:
                 # 整串都是刪節號才算弱拆點（「……？」是問句）
                 (weak if not match.group().strip("…") else strong).append(end)
             skip_to = end
-    if depth:
+    if expected:
         balanced = False
     return strong, weak, balanced
 

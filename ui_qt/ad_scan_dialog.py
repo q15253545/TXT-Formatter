@@ -164,7 +164,8 @@ class _CandidatePane(QWidget):
             preview = re.sub(r"\s+", " ", candidate["preview"]).strip()
             if candidate.get("fix") is not None:
                 # 整行只有遺失的字（??）時換成空行：箭頭後面什麼都沒有看不懂，寫出來
-                preview = f"{preview} → {candidate['fix'].strip() or i18n.T('（換成空行）')}"
+                fixed = candidate["fix"].strip().replace("\n", " ↵ ")
+                preview = f"{preview} → {fixed or i18n.T('（換成空行）')}"
             # 內容預覽可以橫向捲動，只擋住幾十行串成一行的極端情況
             if len(preview) > 1000:
                 preview = preview[:999] + "…"
@@ -229,6 +230,13 @@ class _CandidatePane(QWidget):
     def _set_all_checked(self, checked: bool):
         self._selected = set(self._shown) if checked else set()
         self.refresh()
+
+
+def _edge_blanks(lines) -> tuple:
+    """開頭、結尾各有幾行空行。"""
+    lead = next((index for index, line in enumerate(lines) if line.strip()), len(lines))
+    trail = next((index for index, line in enumerate(reversed(lines)) if line.strip()), len(lines))
+    return lead, trail
 
 
 class AdScanDialog(QDialog):
@@ -483,12 +491,18 @@ class AdScanDialog(QDialog):
         ):
             return
 
-        lines, _removed, replaced = apply_candidates(self._raw_lines, selected)
-        while lines and not lines[0].strip():
-            lines.pop(0)
-        while lines and not lines[-1].strip():
-            lines.pop()
+        lines, removed, replaced = apply_candidates(self._raw_lines, selected)
+        # 刪掉開頭／結尾的廣告後露出來的空行才拿掉；原本就有的頭尾空行不是這次處理的範圍（只刪選取章節時更不能動）
+        lead, trail = _edge_blanks(self._raw_lines)
+        new_lead, new_trail = _edge_blanks(lines)
+        before_trim = len(lines)
+        if new_lead < len(lines):
+            del lines[len(lines) - max(0, new_trail - trail):]
+            del lines[:max(0, new_lead - lead)]
+        else:
+            lines = []           # 整份都刪光了
 
         self.result_lines = lines
-        self.result_summary = (len(self._raw_lines) - len(lines), replaced)
+        # 拆行（換行標籤）會多出行：刪了幾行照實際刪掉的算
+        self.result_summary = (removed + before_trim - len(lines), replaced)
         self.deletionReady.emit(lines)
