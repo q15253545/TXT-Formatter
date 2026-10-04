@@ -9,6 +9,7 @@ metadata 有書名與作者。用標準函式庫就讀得到，不需要另外�
 import posixpath
 import re
 import zipfile
+import zlib
 import xml.etree.ElementTree as ElementTree
 from html.parser import HTMLParser
 from urllib.parse import unquote
@@ -98,17 +99,23 @@ def _document_lines(markup: str) -> list:
     return parser.lines
 
 
-def _decode(data: bytes) -> str:
-    if data.startswith(b"\xef\xbb\xbf"):
-        return data[3:].decode("utf-8", "replace")
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return data.decode("utf-16", "replace")
+def _decode(data: bytes, href: str) -> str:
+    # 一律嚴格解碼：用「�」換掉解不開的字，匯入看起來成功、實際上字已經沒了（跟 TXT 不預設容錯同理）
+    try:
+        if data.startswith(b"\xef\xbb\xbf"):
+            return data[3:].decode("utf-8")
+        if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return data.decode("utf-16")
+    except UnicodeDecodeError as error:
+        raise EpubError(f"章節檔 {href} 有解不開的字元") from error
     head = data[:200].decode("ascii", "replace")
     declared = re.search(r"encoding=[\"']([\w.-]+)", head)
-    try:
-        return data.decode(declared.group(1) if declared else "utf-8")
-    except (LookupError, UnicodeDecodeError):
-        return data.decode("utf-8", "replace")
+    for codec in ((declared.group(1), "utf-8") if declared else ("utf-8",)):
+        try:
+            return data.decode(codec)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    raise EpubError(f"章節檔 {href} 有解不開的字元")
 
 
 def _opf_path(archive: zipfile.ZipFile) -> str:
@@ -181,9 +188,13 @@ def read_epub(path: str) -> tuple:
         lines = []
         for href in documents:
             try:
-                markup = _decode(archive.read(href))
-            except KeyError:
-                continue
+                data = archive.read(href)
+            except KeyError as error:
+                # 目錄（spine）列了卻不在檔案裡：略過的話會變成少章的書卻顯示匯入成功
+                raise EpubError(f"缺少章節檔：{href}") from error
+            except (zipfile.BadZipFile, zlib.error, OSError, NotImplementedError) as error:
+                raise EpubError(f"章節檔 {href} 損壞：{error}") from error
+            markup = _decode(data, href)
             chunk = _document_lines(markup)
             if chunk:
                 if lines:

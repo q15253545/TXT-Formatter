@@ -356,12 +356,17 @@ class ToolWindowsMixin:
     def _mark_targets(self) -> list:
         """本文字色標出來、逐筆檢查可以一筆一筆跳過去的候選（照信心篩選），照位置排好。
         掃描結果不是這一版本文的（剛改過、還在重掃）就沒有。"""
-        if self._mark_rows_version != self._text_version:
+        if not self._mark_results_current():
             return []
         levels = self.review_bar.mark_confidence()
         found = [candidate for kind in ("ad", "note") for candidate in self._mark_candidates[kind]
                  if candidate["confidence"] in levels]
         return sorted(found, key=lambda candidate: (candidate["start"], candidate["end"]))
+
+    def _mark_results_current(self) -> bool:
+        """掃描結果對應的是目前這一版本文、目前目錄認出的標題行。"""
+        return (self._mark_rows_version == self._text_version
+                and self._mark_rows_generation == self._outline_generation)
 
     def _refresh_mark_rows(self):
         """照信心篩選把候選換成要上色的行；同一行兩種都是用廣告的顏色。"""
@@ -450,6 +455,7 @@ class ToolWindowsMixin:
         self._sync_raw_lines()
         lines = list(self.raw_lines)
         version = self._text_version
+        self._mark_scan_generation = self._outline_generation
         # 目錄過期（剛改過本文）：在同一個背景執行緒裡連目錄一起辨識，畫面只負責把結果畫上去
         # （在畫面上重建目錄，大檔要半秒以上）。
         toc_ctx = None
@@ -489,7 +495,8 @@ class ToolWindowsMixin:
 
     def _on_mark_scan_finished(self, version: int, ad_found, note_found, structure=None):
         self._mark_scan_running = False
-        if self._mark_scan_pending or version != self._text_version:
+        if (self._mark_scan_pending or version != self._text_version
+                or self._mark_scan_generation != self._outline_generation):
             self._mark_scan_pending = False
             if self.review_bar.marking() and version != -1:
                 self._schedule_mark_scan()
@@ -499,10 +506,11 @@ class ToolWindowsMixin:
             return
         self._mark_candidates = {"ad": list(ad_found), "note": list(note_found)}
         self._refresh_mark_rows()
-        self._mark_rows_version = version
         if structure is not None and self._toc_text_version != version:
-            self._populate_tree(structure)
+            self._populate_tree(structure, rescan_marks=False)
             self._warn_timed_out_rules()
+        self._mark_rows_version = version
+        self._mark_rows_generation = self._outline_generation
         self._refresh_title_formats()
         self._update_mark_position()
         # 剛用「刪除這筆」刪掉一筆（接著停在下一筆），或重掃時按了上一筆／下一筆：重掃好了，照按的方向跳。
@@ -517,7 +525,7 @@ class ToolWindowsMixin:
     def _apply_mark_colors(self, cursor: QTextCursor):
         """把掃描到的廣告／作者感言那幾行換成對應的字色（章節標題不動）。
         只在掃描結果對應的就是目前這一版本文時才畫：行號過期會標錯行。"""
-        if not self.review_bar.marking() or self._mark_rows_version != self._text_version:
+        if not self.review_bar.marking() or not self._mark_results_current():
             return
         document = self.editor.document()
         title_rows = set(self.chapter_raw_map.values())

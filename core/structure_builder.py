@@ -247,6 +247,7 @@ class RenderState:
     last_chapter_number: float = None
     current_volume_number: int = None
     real_volume_numbers: dict = field(default_factory=dict)
+    real_volume_units: list = field(default_factory=list)      # 真正卷標題的單位（卷、部、集…），照出現順序
     volume_end_marks: list = field(default_factory=list)
     arabic_volume_numbers: bool = False
     # 合併下行標題的預覽：標題行號 → (章名所在行號, 接上去的章名)
@@ -286,7 +287,12 @@ def _same_title_body(first: str, second: str) -> bool:
     return not first or not second or first == second
 
 
-def _find_duplicate_heading(ctx: BuildContext, start: int, identity, body: str):
+def _same_range(first: str, second: str) -> bool:
+    """兩個標題涵蓋的章一樣：「第7～9章 渡口」底下接「第七章 渡口」是一組裡的第一章，不是同一個標題重貼。"""
+    return chapter_range_end(first) == chapter_range_end(second)
+
+
+def _find_duplicate_heading(ctx: BuildContext, start: int, identity, body: str, origin: str = ''):
     """從 start 往下找：同一章的標題又出現一次、中間的正文不到 DUPLICATE_CONTENT_LIMIT 字，回傳那一行。
     中間遇到別的標題、或正文夠多了，就不是重複。"""
     from .word_count import char_count
@@ -302,7 +308,8 @@ def _find_duplicate_heading(ctx: BuildContext, start: int, identity, body: str):
             return None               # 中間隔著卷、特殊標題或使用者指定的標題：不是同一段
         parsed = parse_lv2(text)
         if parsed and not is_weak_numbered_title(text):
-            return row if _same_chapter_identity(parsed, *identity) and _same_title_body(parsed[5], body) else None
+            return row if (_same_chapter_identity(parsed, *identity) and _same_title_body(parsed[5], body)
+                           and _same_range(origin, text)) else None
         content += char_count(text)
         if content >= DUPLICATE_CONTENT_LIMIT:
             return None
@@ -629,7 +636,8 @@ def render_mixed_title(ctx: BuildContext, state: RenderState, apply_format, mixe
     else:
         state.current_lv1_node = state.volume_nodes[volume_key]
     state.latest_volume_node = state.current_lv1_node
-    _note_volume(state, state.current_lv1_node, mixed_data['volume_number'], mixed_data['volume_number_text'])
+    _note_volume(state, state.current_lv1_node, mixed_data['volume_number'], mixed_data['volume_number_text'],
+                 mixed_data['volume_unit'])
     state.last_chapter_number = mixed_data['chapter_number']
     chapter_node = ctx.tree.insert(state.current_lv1_node, 'end', text=chapter_title)
     if apply_format:
@@ -703,7 +711,7 @@ def render_volume_title(ctx: BuildContext, state: RenderState, apply_format, cus
                           apply_format, title_raw_idx, manual_marked)
         state.latest_volume_node = state.current_lv1_node
         _note_volume(state, state.current_lv1_node, v_num,
-                     original_number_text(line_str, v_unit) if v_unit else '')
+                     original_number_text(line_str, v_unit) if v_unit else '', v_unit)
     state.idx += 1
 
 
@@ -793,7 +801,7 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
                 # 單位、前綴、篇名、卷名都一致，而且章名一樣（或其中一個只有章號）才算重複；
                 # 「第12章 風起」「第12章 雲湧」多半是作者編號打錯，兩章都留著，交給「重複章節」勾選。
                 if ch_num > 0 and _same_chapter_identity(p_data, arc, vol, ch_prefix, ch_num, ch_unit) \
-                        and _same_title_body(ch_body, strip_title_body(p_body)):
+                        and _same_title_body(ch_body, strip_title_body(p_body)) and _same_range(line_str, nxt):
                     dup_cands.append((nxt, p_body, peek))
                     peek += 1
                     continue
@@ -815,7 +823,8 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
     if vol:
         extra_prefix += vol.strip() + ' '
     if ctx.skip_duplicate_titles and not apply_format and ch_num:
-        duplicate = _find_duplicate_heading(ctx, state.idx, (arc, vol, ch_prefix, ch_num, ch_unit), ch_body)
+        duplicate = _find_duplicate_heading(ctx, state.idx, (arc, vol, ch_prefix, ch_num, ch_unit), ch_body,
+                                            chosen_raw)
         if duplicate is not None:
             state.absorbed_titles[duplicate] = chosen_raw_idx
     if ch_num and ch_prefix == '第':
@@ -913,12 +922,14 @@ def _note_merge(state: RenderState, apply_format, title_row, subtitle_row, subti
         state.merged_titles[title_row] = (subtitle_row, subtitle)
 
 
-def _note_volume(state: RenderState, node, number, number_text):
-    """記下真正的卷標題：卷號（推定卷避開重複卷號用）與編號寫法。"""
+def _note_volume(state: RenderState, node, number, number_text, unit=''):
+    """記下真正的卷標題：卷號（推定卷避開重複卷號用）、編號寫法與單位（推定卷跟著用）。"""
     number = int(number) if number and float(number).is_integer() else None
     state.current_volume_number = number
     if node and not state.collection_active:
         state.real_volume_numbers[node] = number
+        if unit:
+            state.real_volume_units.append(unit)
     if number_text and re.search(r'[0-9０-９]', str(number_text)):
         state.arabic_volume_numbers = True
 
@@ -1079,7 +1090,9 @@ def infer_virtual_volumes(ctx: BuildContext, state: RenderState) -> dict:
     block['next'] = None
     blocks.append(block)
 
-    unit = state.volume_end_marks[0][2] if state.volume_end_marks else '卷'
+    # 補出來的卷跟作者的寫法同一個單位：只寫了「第二部」，前面補的是「第一部」不是「第一卷」
+    unit = (state.volume_end_marks[0][2] if state.volume_end_marks
+            else state.real_volume_units[0] if state.real_volume_units else '卷')
     if state.opts.num_style == '阿拉伯數字':
         arabic = True
     elif state.opts.num_style == '中文數字':

@@ -218,6 +218,11 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._mark_candidates = {"ad": [], "note": []}
         self._mark_rows = {"ad": set(), "note": set()}
         self._mark_rows_version = None
+        # 目錄認出的標題行每變一次就加一（改辨識規則、結構時本文版本不變）：掃描結果是照當時的標題行排除的，
+        # 標題行變了就作廢，免得新認成標題的行還被當成廣告刪掉
+        self._outline_generation = 0
+        self._mark_rows_generation = None
+        self._mark_scan_generation = None
         self._mark_current = -1
         self._mark_advance_pending = False
         self._mark_pending_step = None       # 還在重掃時按的上一筆／下一筆（True＝下一筆）：掃好再跳
@@ -1984,8 +1989,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             self.tree.scrollToItem(current, QTreeWidget.ScrollHint.EnsureVisible)
 
     @timed
-    def _populate_tree(self, result):
+    def _populate_tree(self, result, rescan_marks: bool = True):
+        """rescan_marks=False：這份目錄是字色標示的背景掃描一起辨識的，掃描結果已經照它排除標題行。"""
         self._toc_fold_timer.start()
+        old_title_rows = set(self.chapter_raw_map.values())
         view = self._capture_tree_view() if self.toc_full_labels else None
         self.tree.clear()
         node_map = {}
@@ -2017,6 +2024,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.toc_boundary_map = dict(self.chapter_index_map)
 
         self._toc_text_version = self._text_version
+        if set(self.chapter_raw_map.values()) != old_title_rows:
+            self._outline_generation += 1
+            if rescan_marks and self.review_bar.marking():
+                self._schedule_mark_scan(0)
         # 麵包屑要靠「行號 → 章節」查表；先排好序，游標移動時就只要二分搜尋，
         # 不必每次掃過全部章節。
         self._breadcrumb_rows = sorted(self.chapter_index_map.values())
@@ -2551,13 +2562,14 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         for result in results:
             details = []
             if result["missing_ranges"]:
-                details.append("章號缺口 " + "、".join(
-                    str(a) if a == b else f"{a}–{b}" for a, b in result["missing_ranges"]))
+                # 寫成「缺第 89 章」：只寫「章號缺口 89」會被讀成少了 89 章
+                details.append("缺第 " + "、".join(
+                    str(a) if a == b else f"{a}–{b}" for a, b in result["missing_ranges"]) + " 章")
             if result["duplicates"]:
-                details.append("重複 " + compact_number_ranges(result["duplicates"]))
+                details.append("第 " + compact_number_ranges(result["duplicates"]) + " 章重複")
             if result.get("misplaced"):
-                details.append("順序錯亂 " + compact_number_ranges(
-                    sorted(int(number) for _index, number, _where, _target in result["misplaced"])))
+                details.append("第 " + compact_number_ranges(
+                    sorted(int(number) for _index, number, _where, _target in result["misplaced"])) + " 章順序錯亂")
             if details:
                 prefix = "" if result["label"] == "全書" else f"{result['label']}："
                 problems.append(prefix + "、".join(details))
@@ -2598,8 +2610,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         for start, end in result["missing_ranges"]:
             # 缺口接在「號碼最接近的前一章」後面；錯放在別處的章號不影響位置
             previous = max(((number, row) for row, number, _node in nodes if number < start), default=(0, first_row))
-            found = sorted((number, row, reason) for number in range(start, end + 1)
-                           for row, reason in uncollected.get(number, ()) if first_row <= row <= last_row)
+            # 從找到的標題反查，不逐一列出缺的號碼（缺口可能差到上億）
+            found = sorted((number, row, reason) for number, hits in uncollected.items()
+                           if start <= number <= end and float(number).is_integer()
+                           for row, reason in hits if first_row <= row <= last_row)
             entries.append({"kind": "gap", "start": start, "end": end, "row": previous[1] + 0.5, "found": found})
         for number in result["duplicates"]:
             rows = [row for row, value, _node in nodes if value == number]

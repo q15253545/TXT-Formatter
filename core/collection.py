@@ -651,7 +651,8 @@ def misplaced_chapters(numbers) -> dict:
             supplied = {int(numbers[index]) for index in gap_indices}
             low = int(values[slot - 1]) + 1 if slot else min(supplied)
             high = int(values[slot]) - 1 if slot < len(values) else max(supplied)
-            if not set(range(low, high + 1)) <= supplied:
+            # supplied 不重複：區間裡的號碼個數等於區間長度就是補滿了（不要真的列出區間，章號可能差到上億）
+            if sum(low <= value <= high for value in supplied) < high - low + 1:
                 continue
             for index in gap_indices:
                 found[index] = ("after", ordered[slot - 1]) if slot else ("before", ordered[0])
@@ -680,7 +681,9 @@ def move_chapter_blocks(lines, moves) -> list:
     return result
 
 
-_MERGED_NUMBER = re.compile(r"第\s*[0-9０-９]+\s*[、，,]\s*([0-9]{1,4})\s*[章回節节]")
+# 前後兩個號碼都可以是全形（辨識章號時全形、半形一樣看待）
+_MERGED_NUMBER = re.compile(r"第\s*[0-9０-９]+\s*[、，,]\s*([0-9０-９]{1,4})\s*[章回節节]")
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
 def chapter_gap_report(numbers, label, mode="僅檢查中間缺口", previous_last=None, titles=None):
@@ -723,8 +726,8 @@ def chapter_gap_report(numbers, label, mode="僅檢查中間缺口", previous_la
                 covered.update(range(int(number) + 1, range_end + 1))
             also = _MERGED_NUMBER.search(title or "")
             if also:
-                tail = also.group(1)
-                second = int(str(number)[:-len(tail)] + tail) if len(tail) < len(str(number)) else int(tail)
+                tail, head = also.group(1).translate(_FULLWIDTH_DIGITS), str(int(number))
+                second = int(head[:-len(tail)] + tail) if len(tail) < len(head) else int(tail)
                 if number < second <= number + 9:
                     covered.add(second)
         values = sorted(covered)
