@@ -174,7 +174,7 @@ class ToolWindowsMixin:
 
         def create():
             dialog = WordCountDialog(*self._word_counts(), self)
-            dialog.chapterSelected.connect(lambda row: self._jump_to_line(row + 1))
+            dialog.chapterSelected.connect(lambda row: self._jump_to_line_and_chapter(row + 1))
             return dialog
 
         def reload(dialog):
@@ -933,6 +933,16 @@ class ToolWindowsMixin:
     def _jump_to_line(self, line_number: int):
         """跳到某一行並整行反白（檢查清單點選用，1 起算）。"""
         self._highlight_ad_candidate(line_number - 1, line_number - 1)
+
+    def _jump_to_line_and_chapter(self, line_number: int):
+        """跳到某一行，目錄也選到那一行所屬的章（游標移動時麵包屑已經算好）。
+        只給章節導向的結果用：非正文內容、標點校對的範圍是照目錄選取算的，不能被點一筆結果改掉。"""
+        self._jump_to_line(line_number)
+        item = self._breadcrumb_current
+        if item is not None:
+            self.tree.clearSelection()
+            self.tree.setCurrentItem(item)
+            self.tree.scrollToItem(item)
 
     @action
     def open_recognition_dialog(self):

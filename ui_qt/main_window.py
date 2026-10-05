@@ -2595,6 +2595,15 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 章節管理卡片收起來時不算（看不到）；再打開卡片時重算一次
         if not self._missing_report_active or not self.chapter_panel.isVisible():
             return
+        self._sync_raw_lines()
+        if self._toc_text_version != self._text_version:
+            # 目錄落後本文時不顯示舊目錄算的結果（C-17）。重建完 _populate_tree 會再呼叫這裡；
+            # 大檔在背景辨識，舊結果先收起來。
+            if self._toc_behind():
+                self.chapter_panel.clear_report()
+                self._show_status("目錄更新中，好了就顯示檢查結果")
+                self._when_toc_current(lambda: None)
+            return
         results = self._find_collection_missing_from_toc()
         self._missing_groups = [result["nodes"] for result in results]
         uncollected = self._uncollected_headings() if any(r["missing_ranges"] for r in results) else {}
@@ -2701,7 +2710,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             self.open_word_count_dialog()
             return
         if link.startswith("line|"):
-            self._jump_to_line(int(link.split("|")[1]) + 1)
+            self._jump_to_line_and_chapter(int(link.split("|")[1]) + 1)
             return
         try:
             group_index, number, kind = link.split("|")
