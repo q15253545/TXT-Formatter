@@ -390,6 +390,10 @@ class _LevelPage(QWidget):
         self.combo_list.setCurrentRow(max(0, min(select, self.combo_list.count() - 1)))
         self.show_current()
 
+    def _rebuild_selecting(self, rule):
+        """清單順序是內建＋積木組合＋自己寫的規則：新組合不在最後一列，要照物件找它在哪。"""
+        self.rebuild_list(next(i for i, entry in enumerate(self.entries()) if entry is rule))
+
     def _list_row(self, rule, index: int) -> QWidget:
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -459,7 +463,7 @@ class _LevelPage(QWidget):
         rule = block_rule(blocks, self.level)
         self._dialog.combos[self.level].append(rule)
         self._last = {}
-        self.rebuild_list(len(self.entries()) - 1)
+        self._rebuild_selecting(rule)
         self.name_input.setFocus()
 
     def _add_blank(self):
@@ -501,7 +505,7 @@ class _LevelPage(QWidget):
         rule = dict(rule or {"pattern": ""}, level=self.level, enabled=True)
         rule["name"] = rule.get("name") or f"自訂規則 {number}"
         self._dialog._plain.append(rule)
-        self.rebuild_list(len(self.entries()) - 1)
+        self._rebuild_selecting(rule)
         (self.pattern_input if not rule["pattern"] else self.name_input).setFocus()
 
     def _written_from_sample(self):
@@ -736,7 +740,7 @@ class _LevelPage(QWidget):
             self.lines_preview.hide()
             return
         row = self.lines_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-        self.lines_preview.show_rows(self._dialog._lines, row, row, active_tokens().accent)
+        self.lines_preview.show_rows(self._dialog._lines, row, row, "accent")
         self._dialog.candidateHighlighted.emit(row, row)
 
 

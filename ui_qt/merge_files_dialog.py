@@ -12,7 +12,6 @@ from core.file_merge import first_line, starts_with_heading
 from core.word_count import char_count
 from . import i18n
 from .sortable_table import PreviewTable, make_item, setup_columns
-from .theme import active_tokens
 from .widgets import ContextPreview, ToggleSwitch, dialog_frame, size_dialog
 
 
@@ -117,7 +116,7 @@ class MergeFilesDialog(QDialog):
             self.preview.hide()
             return
         lines = self._parts[index][1].split("\n")[:ContextPreview.MAX_BODY]
-        self.preview.show_rows(lines, 0, len(lines) - 1, active_tokens().text)
+        self.preview.show_rows(lines, 0, len(lines) - 1, "text")
 
     def _accept(self):
         self.result_parts = list(self._parts)

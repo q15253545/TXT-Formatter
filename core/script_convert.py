@@ -79,6 +79,35 @@ def parse_vocabulary(text: str) -> list:
     return pairs
 
 
+def vocabulary_problems(text: str) -> dict:
+    """用詞對照哪幾行沒作用（行號 1 起算，空行不算）：parse_vocabulary 會默默略過、或被後面蓋掉的。
+
+    malformed：沒有「=」；empty：有「=」但有一邊是空的；
+    shadowed：左邊跟後面某一行一樣，轉繁體時只有最後那行有效（行, 蓋掉它的行）；
+    reverse_shadowed：右邊跟後面某一行一樣，轉簡體時只有最後那行有效。effective：轉繁體時有效幾組。"""
+    malformed, empty, valid = [], [], []
+    for number, line in enumerate((text or "").split("\n"), start=1):
+        if not line.strip():
+            continue
+        left, separator, right = line.partition("=")
+        if not separator:
+            malformed.append(number)
+        elif not (left.strip() and right.strip()):
+            empty.append(number)
+        else:
+            valid.append((number, left.strip(), right.strip()))
+
+    def shadowed(side):
+        last = {}
+        for number, *words in valid:
+            last[words[side]] = number
+        return [(number, last[words[side]]) for number, *words in valid if last[words[side]] != number]
+
+    forward = shadowed(0)
+    return {"malformed": malformed, "empty": empty, "shadowed": forward, "reverse_shadowed": shadowed(1),
+            "effective": len(valid) - len(forward)}
+
+
 def _replace_all(text: str, mapping: dict) -> str:
     if not mapping:
         return text

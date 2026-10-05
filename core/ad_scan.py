@@ -797,6 +797,22 @@ def strip_html_tags(line: str) -> str:
     return "\n".join(part for part in text.split("\n") if part.strip())
 
 
+# 論壇轉存留下的 BBCode：只認常見的行內包裝（粗體、顏色、連結…），同一行裡開、關都有才拿掉標記，字留著；
+# 只有一邊的（可能是正文裡的方括號）不動
+_BBCODE_NAMES = ("b", "i", "u", "s", "color", "size", "font", "url", "align", "center", "backcolor")
+_BBCODE_TAG = re.compile(r"\[(/?)(" + "|".join(_BBCODE_NAMES) + r")(?:=[^\[\]\n]{1,200})?\]", re.IGNORECASE)
+
+
+def strip_bbcode(line: str) -> str:
+    tags = list(_BBCODE_TAG.finditer(line))
+    opened = {match.group(2).lower() for match in tags if not match.group(1)}
+    closed = {match.group(2).lower() for match in tags if match.group(1)}
+    paired = opened & closed
+    if not paired:
+        return line
+    return _BBCODE_TAG.sub(lambda match: "" if match.group(2).lower() in paired else match.group(0), line)
+
+
 def entity_candidates(lines) -> list:
     """網頁字元碼：每一行一個候選，帶著換回原字之後的樣子（fix）。章節標題裡的也算
     （「第七卷 我家住在&#32418;土高坡」），只換字、不動其他內容。"""
@@ -805,8 +821,9 @@ def entity_candidates(lines) -> list:
     for row, line in enumerate(lines):
         has_entity = "&" in line and _HTML_ENTITY.search(line)
         has_tag = "<" in line and _HTML_TAG.search(line)
-        if has_entity or has_tag:
-            fixed = _decode_entities(strip_html_tags(line))
+        has_bbcode = "[/" in line and _BBCODE_TAG.search(line)
+        if has_entity or has_tag or has_bbcode:
+            fixed = _decode_entities(strip_html_tags(strip_bbcode(line) if has_bbcode else line))
             if fixed != line:
                 candidates.append({"start": row, "end": row, "types": {"entity"}, "confidence": "高",
                                    "score": 5, "preview": line, "line": row + 1, "fix": fixed})

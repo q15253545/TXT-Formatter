@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
 
 from core.duplicate_chapters import RELATION_LABELS, apply_keep_choices, find_duplicate_groups, find_similar_groups
 from . import dialogs, i18n
-from .theme import active_tokens
 from .widgets import ContextPreview, dialog_frame, size_dialog
 from .sortable_table import HeaderCheckBox, PreviewTable, carry_over, make_item, setup_columns
 
@@ -139,7 +138,7 @@ class DuplicateChaptersDialog(QDialog):
         group_index, member = self._entries[rows[0].row()]
         group = self._groups[group_index]
         start, end = group["rows"][member], group["ends"][member] - 1
-        self.preview.show_rows(self._raw_lines, start, end, active_tokens().text)
+        self.preview.show_rows(self._raw_lines, start, end, "text")
         self.groupHighlighted.emit(start, end)
 
     def _set_all_checked(self, checked: bool):

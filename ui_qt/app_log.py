@@ -181,12 +181,19 @@ def _qt_message_handler(mode, context, message):
     log.log(_QT_LEVELS.get(mode, logging.WARNING), "Qt：%s", message)
 
 
+def _is_existing_path(value: str) -> bool:
+    """檔案路徑照記（查開檔、存檔問題要用）。不能只看有沒有「/」：「山路/過河」這種短本文、
+    搜尋字串也有，會被當成路徑寫進記錄檔。所以要是絕對路徑、而且真的存在。"""
+    return (len(value) < 260 and "\n" not in value and os.path.isabs(value)
+            and os.path.exists(value))
+
+
 def _describe_args(args) -> str:
     """只記下參數的「形狀」，不記內容：不把整份小說寫進記錄檔。"""
     parts = []
     for value in args:
         if isinstance(value, str):
-            parts.append(value if (os.sep in value or "/" in value) and len(value) < 260 else f"str({len(value)})")
+            parts.append(value if _is_existing_path(value) else f"str({len(value)})")
         elif isinstance(value, (int, float, bool)) or value is None:
             parts.append(repr(value))
         elif isinstance(value, (list, tuple, set, dict)):

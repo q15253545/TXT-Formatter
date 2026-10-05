@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
 
 from . import i18n
 from .sortable_table import HeaderCheckBox, PreviewTable, make_item, setup_columns
-from .theme import active_tokens
 from .widgets import ContextPreview, dialog_frame, size_dialog
 
 
@@ -91,7 +90,7 @@ class ChapterOrderDialog(QDialog):
             self.preview.hide()
             return
         move = self._moves[rows[0].row()]
-        self.preview.show_rows(self._raw_lines, move["start"], move["end"] - 1, active_tokens().text)
+        self.preview.show_rows(self._raw_lines, move["start"], move["end"] - 1, "text")
 
     def _set_all_checked(self, checked: bool):
         self._checked = set(range(len(self._moves))) if checked else set()

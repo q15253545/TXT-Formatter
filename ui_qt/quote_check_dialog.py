@@ -35,6 +35,7 @@ _KIND_TIPS = {
                       "網址、英文裡的點不會動。",
     "dash_run": "段落裡太長的破折號（——————、——-、中文裡的 ----）改成兩格「——」；"
                 "~~~~、～～～～ 改成一個「～」。整行的分隔線、英文與網址裡的不會動。",
+    "empty_quote": "引號裡沒有字（「」、「　」），多半是原文掉了字，也可能是作者故意留的；只列出來，不會修。",
     "masked": "中文字旁邊的一到四個星號（**），多半是被遮掉的字；只列出來。",
     "homoglyph": "英文字裡混著長得像英文字母的西里爾、希臘字母，改回英文字母。",
     "noise_dot": "中文字之間、章號裡的句點（大.走一步、第.1808章），拿掉。",
@@ -476,14 +477,13 @@ class QuoteCheckDialog(QDialog):
             return None
         problem = self._all_problems[data_index(self.table, rows[0].row())]
         fix = problem["fix"]
-        tokens = active_tokens()
         if fix:
             # 可以修正的：直接顯示修正後的樣子，同一行標出改動（fix 的範圍是 raw_lines 的索引，不含 end）
-            self.preview.show_fix(self._raw_lines, fix["start"], fix["end"] - 1, fix["after"], tokens.diff_text)
+            self.preview.show_fix(self._raw_lines, fix["start"], fix["end"] - 1, fix["after"], "diff_text")
         else:
             # 只是提醒的：那一行加底色，字不換色（problem["line"] 從 1 起算）
             row = problem["line"] - 1
-            self.preview.show_rows(self._raw_lines, row, row, tokens.text)
+            self.preview.show_rows(self._raw_lines, row, row, "text")
         return problem
 
     def _set_all_checked(self, checked: bool):

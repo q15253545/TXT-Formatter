@@ -46,6 +46,8 @@ from .window_common import AUTO_TOC_REFRESH_SECONDS, MARK_SCAN_DELAY_MS, OPEN_FI
 
 # 標點校對預設不勾的檢查項目（只能列出、數量常很多）
 QUOTE_DEFAULT_OFF = frozenset({"masked"})
+# 沒有記「當時有哪些項目」（quote_kinds_known）的舊設定：這些是那之後才加的
+QUOTE_KINDS_ADDED_R103 = frozenset({"empty_quote"})
 
 
 class ToolWindowsMixin:
@@ -138,11 +140,34 @@ class ToolWindowsMixin:
         """本文在對話框上次分析之後改過，就讓它重算；有重算回傳 True。"""
         if getattr(dialog, "_tool_version", None) is None or dialog._tool_version == self._text_version:
             return False
+        if getattr(dialog, "_tool_waiting", False):
+            return True
         self._sync_raw_lines()
-        if self.raw_lines and any(line.strip() for line in self.raw_lines):
-            self._ensure_toc_current()
+        if self.raw_lines and any(line.strip() for line in self.raw_lines) and self._toc_behind():
+            # 大檔：目錄在背景辨識，視窗先停用（舊結果的行號已經不對，不能讓人照著勾、套用），好了再重算
+            dialog._tool_waiting = True
+            dialog.setEnabled(False)
+            self._show_status("目錄更新中，好了就重新檢查")
+
+            def ready():
+                if not shiboken6.isValid(dialog) or dialog not in self._tool_dialogs.values():
+                    return
+                dialog._tool_waiting = False
+                dialog.setEnabled(True)
+                self._refresh_tool_dialog(dialog)
+            self._when_toc_current(ready)
+            return True
         dialog._tool_reload(dialog)
         dialog._tool_version = self._text_version
+        return True
+
+    def _defer_until_toc_current(self, reopen) -> bool:
+        """開工具視窗前目錄落後本文、又是大檔：先在背景辨識（畫面不卡），好了再呼叫 reopen 開視窗。
+        回傳 True＝已經改成等一下再開。"""
+        if not self._toc_behind():
+            return False
+        self._show_status("目錄更新中，好了就開視窗")
+        self._when_toc_current(reopen)
         return True
 
     def _on_tool_dialog_finished(self, key, dialog, result, on_closed):
@@ -170,7 +195,8 @@ class ToolWindowsMixin:
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
-        self._ensure_toc_current()
+        if self._defer_until_toc_current(self.open_word_count_dialog):
+            return
 
         def create():
             dialog = WordCountDialog(*self._word_counts(), self)
@@ -206,7 +232,8 @@ class ToolWindowsMixin:
         if not self.editor.toPlainText().strip():
             return
         self._sync_raw_lines()
-        self._ensure_toc_current()
+        if self._defer_until_toc_current(self.open_duplicate_chapters_dialog):
+            return
 
         def create():
             dialog = DuplicateChaptersDialog(self.raw_lines, set(self.chapter_raw_map.values()), self)
@@ -659,9 +686,15 @@ class ToolWindowsMixin:
         spans = self._selected_section_spans()
         # 記住勾了哪些；沒記過時星號遮字關著（只能列出、書裡常有上百處），其餘都開。
         # 「分隔線不一致」不是勾選框（由視窗裡的下拉決定），一律開著。
+        # 記住的時候還沒有的檢查項目（之後才加的）照預設開著，不然舊設定的人永遠看不到新項目。
         saved = self._ui_state.get("quote_kinds")
-        enabled = ((set(saved) & set(PROBLEM_LABELS) if isinstance(saved, list)
-                    else set(PROBLEM_LABELS) - QUOTE_DEFAULT_OFF) | {"separator_style"})
+        if isinstance(saved, list):
+            known = self._ui_state.get("quote_kinds_known")
+            known = set(known) if isinstance(known, list) else set(PROBLEM_LABELS) - QUOTE_KINDS_ADDED_R103
+            enabled = (set(saved) | (set(PROBLEM_LABELS) - known - QUOTE_DEFAULT_OFF)) & set(PROBLEM_LABELS)
+        else:
+            enabled = set(PROBLEM_LABELS) - QUOTE_DEFAULT_OFF
+        enabled |= {"separator_style"}
 
         def create():
             # 逐行判斷還沒暖好（大檔剛開）：視窗先出來，它自己分批算好再檢查；
@@ -688,6 +721,7 @@ class ToolWindowsMixin:
 
         def on_closed(dialog, _accepted):
             self._ui_state["quote_kinds"] = sorted(dialog.enabled_kinds())
+            self._ui_state["quote_kinds_known"] = sorted(PROBLEM_LABELS)
 
         self._open_tool_dialog("quote_check", create, reload, on_closed)
 
@@ -948,8 +982,9 @@ class ToolWindowsMixin:
     def open_recognition_dialog(self):
         """辨識章節：積木組合、單位與特殊標題、標題長度與章名結尾。非模式：開著時可以從本文複製一行貼上。"""
         self._sync_raw_lines()
-        if self.raw_lines and any(line.strip() for line in self.raw_lines):
-            self._ensure_toc_current()
+        if (self.raw_lines and any(line.strip() for line in self.raw_lines)
+                and self._defer_until_toc_current(self.open_recognition_dialog)):
+            return
 
         def create():
             dialog = RecognitionDialog(self.user_chapter_rules, lambda: list(self.raw_lines), self,

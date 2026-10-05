@@ -22,6 +22,7 @@ QUOTE_PROBLEM_LABELS = {
     "repeated_punct": "重複標點",
     "dash_run": "破折號、波浪號",
     "separator_style": "分隔線不一致",
+    "empty_quote": "空引號",
 }
 
 # 可疑字詞：不是標點，但同樣是逐行找、有正確寫法的直接修（標點校對視窗裡另成一組）
@@ -109,12 +110,16 @@ def word_problems(text: str) -> list:
 
 # 從網頁轉存時沒被轉回來的字元碼：&#29368;、&#x72B8;、&nbsp;、&amp;……
 # 
-_HTML_ENTITY = re.compile(r"&#[0-9]{2,7};|&#[xX][0-9a-fA-F]{2,6};|&(?:nbsp|amp|lt|gt|quot|apos|hellip|mdash|ldquo|rdquo);")
+_HTML_ENTITY = re.compile(r"&#[0-9]{2,7};|&#[xX][0-9a-fA-F]{2,6};"
+                          r"|&(?:nbsp|amp|lt|gt|quot|apos|hellip|mdash|ndash|ldquo|rdquo|lsquo|rsquo|middot|bull"
+                          r"|laquo|raquo|emsp|ensp|thinsp);")
+# 不換行空格、全形寬／半形寬空格都當一般空格（段首縮排另由排版處理）
+_ENTITY_SPACES = str.maketrans({"\xa0": " ", " ": " ", " ": " ", " ": " "})
 
 
 def _decode_entities(text: str) -> str:
     import html
-    return _HTML_ENTITY.sub(lambda match: html.unescape(match.group(0)).replace("\xa0", " "), text)
+    return _HTML_ENTITY.sub(lambda match: html.unescape(match.group(0)).translate(_ENTITY_SPACES), text)
 
 # ---------------------------------------------------------------- 分隔線、重複標點
 # 整行都是同一個符號、超過三個：保留原本的符號，縮成三個（-------- → ---）。
@@ -340,6 +345,8 @@ def _check_line(line: str) -> tuple:
         # 有開沒關：整行到結束都沒有收尾，通常是對話被硬生生斷成兩行。
         problems.append("unclosed")
 
+    if _EMPTY_QUOTE.search(text):
+        problems.append("empty_quote")
     if _stuck_dialogue_positions(text):
         problems.append("missing_separator")
     if _separator_fix(text) is not None:
@@ -356,6 +363,9 @@ _QUOTE_CHAR = re.compile("[" + re.escape("".join(DIALOGUE_PAIRS) + "".join(DIALO
 _STUCK_QUOTES = re.compile("[" + re.escape("".join(DIALOGUE_PAIRS.values())) + "]["
                            + re.escape("".join(DIALOGUE_PAIRS)) + "]")
 _DASH_OR_TILDE = re.compile(r"[-~—―─━–－～]")
+# 空引號：「」、「　」、他說：「」。——多半是原文掉了字，也可能是作者故意的，所以只列出來、不修
+_EMPTY_QUOTE = re.compile("|".join(re.escape(opener) + r"[ 	　]*" + re.escape(closer)
+                                   for opener, closer in DIALOGUE_PAIRS.items()))
 
 
 def _stuck_dialogue_positions(text: str) -> list:

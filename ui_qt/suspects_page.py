@@ -20,7 +20,6 @@ from .sortable_table import (
     CONFIDENCE_ORDER, HeaderCheckBox, PreviewTable, confidence_menu_button, data_index, enable_sorting, limit_rows,
     make_item, resort, setup_columns,
 )
-from .theme import active_tokens
 from .widgets import ContextPreview
 
 
@@ -248,7 +247,7 @@ class SuspectsPage(QWidget):
             self.preview.hide()
             return
         candidate = self.candidates[data_index(self.table, rows[0].row())]
-        self.preview.show_rows(self._lines, candidate["index"], candidate["index"], active_tokens().accent)
+        self.preview.show_rows(self._lines, candidate["index"], candidate["index"], "accent")
         self.candidateHighlighted.emit(candidate["index"], candidate["index"])
 
     def _check_confidence(self, levels: set):

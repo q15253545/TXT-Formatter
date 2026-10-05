@@ -66,10 +66,11 @@ LV1_A_REGEX = re.compile(
     r"[\s】\]\)-]*(?P<title>.*)$", re.IGNORECASE)
 
 # 外傳／終章同樣要有分隔，但多允許一個「之」：「外傳之青梅竹馬」是常見寫法，
-# 「外傳他說不必了」則是正文。
+# 「外傳他說不必了」則是正文。「後記卷」「番外卷」是沒有號碼的卷（底下的章歸它，不併進前一卷）。
+NAMED_VOLUMES = ("後記卷", "后记卷", "番外卷", "尾聲卷", "尾声卷", "序卷")
 LV1_B_REGEX = re.compile(
     r"^[\s【\[\(-]*" + ARC_PATTERN +
-    r"(?P<unit>(?:外傳|外传|終章|终章)(?=之|" + _TAG_BOUNDARY[3:] + r"|分卷[\s:：])"
+    r"(?P<unit>(?:外傳|外传|終章|终章|" + "|".join(NAMED_VOLUMES) + r")(?=之|" + _TAG_BOUNDARY[3:] + r"|分卷[\s:：])"
     r"[\s】\]\)-]*(?P<title>.*)$", re.IGNORECASE)
 
 COMBO_LV2_REGEX = re.compile(
@@ -432,6 +433,8 @@ SPECIAL_WORDS = (("序章", "序章", ("序章",)), ("序言", "序言", ("序�
 SPECIAL_LEVELS = {**{key: 2 for key, _label, _variants in SPECIAL_WORDS}, "番外": 2, "外傳": 1, "終章": 1}
 _WORD_KEY = {variant: key for key, _label, variants in CHAPTER_WORDS + VOLUME_WORDS + SPECIAL_WORDS
              for variant in variants}
+# 「後記卷」跟著「卷」的開關：關掉「卷」時它也不當成標題
+_WORD_KEY.update(dict.fromkeys(NAMED_VOLUMES, "卷"))
 # heading_word 認得的標題一定有這些字：章、卷的單位前面要有「第」，不用「第」的只有番外、外傳、終章
 # 與特殊標題。沒有的行不用跑整套標題正則（大檔的正文幾乎都是這種）。
 _NUMBERED_UNITS = {"章", "回", "節", "折", "幕", "卷", "部", "篇", "集", "季"}

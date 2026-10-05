@@ -120,6 +120,31 @@ def format_punctuation_and_dialogue(options: FormatOptions, text: str) -> str:
                     "auto_work": "[::W]", "auto_title": "[::T]"}.get(marker, ""))
 
 
+_LONG_NAME_PUNCT = re.compile(r"[，,、；;：:]")
+
+
+def _long_bare_name(candidate, invalid_tail_regex) -> bool:
+    """只有章號的標題底下、比標題長度上限長的章名（貼文標題常見，四五十字）：跟「第N章＋章名」
+    一樣放寬到 LONG_FORMAL_TITLE_LENGTH。正文的一段（硬換行切出來的）幾乎都有逗號、頓號，有就不算。"""
+    from .chapter_parse import LONG_FORMAL_TITLE_LENGTH
+    return (len(candidate) <= LONG_FORMAL_TITLE_LENGTH and not _LONG_NAME_PUNCT.search(candidate)
+            and not (invalid_tail_regex and invalid_tail_regex.search(candidate)))
+
+
+def _same_number_named_line(heading_line, candidate, invalid_tail_regex) -> str:
+    """「第2章」底下一行是同一章號、帶章名、但自己當不了標題的行（以句號結尾、太長：
+    「第二章 山路上的城門。」）：那一行就是這一章的章名，回傳章名；不是就回傳空字串。
+    自己當得了標題的交給「只留有章名的那個」（absorbed_titles），這裡不管。"""
+    from .chapter_parse import LONG_FORMAL_TITLE_LENGTH
+    heading = parse_lv2(strip_persistent_title_marker(heading_line.strip())[0])
+    named = parse_lv2(candidate)
+    if not heading or not named or strip_title_body(heading[5]) or is_valid_auto_title(candidate, invalid_tail_regex):
+        return ""
+    if heading[3] != named[3] or heading[4] != named[4] or len(candidate) > LONG_FORMAL_TITLE_LENGTH:
+        return ""
+    return strip_title_body(named[5]).rstrip("。．.").strip()
+
+
 def find_merge_subtitle(raw_lines, start_index, total, invalid_tail_regex):
     """尋找獨立章號後的拆行章名，回傳清理後章名與其原始行號。"""
     from .reflow import PARAGRAPH_INDENT, DIALOGUE_OR_SENTENCE_REGEX
@@ -140,6 +165,9 @@ def find_merge_subtitle(raw_lines, start_index, total, invalid_tail_regex):
     if candidate_marker:              # [::X] 不是標題；[::]、[::w]、[::t] 是使用者指定的標題，不能被併掉
         return "", None
     cleaned, has_number_prefix = clean_merged_subtitle(candidate)
+    same = _same_number_named_line(raw_lines[start_index], candidate, invalid_tail_regex)
+    if same:
+        return same, peek
     if not has_number_prefix and (parse_lv2(candidate) or parse_lv1(candidate) or parse_special(candidate)):
         return "", None
     if not cleaned:
@@ -160,7 +188,7 @@ def find_merge_subtitle(raw_lines, start_index, total, invalid_tail_regex):
     if has_number_prefix:
         if len(cleaned) > 180:
             return "", None
-    elif not is_valid_title(candidate, invalid_tail_regex):
+    elif not is_valid_title(candidate, invalid_tail_regex) and not _long_bare_name(candidate, invalid_tail_regex):
         return "", None
 
     cleaned = re.sub(r"^[\s，,、:：\-—]+", "", cleaned).strip()

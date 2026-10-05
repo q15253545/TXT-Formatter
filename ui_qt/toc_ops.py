@@ -6,6 +6,8 @@
 
 import bisect
 
+from core.chapter_parse import parse_lv1
+
 
 
 
@@ -13,6 +15,18 @@ def tree_children(tree, item):
     if item is None:
         return [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
     return [item.child(i) for i in range(item.childCount())]
+
+
+def part_separator_items(tree):
+    """部／卷／章三層的書：「第N部」底下沒有章、後面接著卷時，目錄上畫成分隔列（還是兩層，使用者 2026-10-05）。
+    部底下直接是章的（後面沒有卷）照舊是一般的卷。"""
+    tops = tree_children(tree, None)
+    found = []
+    for item, following in zip(tops, tops[1:]):
+        parsed = parse_lv1(item.text(0)) if not item.childCount() else None
+        if parsed and parsed[3] == "部" and following.childCount():
+            found.append(item)
+    return found
 
 
 def subtree_items(tree, item):

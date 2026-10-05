@@ -12,7 +12,7 @@ from PySide6.QtGui import (
     QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QAbstractButton, QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit,
+    QAbstractButton, QAbstractItemView, QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit,
     QPushButton, QScrollArea,
     QSizePolicy, QSplitter, QSplitterHandle, QTabBar, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout,
     QWidget,
@@ -316,7 +316,8 @@ class _KeepOnScreen(QObject):
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.Show:
-            QTimer.singleShot(0, lambda: fit_window_to_screen(watched))
+            # 綁在 watched 上：零延遲之前視窗就被刪掉（關得很快）時 Qt 會取消這次呼叫，不會碰到已刪除的物件。
+            QTimer.singleShot(0, watched, lambda: fit_window_to_screen(watched))
         return False
 
 
@@ -725,6 +726,53 @@ class ConditionNote(QWidget):
         self.icon.setFixedSize(size, self.label.fontMetrics().height())
 
 
+class TocSeparatorDelegate(QStyledItemDelegate):
+    """目錄裡的分隔列（三層的書裡沒有收章的「第N部」）：字下面墊一條視窗底色的圓角帶。
+    目錄的樣式表管著項目底色，setBackground 畫不出來，所以在 delegate 裡先畫。"""
+
+    ROLE = Qt.ItemDataRole.UserRole + 41
+
+    def paint(self, painter, option, index):
+        if index.data(self.ROLE):
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(active_tokens().bg))
+            painter.drawRoundedRect(QRectF(option.rect).adjusted(0, 1, 0, -1), 8, 8)
+            painter.restore()
+        super().paint(painter, option, index)
+
+
+def retheme_window(root, old, new):
+    """換主題時重畫已經開著的視窗（主視窗以外）：圖示的顏色是建立時從主題色取出的色碼，
+    照舊主題查它是哪個主題色，換成新主題的同一個；預覽重畫；自繪的表格重畫。"""
+    names = {}
+    for name in ("icon", "icon_hover", "text_faint", "checked_text", "accent_text", "primary_text"):
+        names.setdefault(getattr(old, name).lower(), name)
+    for name, value in vars(old).items():
+        if isinstance(value, str) and value.startswith("#"):
+            names.setdefault(value.lower(), name)
+
+    def remap(color):
+        name = names.get(color.lower()) if isinstance(color, str) else None
+        return getattr(new, name) if name else color
+
+    for button in root.findChildren(QAbstractButton):
+        if not hasattr(button, "_icon_name") or not hasattr(button, "_color"):
+            continue
+        for attr in ("_color", "_hover_color", "_disabled_color", "_active_color"):
+            if hasattr(button, attr):
+                setattr(button, attr, remap(getattr(button, attr)))
+        if isinstance(button, IconButton):
+            button._refresh_icon(hovering=button.underMouse())
+        else:
+            button._refresh_icon()
+    for preview in root.findChildren(ContextPreview):
+        preview.refresh_theme()
+    for view in root.findChildren(QAbstractItemView):
+        view.viewport().update()
+
+
 class Divider(QFrame):
     """1px 分隔線，顏色吃主題的 border token。
 
@@ -1041,28 +1089,21 @@ class Editor(QPlainTextEdit):
 
     # --- 拖曳開檔 -------------------------------------------------------
 
-    @staticmethod
-    def _dropped_files(event):
-        mime = event.mimeData()
-        if not mime.hasUrls():
-            return []
-        return [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
-
     def dragEnterEvent(self, event):
-        if self._dropped_files(event):
+        if dropped_paths(event):
             event.acceptProposedAction()
             self.file_drag_entered.emit()
             return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        if self._dropped_files(event):
+        if dropped_paths(event):
             event.acceptProposedAction()
             return
         super().dragMoveEvent(event)
 
     def dropEvent(self, event):
-        files = self._dropped_files(event)
+        files = dropped_paths(event)
         if files:
             event.acceptProposedAction()
             self.file_dropped.emit(files)
@@ -1426,7 +1467,17 @@ class ContextPreview(QTextEdit):
         self.setReadOnly(True)
         self.setMinimumHeight(90)
         self._anchor = -1         # 選到的那段是第幾個段落（捲動定位用）
+        self._last_call = None    # 最後一次 show_rows／show_fix：換主題時照新顏色重畫
         self.hide()
+
+    def refresh_theme(self):
+        """字色是寫死在 QTextCharFormat 裡的，樣式表換了也不會跟著變：照最後一次的內容重畫，捲動位置不動。"""
+        if self._last_call is None or not self.isVisible():
+            return
+        method, args = self._last_call
+        position = self.verticalScrollBar().value()
+        method(*args)
+        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(position))
 
     def stacked_under(self, table, click_again_closes: bool = True) -> QWidget:
         """表格在上、預覽在下，中間的分隔可以拖動調整高度。click_again_closes：再點一次選到的那一列就收起預覽
@@ -1453,7 +1504,10 @@ class ContextPreview(QTextEdit):
         return neighbours(range(start - 1, -1, -1))[::-1], neighbours(range(end + 1, len(lines)))
 
     def _formats(self, color: str = ""):
+        """color 可以是主題色的名字（"accent"、"ad_mark_text"…）：換主題時 refresh_theme 才換得到新主題的顏色。"""
         tokens = active_tokens()
+        if color and not color.startswith("#"):
+            color = getattr(tokens, color)
         plain, marked, faint = QTextCharFormat(), QTextCharFormat(), QTextCharFormat()
         plain.setForeground(QColor(tokens.text))
         marked.setForeground(QColor(color or tokens.text))
@@ -1507,6 +1561,7 @@ class ContextPreview(QTextEdit):
     def show_rows(self, lines, start: int, end: int, color: str, spans=None):
         """lines 的 start～end 行（含）加淡底色、字用 color，前後各帶 CONTEXT 行。
         spans＝{行號: (起, 迄)}：那一行只有這一段用 color（網址片段、網頁字元碼），其餘照正文。"""
+        self._last_call = (self.show_rows, (lines, start, end, color, spans))
         start, end = max(0, start), min(len(lines) - 1, end)
         if start > end:
             self.hide()
@@ -1544,6 +1599,7 @@ class ContextPreview(QTextEdit):
     def show_fix(self, lines, start: int, end: int, after_lines: list, changed_color: str):
         """可以修正的問題：start～end 行（含）換成修正後的樣子，同一行標出改動——刪掉的字灰色加刪除線、
         補上的字用 changed_color；接起來的兩行在接縫畫一個刪掉的「↵」。前後各帶 CONTEXT 行。"""
+        self._last_call = (self.show_fix, (lines, start, end, after_lines, changed_color))
         start, end = max(0, start), min(len(lines) - 1, end)
         before, after = self._context(lines, start, end)
         plain, changed, faint, target = self._formats(changed_color)

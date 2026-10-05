@@ -27,7 +27,6 @@ from core.ad_scan import (
     apply_candidates, scan_ad_candidates,
 )
 from . import dialogs, i18n
-from .theme import active_tokens
 from .widgets import (
     ChoiceMenuButton, ContextPreview, ScopeToggle, dialog_frame, size_dialog, slider_with_spin,
 )
@@ -41,8 +40,9 @@ from .sortable_table import (
 _CATEGORY_TIPS = {
     "meta": "作者、字數、發表日期與平台、整行的裝飾分隔線。\n"
             "單獨的日期只給「中」信心：日記體小說每章開頭就是日期，不宜預設勾選。",
-    "entity": "網頁轉存時沒轉回來的字元碼（&#29368;、&nbsp;、&amp;）。\n"
-              "不會刪掉整行，是換回原本的字（章節標題裡的也會換）。",
+    "entity": "網頁轉存時沒轉回來的字元碼（&#29368;、&nbsp;、&amp;）、HTML 標籤（<br>、<b>），\n"
+              "以及論壇的 BBCode（[b]…[/b]、[url=…]…[/url]，同一行開、關都有才算）。\n"
+              "不會刪掉整行，是換回原本的字、拿掉標記（章節標題裡的也會換）。",
 }
 
 REPEAT_LENGTH_RANGE = (2, 60)
@@ -211,10 +211,9 @@ class _CandidatePane(QWidget):
         if candidate is None or not lines:
             self.preview.hide()
             return candidate
-        tokens = active_tokens()
         # 跟本文字色一樣：作者感言、作品資訊一種顏色，其餘（廣告、重複段落…）廣告的顏色
-        color = (tokens.note_mark_text if set(candidate["types"]) <= set(NOTE_CATEGORIES)
-                 else tokens.ad_mark_text)
+        color = ("note_mark_text" if set(candidate["types"]) <= set(NOTE_CATEGORIES)
+                 else "ad_mark_text")
         spans = {}
         fix = candidate.get("fix")
         if fix is not None and candidate["start"] == candidate["end"] and candidate["start"] < len(lines):

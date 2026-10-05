@@ -84,11 +84,23 @@ def _utf16_without_bom(raw: bytes):
     head = head[:len(head) - len(head) % 2]
     even = head[0::2].count(0)
     odd = head[1::2].count(0)
-    if even + odd < max(4, len(head) * NUL_MIN_RATIO):
+    if not even + odd:
         return None
     as_le = head.decode("utf-16-le", errors="replace")
     le_breaks = as_le.count("\n") + as_le.count("\r")
     be_breaks = as_le.count("਀") + as_le.count("ഀ")
+    if even + odd < max(4, len(head) * NUL_MIN_RATIO):
+        # 很短的檔（一兩行，不到 800 位元組）NUL 可能不到 4 個：只在換行明確只落在一邊、長度是偶數、
+        # 整份照那個順序解得開時才算，不然一般檔案零星的 0 會被誤判成 UTF-16。
+        if (len(raw) * NUL_MIN_RATIO >= 4 or len(raw) % 2
+                or bool(le_breaks) == bool(be_breaks)):
+            return None
+        candidate = "utf-16-le" if le_breaks else "utf-16-be"
+        try:
+            decoded = raw.decode(candidate)
+        except UnicodeDecodeError:
+            return None
+        return candidate if not looks_misdecoded(decoded) else None
     if le_breaks != be_breaks:
         candidate = "utf-16-le" if le_breaks > be_breaks else "utf-16-be"
     else:
@@ -107,6 +119,21 @@ def looks_misdecoded(text: str, sample_chars: int = 200_000) -> bool:
     if not sample:
         return False
     return len(DECODE_NOISE_REGEX.findall(sample)) / len(sample) > 0.01
+
+
+def _strict_utf8_with_cjk(raw: bytes) -> bool:
+    """整份是合法的 UTF-8、而且有中文字：Big5、GB18030 的位元組湊成一整份合法 UTF-8 幾乎不可能。
+    下面的計分對很短的檔（一兩行）不準：GB18030 解出來的字數比較多，「中文字比例」反而比 UTF-8 高。
+    取樣尾端可能切在一個字的中間，最多容忍最後 3 個位元組不完整。"""
+    for cut in range(4):
+        try:
+            text = raw[:len(raw) - cut].decode("utf-8")
+        except UnicodeDecodeError as error:
+            if error.start < len(raw) - 3:
+                return False
+            continue
+        return bool(CJK_RANGE_REGEX.search(text))
+    return False
 
 
 def smart_detect_encoding(file_path: str) -> str:
@@ -130,6 +157,8 @@ def smart_detect_encoding(file_path: str) -> str:
     utf16 = _utf16_without_bom(raw)
     if utf16:
         return utf16
+    if _strict_utf8_with_cjk(raw):
+        return "utf-8"
 
     best, best_score = "utf-8", float("-inf")
     for encoding in ("utf-8", "big5", "gb18030"):

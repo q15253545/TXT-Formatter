@@ -195,7 +195,7 @@ class ChapterUpdateDialog(QDialog):
             return
         index = data_index(self.table, rows[0].row())
         row = self._new_rows[index]
-        self.preview.show_rows(self._new_lines, row, row, active_tokens().accent)
+        self.preview.show_rows(self._new_lines, row, row, "accent")
 
     def _set_all_checked(self, checked: bool):
         self._checked = {item["index"] for item in self._plan if self._actionable(item)} if checked else set()

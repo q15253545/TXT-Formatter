@@ -336,6 +336,9 @@ class TocEditMixin:
             if inside:
                 item.setForeground(0, QColor(tokens.text_faint))
                 item.setToolTip(0, i18n.T("已剪下，貼上後才會真的移動；按 Esc 取消"))
+            elif item in self.part_separator_items:
+                item.setForeground(0, QColor(tokens.text_muted))
+                item.setToolTip(0, "")
             elif item not in preview:
                 item.setData(0, Qt.ItemDataRole.ForegroundRole, None)
                 item.setToolTip(0, "")

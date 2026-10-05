@@ -65,7 +65,7 @@ from core.persistence import (
 from core.title_blocks import TEMPLATE_LABELS, TEMPLATES, block_rule, template
 from core.title_markers import strip_export_markers, strip_persistent_title_marker
 
-from . import app_log, dialogs, i18n, icons
+from . import app_log, dialogs, i18n, icons, toc_ops
 from .app_log import action, log, native_dialog, timed
 from .help_dialog import HelpDialog
 from .content_panel import ContentPanel
@@ -80,10 +80,11 @@ from .old_files_dialog import OldFilesDialog
 from .options_panel import OptionsPanel, describe_options
 from .review_bar import ReviewBar
 from .text_positions import PositionMap
-from .theme import DEFAULT_THEME, THEMES, build_stylesheet, set_active_tokens, theme_tokens
+from .theme import DEFAULT_THEME, THEMES, active_tokens, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
     AppWidgetPolisher, Card, ClickableLabel, DropOverlay, Editor, IconButton, IconTextButton, LanguageToggle,
-    ElidedLabel, GripSplitter, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, VDivider, dropped_paths, make_card_header,
+    ElidedLabel, GripSplitter, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, TocSeparatorDelegate, VDivider,
+    dropped_paths, make_card_header, retheme_window,
 )
 from . import __version__
 from .window_common import (
@@ -207,6 +208,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 推定卷（本文沒有卷標題、由卷結尾行推得的卷）：目錄項目 → 資訊
         self.virtual_volume_items: dict = {}
         self.split_volume_items: set = set()   # 從每章標題拆出來、本文還沒有卷標題的卷
+        self.part_separator_items: set = set()  # 三層的書裡畫成分隔列的「第N部」（toc_ops.part_separator_items）
         # 已剪下、等著貼上的章節（照檔案總管的做法：按貼上才真的搬動）。
         self._cut_state: dict | None = None
         # 正文的版本號：每次正文真的變動就加一（純顯示的格式變更不算）。
@@ -376,6 +378,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_toc_context_menu)
         i18n.skip(self.tree)   # 目錄是書的內容，不跟著介面切換繁簡
+        self.tree.setItemDelegate(TocSeparatorDelegate(self.tree))
 
         tree_header, tree_header_layout = make_card_header("目錄")
         button = IconButton("refresh-cw", "重新掃描目錄（F5）", size=16)
@@ -728,6 +731,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     def _apply_theme(self):
         tokens = self.tokens
+        old_tokens = active_tokens()
         set_active_tokens(tokens)
         icons.clear_icon_cache()
         chevron_closed = icons.icon_file_path("chevron-right", tokens.icon, 12)
@@ -771,6 +775,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 目錄不是最新的話，下次重建目錄時就會畫，這裡不必為此重建。
         if hasattr(self, "_toc_text_version") and self._toc_text_version == self._text_version:
             self._apply_title_formats()
+        # 開著的工具視窗（非模式，換主題時可能開著）
+        for dialog in getattr(self, "_tool_dialogs", {}).values():
+            retheme_window(dialog, old_tokens, tokens)
         # 繁簡切換鈕跟旁邊的圖示按鈕一樣高（要等樣式表套上 padding 後才量得
         # 準），寬度沿用設計稿的比例（118×52）。
         # 工具列上所有控制項同一個高度（UI_RULES.md）：純圖示按鈕的 sizeHint 比有文字的
@@ -1238,7 +1245,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     @action
     def _on_structure_changed(self, value: str):
-        if not self.input_file:
+        if not (self.input_file or self._has_document()):    # 合併檔沒有原檔路徑，一樣要能換結構
             return
         self.structure_mode = value
         self.format_options.structure = value
@@ -1858,6 +1865,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._mark_synced("")
         self.virtual_volume_items = {}
         self.split_volume_items = set()
+        self.part_separator_items = set()
         self.merged_titles = {}
         self.merged_title_items = set()
         self.absorbed_titles = {}
@@ -2019,6 +2027,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.virtual_volume_items = {node_map[n]: dict(info) for n, info in result.virtual_volumes.items()}
         # 拆出來的卷：目錄上照常是卷，但本文還沒有卷標題 → 跟推定卷一樣用非原文色
         self.split_volume_items = {node_map[n] for n in result.split_volumes if n in node_map}
+        self.part_separator_items = set(toc_ops.part_separator_items(self.tree))
         self.chapter_raw_map = {node_map[n]: row for n, row in result.chapter_raw_map.items()}
         # 合併下行標題（預覽）：目錄上的標題已經接上章名，本文還沒有 → 也用非原文色
         self.merged_titles = dict(result.merged_titles)
@@ -2280,6 +2289,10 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             item.setFont(0, font)
             item.setForeground(0, QColor(tokens.marker_text))
             item.setToolTip(0, merged_tip)
+        # 部／卷／章三層：底下沒有章的「第N部」畫成分隔列（換主題時也走這裡重畫）
+        for item in self.part_separator_items:
+            item.setForeground(0, QColor(tokens.text_muted))
+            item.setData(0, TocSeparatorDelegate.ROLE, True)
 
     def _apply_merge_preview(self):
         """本文上的合併預覽：章名用非原文色畫在標題後面，原本的章名行（和中間的空行）先藏起來。"""

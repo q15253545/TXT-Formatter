@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.script_convert import (
-    BODY_SCRIPT_CHOICES, BODY_SCRIPT_SAMPLE_SOURCE, BODY_SCRIPT_SAMPLES,
+    BODY_SCRIPT_CHOICES, BODY_SCRIPT_SAMPLE_SOURCE, BODY_SCRIPT_SAMPLES, vocabulary_problems,
 )
 from . import i18n
 from .widgets import ScopeToggle, dialog_frame, keep_on_screen
@@ -77,6 +77,13 @@ class ScriptConvertDialog(QDialog):
         self.vocabulary_edit.setObjectName("wordList")
         i18n.skip(self.vocabulary_edit)
         words.addWidget(self.vocabulary_edit, 1)
+        # 寫錯、被後面蓋掉的行轉換時會默默略過：逐行列出來，不自動刪（可能是還沒寫完的草稿）
+        self.vocabulary_note = QLabel("")
+        self.vocabulary_note.setObjectName("fileLabel")
+        self.vocabulary_note.setWordWrap(True)
+        words.addWidget(self.vocabulary_note)
+        self.vocabulary_edit.textChanged.connect(self._update_vocabulary_note)
+        self._update_vocabulary_note()
         self.tabs.addTab(words_page, "詞表")
 
         buttons = QDialogButtonBox()
@@ -93,6 +100,25 @@ class ScriptConvertDialog(QDialog):
         mode = self.mode()
         self.sample_label.setText(
             f"{BODY_SCRIPT_SAMPLE_SOURCE}\n　↓\n{BODY_SCRIPT_SAMPLES.get(mode, '')}")
+
+    def _update_vocabulary_note(self):
+        report = vocabulary_problems(self.vocabulary_edit.toPlainText())
+
+        def rows(numbers):
+            shown = "、".join(str(number) for number in numbers[:8])
+            return f"第 {shown}{' 等' if len(numbers) > 8 else ''} 行"
+
+        notes = [f"有效 {report['effective']} 組"]
+        if report["malformed"]:
+            notes.append(f"{rows(report['malformed'])}沒有「=」，不算")
+        if report["empty"]:
+            notes.append(f"{rows(report['empty'])}有一邊是空的，不算")
+        for key, side, direction in (("shadowed", "左邊", "轉繁體"), ("reverse_shadowed", "右邊", "轉簡體")):
+            for number, winner in report[key][:5]:
+                notes.append(f"第 {number} 行跟第 {winner} 行{side}一樣，{direction}時只用第 {winner} 行")
+            if len(report[key]) > 5:
+                notes.append(f"另有 {len(report[key]) - 5} 行{side}重複")
+        self.vocabulary_note.setText("；".join(i18n.T(note) for note in notes))
 
     def mode(self) -> str:
         return i18n.combo_value(self.mode_combo)
