@@ -822,6 +822,10 @@ def render_chapter_title(ctx: BuildContext, state: RenderState, apply_format, cu
                         is_phantom = True
             break
     if is_phantom:
+        # 不在目錄上，排版時也不輸出；「自動合併標題」預覽時要記成會刪掉的那一行（本文畫刪除線、
+        # 「套用到本文」才刪得掉），不然本文看不出這一行會不見
+        if ctx.skip_duplicate_titles and not apply_format and not ctx._protected_title(title_raw_idx):
+            state.absorbed_titles[title_raw_idx] = peek
         state.idx += 1
         return
     # 只有章號、沒有正文，底下緊接著另一章有章名的標題：同一章的兩個標題（網站的貼文編號＋作者的章名，

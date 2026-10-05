@@ -8,8 +8,8 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetricsF, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen, QTextBlockFormat,
-    QTextCharFormat, QTextCursor,
+    QColor, QFont, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen, QTextBlockFormat,
+    QTextCharFormat, QTextCursor, QTextLayout,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit,
@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QSizePolicy, QSplitter, QSplitterHandle, QTabBar, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout,
     QWidget,
 )
+
+from core.title_markers import EXPORT_MARKER_REGEX
 
 from . import i18n, icons
 from .text_positions import PositionMap
@@ -1080,8 +1082,7 @@ class Editor(QPlainTextEdit):
         self._show_whitespace = False
         self._whitespace_color = QColor("#A9B1BE")
         self._trailing_color = QColor(180, 56, 60, 40)
-        # 合併下行標題的預覽：接在標題後面畫出來的章名、暫時藏起來的行
-        self._preview_texts: list = []
+        # 合併下行標題的預覽：接上章名的標題段落、暫時藏起來的行
         self._preview_blocks: list = []
         self._hidden_blocks: list = []
         self._preview_color = QColor("#0F7B6C")
@@ -1126,8 +1127,6 @@ class Editor(QPlainTextEdit):
         super().paintEvent(event)
         if self._show_whitespace:
             self._paint_whitespace(event.rect())
-        if self._preview_texts:
-            self._paint_title_preview(event.rect())
 
     # --- 合併下行標題的預覽 ---------------------------------------------
 
@@ -1135,24 +1134,30 @@ class Editor(QPlainTextEdit):
         """「自動合併標題」開著時：本文一個字都不改，只在畫面上把章名接在標題後面
         （非原文色），原本放章名的那幾行先藏起來。appended 是 行號 → 要接上去的章名。
 
-        記在段落（QTextBlock）自己身上（userState 當索引），使用者在前面打字、行號位移時
-        預覽還是跟著原本那一行；整份文字換掉時這些段落就不存在了，自然不會殘留。"""
+        章名放在那一段排版用的「預編輯區」（輸入法組字用的同一套）：會跟著換行、撐高那一段，
+        窄視窗也看得到整個章名（原本畫在標題後面，太長就被視窗截掉）；字型沿用標題本身。
+        記在段落（QTextBlock）的排版上，使用者在前面打字、行號位移時預覽還是跟著原本那一行。"""
         document = self.document()
         for block in self._preview_blocks:
             if block.isValid():
-                block.setUserState(-1)
+                block.layout().setPreeditArea(-1, "")
+                block.layout().setFormats([])
+                document.markContentsDirty(block.position(), block.length())
         for block in self._hidden_blocks:
             if block.isValid() and not block.isVisible():
                 block.setVisible(True)
                 document.markContentsDirty(block.position(), block.length())
-        self._preview_texts, self._preview_blocks, self._hidden_blocks = [], [], []
+        self._preview_blocks, self._hidden_blocks = [], []
         self._preview_color = QColor(color)
         for row, text in sorted(appended.items()):
             block = document.findBlockByNumber(row)
             if block.isValid():
-                block.setUserState(len(self._preview_texts))
-                self._preview_texts.append(text)
+                # 插在行尾隱藏標記（[::] 是 1px 的字）前面，章名才會沿用標題的字型
+                marker = EXPORT_MARKER_REGEX.search(block.text())
+                position = marker.start() if marker else len(block.text())
+                block.layout().setPreeditArea(position, " " + text)
                 self._preview_blocks.append(block)
+        self._color_title_preview()
         for row in sorted(hidden_rows):
             block = document.findBlockByNumber(row)
             if block.isValid() and block.isVisible():
@@ -1160,6 +1165,25 @@ class Editor(QPlainTextEdit):
                 document.markContentsDirty(block.position(), block.length())
                 self._hidden_blocks.append(block)
         self.viewport().update()
+
+    def preview_texts(self) -> list:
+        """目前接在標題後面的章名（依行序）。"""
+        return [block.layout().preeditAreaText()[1:] for block in self._preview_blocks
+                if block.isValid() and block.layout().preeditAreaText()]
+
+    def _color_title_preview(self):
+        document = self.document()
+        preview_format = QTextCharFormat()
+        preview_format.setForeground(self._preview_color)
+        for block in self._preview_blocks:
+            if not block.isValid():
+                continue
+            layout = block.layout()
+            preview = QTextLayout.FormatRange()
+            preview.start, preview.length = layout.preeditAreaPosition(), len(layout.preeditAreaText())
+            preview.format = preview_format
+            layout.setFormats([preview])
+            document.markContentsDirty(block.position(), block.length())
 
     def _reveal_cursor_block(self):
         """游標跑進被預覽藏起來的行（尋找、方向鍵、點目錄）：那一行顯示回來，不能停在看不見的地方。"""
@@ -1171,33 +1195,9 @@ class Editor(QPlainTextEdit):
 
     def set_preview_color(self, color: str):
         self._preview_color = QColor(color)
-        if self._preview_texts:
+        if self._preview_blocks:
+            self._color_title_preview()
             self.viewport().update()
-
-    def _paint_title_preview(self, clip):
-        painter = QPainter(self.viewport())
-        painter.setPen(self._preview_color)
-        offset = self.contentOffset()
-        block = self.firstVisibleBlock()
-        while block.isValid():
-            geometry = self.blockBoundingGeometry(block).translated(offset)
-            if geometry.top() > clip.bottom():
-                break
-            index = block.userState()
-            if block.isVisible() and 0 <= index < len(self._preview_texts) and geometry.bottom() >= clip.top():
-                layout = block.layout()
-                line = layout.lineAt(layout.lineCount() - 1)
-                # 字型照標題本身（粗體、放大）；行尾隱藏標記是 1px，不能拿它的字型
-                fragments = block.begin()
-                char_format = fragments.fragment().charFormat() if not fragments.atEnd() else block.charFormat()
-                font = char_format.font().resolve(self.font())
-                painter.setFont(font)
-                gap = QFontMetricsF(font).horizontalAdvance(" ")
-                x = geometry.left() + line.x() + line.naturalTextWidth() + gap
-                baseline = geometry.top() + line.y() + line.ascent()
-                painter.drawText(QPointF(x, baseline), self._preview_texts[index])
-            block = block.next()
-        painter.end()
 
     def _paint_whitespace(self, clip):
         """把空白字元畫出來：半形空格「·」、全形空格「□」、Tab「→」，行尾

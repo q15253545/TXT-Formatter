@@ -205,7 +205,11 @@ class TocEditMixin:
             suffix = {"include": "[::]", "auto_title": "[::T]"}.get(marker, "")
             replaces[row] = f"{indent}{clean} {subtitle}{suffix}"
             removed.update(range(row + 1, subtitle_row + 1))
-        removed.update(self.absorbed_titles)
+        for row, kept in self.absorbed_titles.items():
+            removed.add(row)
+            # 「第1章」底下的「第一章 出發」才是標題：中間的空行一起拿掉，不然刪掉之後多一個空行
+            if kept > row and all(not lines[between].strip() for between in range(row + 1, kept)):
+                removed.update(range(row + 1, kept))
         if not inserts and not replaces and not removed:
             return None
         done = []           # 寫進去之前先數好：寫完目錄就重建了，預覽資料會清掉
