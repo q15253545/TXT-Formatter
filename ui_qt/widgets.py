@@ -14,8 +14,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QAbstractScrollArea, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit,
     QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QSplitterHandle, QTabBar, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout,
-    QWidget,
+    QSizePolicy, QSplitter, QSplitterHandle, QStyle, QStyleOptionViewItem, QTabBar, QTextEdit, QSlider, QSpinBox, QStyledItemDelegate, QToolButton, QVBoxLayout,
+    QTreeWidget, QWidget,
 )
 
 from core.title_markers import EXPORT_MARKER_REGEX
@@ -743,6 +743,26 @@ class TocSeparatorDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(QRectF(option.rect).adjusted(0, 1, 0, -1), 8, 8)
             painter.restore()
         super().paint(painter, option, index)
+
+
+class TocTree(QTreeWidget):
+    """目錄樹。部的分隔列沒有子項目，Qt 只在摺起來時畫箭頭（樣式表的 has-children 要真的有子項目），
+    展開時這裡補畫向下的箭頭，跟卷的箭頭同一個圖示、同一個位置。"""
+
+    FOLD_ROLE = Qt.ItemDataRole.UserRole + 42
+
+    def drawBranches(self, painter, rect, index):
+        if index.data(self.FOLD_ROLE) and self.isExpanded(index):
+            # 交給樣式表照「有子項目、展開中」畫，箭頭跟卷的完全一樣
+            option = QStyleOptionViewItem()
+            option.initFrom(self)
+            option.rect = QRect(rect.right() - self.indentation() + 1, rect.top(), self.indentation(), rect.height())
+            option.state |= QStyle.StateFlag.State_Item | QStyle.StateFlag.State_Children | QStyle.StateFlag.State_Open
+            if self.selectionModel().isSelected(index):
+                option.state |= QStyle.StateFlag.State_Selected
+            self.style().drawPrimitive(QStyle.PrimitiveElement.PE_IndicatorBranch, option, painter, self)
+            return
+        super().drawBranches(painter, rect, index)
 
 
 def retheme_window(root, old, new):

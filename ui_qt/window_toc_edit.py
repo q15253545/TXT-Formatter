@@ -340,9 +340,9 @@ class TocEditMixin:
             if inside:
                 item.setForeground(0, QColor(tokens.text_faint))
                 item.setToolTip(0, i18n.T("已剪下，貼上後才會真的移動；按 Esc 取消"))
-            elif item in self.part_separator_items:
+            elif item in self.part_separator_items or item in self.part_volume_items:
                 item.setForeground(0, QColor(tokens.text_muted))
-                item.setToolTip(0, "")
+                item.setToolTip(0, i18n.T("點左邊的箭頭摺起或展開這一部的卷") if item in self.part_separator_items else "")
             elif item not in preview:
                 item.setData(0, Qt.ItemDataRole.ForegroundRole, None)
                 item.setToolTip(0, "")

@@ -83,7 +83,7 @@ from .text_positions import PositionMap
 from .theme import DEFAULT_THEME, THEMES, active_tokens, build_stylesheet, set_active_tokens, theme_tokens
 from .widgets import (
     AppWidgetPolisher, Card, ClickableLabel, DropOverlay, Editor, IconButton, IconTextButton, LanguageToggle,
-    ElidedLabel, GripSplitter, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, TocSeparatorDelegate, VDivider,
+    ElidedLabel, GripSplitter, NoticeBar, ScrollEndButtons, SideRail, ThemeButton, TocSeparatorDelegate, TocTree, VDivider,
     dropped_paths, make_card_header, retheme_window,
 )
 from . import __version__
@@ -209,6 +209,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.virtual_volume_items: dict = {}
         self.split_volume_items: set = set()   # 從每章標題拆出來、本文還沒有卷標題的卷
         self.part_separator_items: set = set()  # 三層的書裡畫成分隔列的「第N部」（toc_ops.part_separator_items）
+        self.part_volume_items: set = set()     # 同一本書裡直接收章的「第N部」：照部的樣子畫（toc_ops.part_volume_items）
+        self._restoring_tree = False
         # 已剪下、等著貼上的章節（照檔案總管的做法：按貼上才真的搬動）。
         self._cut_state: dict | None = None
         # 正文的版本號：每次正文真的變動就加一（純顯示的格式變更不算）。
@@ -371,7 +373,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         tree_layout.setContentsMargins(0, 0, 0, 0)
         tree_layout.setSpacing(0)
 
-        self.tree = QTreeWidget()
+        self.tree = TocTree()
         self.tree.setHeaderHidden(True)
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.itemClicked.connect(self._on_tree_item_clicked)
@@ -395,8 +397,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self._toc_fold_timer.setSingleShot(True)
         self._toc_fold_timer.setInterval(0)
         self._toc_fold_timer.timeout.connect(self._update_toc_fold_button)
-        self.tree.itemExpanded.connect(lambda _item: self._toc_fold_timer.start())
-        self.tree.itemCollapsed.connect(lambda _item: self._toc_fold_timer.start())
+        self.tree.itemExpanded.connect(lambda item: self._on_toc_folded(item, True))
+        self.tree.itemCollapsed.connect(lambda item: self._on_toc_folded(item, False))
+        self.tree.currentItemChanged.connect(self._reveal_folded_part)
         # 目錄只顯示章號：開關型圖示，開著時用互動色
         self.toc_compact_button = IconButton("hash", "只顯示章號", size=16)
         self.toc_compact_button.setCheckable(True)
@@ -1866,6 +1869,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         self.virtual_volume_items = {}
         self.split_volume_items = set()
         self.part_separator_items = set()
+        self.part_volume_items = set()
         self.merged_titles = {}
         self.merged_title_items = set()
         self.absorbed_titles = {}
@@ -1943,7 +1947,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         物件——重畫後節點全是新的。展開狀態用「標題路徑」記，行號位移不影響。
         """
         expanded = {self._label_path(item): item.isExpanded()
-                    for item in self.toc_full_labels if item.childCount()}
+                    for item in self.toc_full_labels if item.childCount() or item in self.part_separator_items}
         # 同一行可能同時是卷和章（「第一卷 山河 第1章 開始」），只記行號的話
         # 還原時分不出是哪一個。另外記節點在目錄裡的深度。
         def key(item):
@@ -1959,7 +1963,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
 
     def _restore_tree_view(self, view):
         for item in self.toc_full_labels:
-            if item.childCount():
+            if item.childCount() or item in self.part_separator_items:
                 state = view["expanded"].get(self._label_path(item))
                 if state is not None:
                     item.setExpanded(state)
@@ -1984,7 +1988,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         current = nearest(view["current"]) if view["current"] is not None else None
         # 設定目前項目時 Qt 會自動捲過去，捲的時候順便把收合的上層展開——
         # 使用者收起的卷就被打開了。還原期間先關掉自動捲動。
+        # 摺起來的部也一樣：選回藏在裡面的章不要把部打開
         self.tree.setAutoScroll(False)
+        self._restoring_tree = True
         try:
             if current is not None:
                 self.tree.setCurrentItem(current)
@@ -1994,6 +2000,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                     item.setSelected(True)
         finally:
             self.tree.setAutoScroll(True)
+            self._restoring_tree = False
         self.tree.verticalScrollBar().setValue(view["scroll"])
         # scrollToItem 會把收合的上層自動展開，使用者收起的卷就被打開了；
         # 選到的章節藏在收合的卷底下時，只還原捲動位置就好。
@@ -2028,6 +2035,12 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         # 拆出來的卷：目錄上照常是卷，但本文還沒有卷標題 → 跟推定卷一樣用非原文色
         self.split_volume_items = {node_map[n] for n in result.split_volumes if n in node_map}
         self.part_separator_items = set(toc_ops.part_separator_items(self.tree))
+        self.part_volume_items = set(toc_ops.part_volume_items(self.tree, self.part_separator_items))
+        for item in self.part_separator_items:
+            # 沒有子項目也畫展開箭頭：摺起來時藏住這一部的卷（只是畫面，目錄資料還是兩層）
+            item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+            item.setData(0, TocTree.FOLD_ROLE, True)
+            item.setExpanded(True)
         self.chapter_raw_map = {node_map[n]: row for n, row in result.chapter_raw_map.items()}
         # 合併下行標題（預覽）：目錄上的標題已經接上章名，本文還沒有 → 也用非原文色
         self.merged_titles = dict(result.merged_titles)
@@ -2289,10 +2302,12 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             item.setFont(0, font)
             item.setForeground(0, QColor(tokens.marker_text))
             item.setToolTip(0, merged_tip)
-        # 部／卷／章三層：底下沒有章的「第N部」畫成分隔列（換主題時也走這裡重畫）
-        for item in self.part_separator_items:
+        # 部／卷／章三層：底下沒有章的「第N部」畫成分隔列，直接收章的部畫成一樣的帶子（換主題時也走這裡重畫）
+        for item in self.part_separator_items | self.part_volume_items:
             item.setForeground(0, QColor(tokens.text_muted))
             item.setData(0, TocSeparatorDelegate.ROLE, True)
+        for item in self.part_separator_items:
+            item.setToolTip(0, i18n.T("點左邊的箭頭摺起或展開這一部的卷"))
 
     def _apply_merge_preview(self):
         """本文上的合併預覽：章名用非原文色畫在標題後面，原本的章名行（和中間的空行）先藏起來。"""
@@ -2834,8 +2849,29 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             panel.setMinimumWidth(width)
         self._update_minimum_width(settle=True)
 
+    def _on_toc_folded(self, item, expanded: bool):
+        if item in self.part_separator_items:
+            for member in toc_ops.part_members(self.tree, item):
+                member.setHidden(not expanded)
+        self._toc_fold_timer.start()
+
+    def _reveal_folded_part(self, current, _previous):
+        """跳到摺起來的部裡面的章（檢查結果、游標所在章…）：先把那一部展開，不能停在看不見的地方。"""
+        if current is None or self._restoring_tree:
+            return
+        while current.parent() is not None:
+            current = current.parent()
+        if current.isHidden():
+            tops = toc_ops.tree_children(self.tree, None)
+            part = next((item for item in reversed(tops[:tops.index(current)]) if item in self.part_separator_items),
+                        None)
+            if part is not None:
+                part.setExpanded(True)
+
     def _toc_fully_expanded(self) -> bool:
         """有子項目的節點（卷）都展開著：沒有卷的目錄算展開（按了也沒東西可摺）。"""
+        if any(not item.isExpanded() for item in self.part_separator_items):
+            return False
         stack = [self.tree.topLevelItem(index) for index in range(self.tree.topLevelItemCount())]
         while stack:
             item = stack.pop()
@@ -2850,6 +2886,12 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             self.tree.collapseAll()
         else:
             self.tree.expandAll()
+        # 部一律展開：全部摺疊是摺到卷，部也摺起來就只剩幾條分隔列。expandAll／collapseAll 不送
+        # 展開訊號，藏起來的卷要自己顯示回來
+        for item in self.part_separator_items:
+            item.setExpanded(True)
+            for member in toc_ops.part_members(self.tree, item):
+                member.setHidden(False)
         self._update_toc_fold_button()
 
     def _update_toc_fold_button(self):

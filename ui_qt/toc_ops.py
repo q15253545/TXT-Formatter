@@ -29,6 +29,30 @@ def part_separator_items(tree):
     return found
 
 
+def _is_part(item):
+    parsed = parse_lv1(item.text(0))
+    return bool(parsed) and parsed[3] == "部"
+
+
+def part_volume_items(tree, separators):
+    """有部分隔列的書裡，底下直接是章的「第N部」：還是可以展開的卷，但顯示成部的樣子
+    （跟分隔列同一種帶子），整本書的部看起來才一致（使用者 2026-10-05）。"""
+    if not separators:
+        return []
+    return [item for item in tree_children(tree, None) if item.childCount() and _is_part(item)]
+
+
+def part_members(tree, part):
+    """分隔列後面、下一個部之前的第一層項目（分隔列摺起來時藏起來的那些卷）。"""
+    tops = tree_children(tree, None)
+    members = []
+    for item in tops[tops.index(part) + 1:]:
+        if _is_part(item):
+            break
+        members.append(item)
+    return members
+
+
 def subtree_items(tree, item):
     """item 自己的所有子孫（不含自己）。"""
     own = set()
