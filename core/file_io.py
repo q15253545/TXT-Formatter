@@ -7,6 +7,7 @@
 再存回去。確定要容錯開啟時才呼叫 read_text_lossy。
 """
 
+import errno
 import os
 import tempfile
 
@@ -42,3 +43,24 @@ def read_text_lossy(path: str, encoding: str) -> tuple[str, int]:
     with open(path, "r", encoding=encoding, errors="replace") as source:
         content = source.read()
     return content, content.count("�")
+
+
+def describe_file_error(error: Exception, writing: bool = False) -> str:
+    """把讀寫檔的例外換成白話的原因和下一步（對話框用；原始例外由呼叫端寫進 app.log）。"""
+    if isinstance(error, PermissionError):
+        if writing:
+            return "檔案可能正被其他程式開啟，或是唯讀、沒有權限。請關閉開著它的程式後再試，或換個位置存。"
+        return "檔案可能正被其他程式開啟，或沒有讀取權限。請關閉開著它的程式後再試。"
+    if isinstance(error, FileNotFoundError):
+        if writing:
+            return "找不到要存放的資料夾：可能已被移動或刪除。請換個位置存。"
+        return "找不到這個檔案：可能已被移動、改名或刪除。請重新選擇檔案。"
+    if isinstance(error, IsADirectoryError):
+        return "這個名稱是資料夾，不是檔案。請換一個檔名。"
+    if isinstance(error, UnicodeError):
+        return "本文裡有無法存成 UTF-8 的字元（通常是亂碼）。請找出來刪掉後再存。"
+    if isinstance(error, OSError) and error.errno == errno.ENOSPC:
+        return "磁碟空間不足。請清出空間或換個位置存。"
+    if writing:
+        return "無法寫入這個位置。請確認磁碟或隨身碟還接著，或換個位置存。"
+    return "無法讀取這個檔案。請確認檔案還在、沒有被其他程式鎖住後再試。"

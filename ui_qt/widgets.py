@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QWidget,
 )
 
+from core.encoding import strip_invisible_chars
 from core.title_markers import EXPORT_MARKER_REGEX
 
 from . import i18n, icons
@@ -1131,6 +1132,17 @@ class Editor(QPlainTextEdit):
             return
         super().dropEvent(event)
 
+    def insertFromMimeData(self, source):
+        """貼上、拖進來的文字跟開檔一樣清理（strip_invisible_chars）：網頁複製的文字常帶 U+2028、
+        U+2029，留在本文裡 block 數會跟 raw_lines 的行數對不上，之後刪章、設層級會動到別的行。"""
+        if not source.hasText():
+            super().insertFromMimeData(source)
+            return
+        text = strip_invisible_chars(source.text())[0]
+        if text:
+            self.textCursor().insertText(text)
+            self.ensureCursorVisible()
+
     # --- 顯示空格 -------------------------------------------------------
 
     def set_show_whitespace(self, enabled: bool):
@@ -1322,6 +1334,12 @@ class Editor(QPlainTextEdit):
             return
         if event.matches(QKeySequence.StandardKey.Redo):
             self.redo_requested.emit()
+            return
+        if (event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            # Qt 的 Shift+Enter 插入 U+2028（block 裡的換行），raw_lines 會多切出一行：當一般換行
+            self.textCursor().insertBlock()
+            self.ensureCursorVisible()
             return
         super().keyPressEvent(event)
 

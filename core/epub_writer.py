@@ -8,6 +8,7 @@
 """
 
 import html
+import re
 import os
 import tempfile
 import uuid
@@ -27,6 +28,15 @@ p { text-indent: 2em; margin: 0 0 0.6em; }
 .cover { margin: 0; padding: 0; text-align: center; }
 .cover img { max-width: 100%; max-height: 100%; }
 """
+
+
+# XML 1.0 不允許的字元：C0 控制碼（Tab、換行除外）、落單的代理字元、U+FFFE／U+FFFF。
+# TXT 裡偶爾夾著 \x1a（DOS 檔尾）、\x0c（換頁），寫進 XHTML 閱讀器會整章打不開。
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def _xml_text(text: str) -> str:
+    return _XML_INVALID.sub("", text)
 
 
 @dataclass
@@ -50,7 +60,7 @@ def _xhtml(title: str, body: str, language: str, body_class: str = "") -> str:
 def _paragraphs(lines) -> str:
     out = []
     for line in lines:
-        text = line.strip(_INDENT_CHARS).rstrip()
+        text = _xml_text(line).strip(_INDENT_CHARS).rstrip()
         if text.strip():
             out.append(f"<p>{html.escape(text)}</p>")
     return "\n".join(out)
@@ -102,7 +112,9 @@ def build_epub(path: str, title: str, author: str, sections, front_lines=(), cov
     """寫出 EPUB 到 path。sections：EpubSection 照本文順序；front_lines：第一個目錄項目之前的文字。"""
     book_id = f"urn:uuid:{uuid.uuid4()}"
     modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    title = title.strip() or "未命名"
+    title = _xml_text(title).strip() or "未命名"
+    author = _xml_text(author)
+    sections = [EpubSection(_xml_text(section.title), section.depth, section.lines) for section in sections]
     files = []            # (檔名（在 OEBPS 底下）, 內容, media-type, 在不在 spine, manifest id, 屬性)
     toc_entries = []
     if cover_png:

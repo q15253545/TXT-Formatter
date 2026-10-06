@@ -44,15 +44,43 @@ def _strip_joiners(text: str) -> tuple[str, int]:
     return "".join(parts), removed
 
 
-def strip_invisible_chars(text: str) -> tuple[str, int, int]:
-    """移除 BOM（strip_stray_bom）與零寬字元，回傳（清理後文字, BOM 個數, 零寬字元個數）。"""
+# QPlainTextEdit 的 block 跟 "\n" 不是一對一：U+2028 在 block 裡算換行（toPlainText 卻給 "\n"），
+# U+2029、單獨的 "\r"、U+FDD0／U+FDD1（Qt 內部的框架記號）會自己切出新的 block。
+# raw_lines 用 "\n" 切、編輯器數 block，這些字元留著行號就對不上，刪章、設層級會動到別的行。
+# 前三種本來就是換行，換成 "\n"；U+FDD0、U+FDD1 是非字元，直接刪。
+_LINE_BREAKS = re.compile("\r\n?|[\u2028\u2029]")
+_FRAME_MARKS = re.compile("[\ufdd0\ufdd1]")
+
+
+def normalize_line_breaks(text: str) -> tuple[str, int]:
+    """把編輯器會當成換行的字元換成 "\\n"，回傳（文字, 換掉＋刪掉的個數；CRLF 不算）。
+
+    U+00A0（不換行空格）也換成一般空格：toPlainText 本來就會這樣換，開檔時先換掉，raw_lines
+    才跟編輯器裡的文字一致。行數不受影響、排版本來就把它當空白，所以不另外計數。"""
+    changed = 0
+    if "\r" in text or "\u2028" in text or "\u2029" in text:
+        crlf = text.count("\r\n")
+        text, count = _LINE_BREAKS.subn("\n", text)
+        changed += count - crlf
+    if "\ufdd0" in text or "\ufdd1" in text:
+        text, count = _FRAME_MARKS.subn("", text)
+        changed += count
+    if "\xa0" in text:
+        text = text.replace("\xa0", " ")
+    return text, changed
+
+
+def strip_invisible_chars(text: str) -> tuple[str, int, int, int]:
+    """移除 BOM（strip_stray_bom）與零寬字元、統一換行（normalize_line_breaks），回傳
+    （清理後文字, BOM 個數, 零寬字元個數, 換成換行或刪掉的段落分隔字元個數）。"""
     text, boms = strip_stray_bom(text)
     zero_width = joiners = 0
     if "\u200b" in text or "\u2060" in text:
         text, zero_width = _ZERO_WIDTH.subn("", text)
     if "\u200c" in text or "\u200d" in text:
         text, joiners = _strip_joiners(text)
-    return text, boms, zero_width + joiners
+    text, breaks = normalize_line_breaks(text)
+    return text, boms, zero_width + joiners, breaks
 
 
 def detect_line_ending(file_path: str) -> str:

@@ -11,7 +11,9 @@ import xml.etree.ElementTree as ElementTree
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _PARAGRAPH = _W + "p"
 _TEXT = _W + "t"
-_SKIPPED = {_W + "del", _W + "delText", _W + "instrText", _W + "moveFrom"}
+# mc:AlternateContent 的 mc:Fallback 是給舊版 Word 的備份（文字方塊用 VML 再存一次），讀了文字會重複
+_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+_SKIPPED = {_W + "del", _W + "delText", _W + "instrText", _W + "moveFrom", _FALLBACK}
 _TAB = _W + "tab"
 _BREAKS = {_W + "br", _W + "cr"}
 _HYPHENS = {_W + "noBreakHyphen": "-", _W + "softHyphen": ""}
@@ -50,19 +52,28 @@ def read_docx_text(path: str) -> str:
     try:
         with zipfile.ZipFile(path) as archive:
             data = archive.read("word/document.xml")
-    except (zipfile.BadZipFile, KeyError) as error:
-        raise DocxError(str(error)) from error
+    except zipfile.BadZipFile as error:
+        raise DocxError("檔案已損壞，或不是真正的 Word 檔（.docx）。舊版的 .doc 請先用 Word 另存成 .docx。") from error
+    except KeyError as error:
+        raise DocxError("檔案裡找不到正文，可能不是 Word 文件。請用 Word 打開後另存成 .docx 再試。") from error
     try:
         root = ElementTree.fromstring(data)
     except ElementTree.ParseError as error:
-        raise DocxError(str(error)) from error
+        raise DocxError("文件內容損壞，讀不出文字。請用 Word 打開後另存一份再試。") from error
     body = root.find(_W + "body")
     if body is None:
         return ""
-    lines = []
-    for paragraph in body.iter(_PARAGRAPH):
-        lines.append(_paragraph_text(paragraph))
-    return "\n".join(lines)
+    return "\n".join(_paragraph_text(paragraph) for paragraph in _paragraphs(body))
+
+
+def _paragraphs(node):
+    """照文件順序列出段落（文字方塊裡的段落接在所在段落後面），不走進 mc:Fallback。"""
+    for child in node:
+        if child.tag == _FALLBACK:
+            continue
+        if child.tag == _PARAGRAPH:
+            yield child
+        yield from _paragraphs(child)
 
 
 def is_docx(path: str) -> bool:

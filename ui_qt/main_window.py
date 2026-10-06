@@ -49,7 +49,7 @@ from core.file_merge import merge_texts, natural_key
 from core.file_split import section_filenames, split_sections
 from core.chapter_update import dominant_script
 from core.encoding import detect_line_ending, looks_misdecoded, smart_detect_encoding, strip_invisible_chars
-from core.file_io import read_text, read_text_lossy, write_text_atomic
+from core.file_io import describe_file_error, read_text, read_text_lossy, write_text_atomic
 from core.filename_meta import (
     DEFAULT_COMPLETED_TEMPLATE, DEFAULT_ONGOING_TEMPLATE, build_smart_filename, extract_filename_metadata,
     filename_fields, filename_template_for, same_book_files,
@@ -863,6 +863,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if not self._confirm_discard_changes():
             event.ignore()
             return
+        if getattr(self, "_settings_reset", False):     # 還原預設後沒能自己重開：不寫回舊設定
+            event.accept()
+            return
         geometry = self.normalGeometry() if self.isMaximized() else self.geometry()
         save_window_state(geometry.x(), geometry.y(), geometry.width(), geometry.height(),
                           self.isMaximized())
@@ -987,12 +990,13 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                     encoding = None if is_docx(path) or is_epub(path) else smart_detect_encoding(path)
                     content, _damaged, _encoding = self._read_document(path, encoding, remember)
                 except OSError as error:
-                    skipped.append((name, i18n.T("讀取失敗") + f"：{error.strerror or error}"))
+                    log.warning("開啟 %s 失敗：%r", path, error)
+                    skipped.append((name, i18n.T("讀取失敗") + "：" + i18n.T(describe_file_error(error))))
                     continue
                 if content is None:
                     skipped.append((name, i18n.T("讀取失敗") if "error" in remember else i18n.T("編碼不符，已略過")))
                     continue
-                content, _boms, _zero_width = strip_invisible_chars(content)
+                content, _boms, _zero_width, _breaks = strip_invisible_chars(content)
                 parts.append((path, content))
             progress.setValue(len(paths))
         finally:
@@ -1024,18 +1028,19 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         if merged is not None:
             # 每個檔讀的時候已經各自解碼、移除過 BOM 與零寬字元
             content, damaged, encoding = merged[0], 0, "utf-8"
-            removed_boms = removed_zero_width = 0
+            removed_boms = removed_zero_width = line_breaks = 0
         else:
             encoding = (WORD_ENCODING if word else EPUB_ENCODING if epub else
                         encoding or smart_detect_encoding(path))
             try:
                 content, damaged, encoding = self._read_document(path, encoding)
             except OSError as error:
-                dialogs.error(self, "讀取失敗", f"無法開啟檔案：\n{path}\n\n{error}")
+                log.warning("開啟 %s 失敗：%r", path, error)
+                dialogs.error(self, "讀取失敗", f"無法開啟檔案：\n{path}\n\n{describe_file_error(error)}")
                 return
             if content is None:
                 return
-            content, removed_boms, removed_zero_width = strip_invisible_chars(content)
+            content, removed_boms, removed_zero_width, line_breaks = strip_invisible_chars(content)
 
         self.close_find_bar()
         self._drop_line_caches()
@@ -1093,12 +1098,14 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             status += i18n.T(f"；已移除 {removed_boms} 個夾在行首的 BOM 字元（多檔串接留下的，會讓章節辨識失敗）")
         if removed_zero_width:
             status += i18n.T(f"；已移除 {removed_zero_width} 個零寬字元（網頁複製留下的，會讓章節辨識失敗）")
+        if line_breaks:
+            status += i18n.T(f"；已把 {line_breaks} 個段落分隔字元換成一般換行（編輯器會把它當成換行，留著行號會對不上）")
         if not packaged and looks_misdecoded(content):
             status += i18n.T("；文字看起來像亂碼：編碼可能不對，在書籍資料的「讀取編碼」換一種")
         self._show_status(status, translated=True)
-        log.info("載入 %s：%.2f MB、編碼 %s、%d 行、目錄 %d 項（推定卷 %d）、移除 BOM %d 個、零寬字元 %d 個",
+        log.info("載入 %s：%.2f MB、編碼 %s、%d 行、目錄 %d 項（推定卷 %d）、移除 BOM %d 個、零寬字元 %d 個、換行字元 %d 個",
                  display_name, size_mb, encoding, len(self.raw_lines), len(self.chapter_raw_map),
-                 len(self.virtual_volume_items), removed_boms, removed_zero_width)
+                 len(self.virtual_volume_items), removed_boms, removed_zero_width, line_breaks)
         self._set_document_actions_enabled(True)
         if self._pending_side_panel:
             self._open_pending_side_panel()
@@ -1191,7 +1198,7 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                     return text, 0, EPUB_ENCODING
                 return read_docx_text(path), 0, WORD_ENCODING
             except (EpubError, DocxError) as error:
-                log.warning("讀取%s失敗：%s", kind, error)
+                log.warning("讀取%s失敗：%s（%r）", kind, error, error.__cause__)
                 if remember is not None:
                     remember["error"] = str(error)
                 else:
@@ -1600,7 +1607,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             # 加 BOM：沒有 BOM 的 UTF-8，Windows 檔案總管的預覽、舊版記事本會當成系統編碼（Big5）顯示成亂碼
             write_text_atomic(path, content, encoding="utf-8-sig")
         except (OSError, UnicodeError) as error:
-            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{path}\n\n{error}\n\n原本的檔案沒有被更動。")
+            log.warning("寫入 %s 失敗：%r", path, error)
+            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{path}\n\n"
+                          f"{describe_file_error(error, writing=True)}\n\n原本的檔案沒有被更動。")
             return False
         self._ui_state["last_export_dir"] = os.path.dirname(path)
         if stripped:
@@ -1691,7 +1700,9 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         try:
             build_epub(path, title, author, sections, front, self._epub_cover_png(title, author), language)
         except OSError as error:
-            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{path}\n\n{error}\n\n原本的檔案沒有被更動。")
+            log.warning("寫入 %s 失敗：%r", path, error)
+            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{path}\n\n"
+                          f"{describe_file_error(error, writing=True)}\n\n原本的檔案沒有被更動。")
             return False
         self._ui_state["last_export_dir"] = os.path.dirname(path)
         self._show_status(i18n.T("已匯出：") + path + i18n.T(f"（EPUB，目錄 {len(sections)} 項）"), translated=True)
@@ -1726,7 +1737,8 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
                     content, _count = strip_export_markers(content)
                 write_text_atomic(os.path.join(folder, name), content, encoding="utf-8-sig")
         except (OSError, UnicodeError) as error:
-            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{folder}\n\n{error}")
+            log.warning("寫入 %s 失敗：%r", folder, error)
+            dialogs.error(self, "存檔失敗", f"無法寫入檔案：\n{folder}\n\n{describe_file_error(error, writing=True)}")
             return False
         self._ui_state["last_export_dir"] = parent
         self._show_status(i18n.T(f"已匯出 {len(names)} 個檔案到：") + folder, translated=True)
@@ -2122,14 +2134,12 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
         """章節管理的預覽開關開著：目錄上方寫出預覽了什麼，套用到本文、取消預覽都在這裡。"""
         names = [name for on, name in ((self._merge_titles, "自動合併標題"),
                                        (self._infer_volumes, "自動補齊卷號與卷名")) if on]
-        if not names:
+        # 這本書沒有要改的地方就不出現：出現了使用者會順手按「取消預覽」，開關跟著關掉，提醒反而沒了
+        preview = self._toc_preview_lines() if names else None
+        if not preview:
             self.preview_bar.hide()
             return
-        preview = self._toc_preview_lines()
-        text = "預覽中：" + "、".join(names)
-        text += f"（{'、'.join(preview[1])}）" if preview else "（這本書沒有要改的地方）"
-        i18n.set_text(self.preview_bar.label, text)
-        self.preview_apply_button.setVisible(preview is not None)
+        i18n.set_text(self.preview_bar.label, "預覽中：" + "、".join(names) + f"（{'、'.join(preview[1])}）")
         self.preview_bar.show()
 
     def cancel_toc_preview(self):
@@ -2421,7 +2431,14 @@ class MainWindow(WindowStateMixin, ToolWindowsMixin, TocEditMixin, QMainWindow):
             program, arguments = sys.executable, ["-m", "ui_qt"]
         if self.input_file:
             arguments.append(self.input_file)
-        QProcess.startDetached(program, arguments, os.getcwd())
+        started, _pid = QProcess.startDetached(program, arguments, os.getcwd())
+        if not started:
+            # 視窗留著讓使用者存檔：關閉時照樣問要不要存，但不把舊設定寫回去
+            self._settings_reset = True
+            app_log.log.warning("還原預設：無法重新開啟 %s %s", program, arguments)
+            dialogs.error(parent or self, "還原預設",
+                          "設定已還原成預設，但程式沒辦法自己重新開啟。\n請先存好檔案，關閉程式後再重新打開。")
+            return
         # 關閉時不再把目前的設定寫回去（剛刪掉的檔案會又出現）
         self._restarting = True
         if parent is not None:

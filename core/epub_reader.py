@@ -14,6 +14,8 @@ import xml.etree.ElementTree as ElementTree
 from html.parser import HTMLParser
 from urllib.parse import unquote
 
+from .file_io import describe_file_error
+
 _CONTAINER = "{urn:oasis:names:tc:opendocument:xmlns:container}"
 _OPF = "{http://www.idpf.org/2007/opf}"
 _DC = "{http://purl.org/dc/elements/1.1/}"
@@ -121,10 +123,12 @@ def _decode(data: bytes, href: str) -> str:
 def _opf_path(archive: zipfile.ZipFile) -> str:
     try:
         container = ElementTree.fromstring(archive.read("META-INF/container.xml"))
+    except ElementTree.ParseError as error:
+        raise EpubError("書的設定檔（container.xml）損壞。請重新下載這本書，或用其他工具修復後再試。") from error
     except KeyError:
         names = [name for name in archive.namelist() if name.lower().endswith(".opf")]
         if not names:
-            raise EpubError("找不到 OPF（不是 EPUB 檔）")
+            raise EpubError("檔案裡找不到書的目錄檔（OPF），可能不是 EPUB 檔。")
         return names[0]
     rootfile = container.find(f".//{_CONTAINER}rootfile")
     if rootfile is None or not rootfile.get("full-path"):
@@ -153,14 +157,16 @@ def read_epub(path: str) -> tuple:
     """回傳（整本的文字（一行一段）, {"title", "author"}）。"""
     try:
         archive = zipfile.ZipFile(path)
-    except (zipfile.BadZipFile, OSError) as error:
-        raise EpubError(str(error)) from error
+    except zipfile.BadZipFile as error:
+        raise EpubError("檔案已損壞，或不是真正的 EPUB 檔（可能只是改了副檔名）。請重新下載這本書再試。") from error
+    except OSError as error:
+        raise EpubError(describe_file_error(error)) from error
     with archive:
         opf_path = _opf_path(archive)
         try:
             opf = ElementTree.fromstring(archive.read(opf_path))
         except (KeyError, ElementTree.ParseError) as error:
-            raise EpubError(str(error)) from error
+            raise EpubError("書的目錄檔（OPF）不見了或損壞，讀不出章節順序。請重新下載這本書再試。") from error
         base = posixpath.dirname(opf_path)
         metadata = opf.find(f"{_OPF}metadata")
         info = {"title": "", "author": ""}
@@ -193,7 +199,7 @@ def read_epub(path: str) -> tuple:
                 # 目錄（spine）列了卻不在檔案裡：略過的話會變成少章的書卻顯示匯入成功
                 raise EpubError(f"缺少章節檔：{href}") from error
             except (zipfile.BadZipFile, zlib.error, OSError, NotImplementedError) as error:
-                raise EpubError(f"章節檔 {href} 損壞：{error}") from error
+                raise EpubError(f"章節檔 {href} 損壞。請重新下載這本書再試。") from error
             markup = _decode(data, href)
             chunk = _document_lines(markup)
             if chunk:

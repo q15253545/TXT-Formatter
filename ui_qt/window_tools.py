@@ -899,7 +899,7 @@ class ToolWindowsMixin:
             path, None if is_docx(path) or is_epub(path) else smart_detect_encoding(path))
         if content is None:
             return None
-        content, _boms, _zero_width = strip_invisible_chars(content)
+        content, _boms, _zero_width, _breaks = strip_invisible_chars(content)
         new_lines = content.split("\n")
         self._sync_raw_lines()
         self._ensure_toc_current()
